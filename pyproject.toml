@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "thesis-dnr-gnn-dev"
+version = "0.1.0"
+description = ""
+authors = ["Dennis Hollanders <dennis.hollanders17@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "3.10"
+folium = "^0.18.0"
+networkx = "^3.4.2"
+geopandas = "^1.0.1"
+matplotlib = "^3.9.2"
+shapely = "^2.0.6"
+pyshp = "^2.3.1"
+numpy = "<2.0"
+ipykernel = "^6.29.5"
+jupyter = "^1.1.1"
+scipy = "<1.14"
+plotly = "^5.24.1"
+pandapower = "2.14.11"
+igraph = "^0.11.8"
+cbsodata = "^1.3.5"
+fiona = "^1.10.1"
+dask = "^2024.12.1"
+pyarrow = "^18.1.0"
+torch = "^2.5.1"
+torch-geometric = "^2.6.1"
+scikit-learn = "^1.6.1"
+wandb = "^0.19.2"
+lightning = "^2.5.0.post0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
