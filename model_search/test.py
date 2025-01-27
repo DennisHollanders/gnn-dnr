@@ -4,28 +4,34 @@ from torch_geometric.datasets import Planetoid
 import torch_geometric.transforms as T
 from torch_geometric.nn import GCNConv
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torch.utils.data import DataLoader
-import wandb
-import os
 from dotenv import load_dotenv
+import wandb
 
+# Load environment variables
+load_dotenv('WANDB')
 
 # ----------------------------
-# 1. Define LightningDataModule
+# 1. Data Module with Auto-Download
 # ----------------------------
 class CoraDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size=64):
+    def __init__(self, data_dir='./data', batch_size=64):
         super().__init__()
+        self.data_dir = data_dir
         self.batch_size = batch_size
-        self.transform = T.NormalizeFeatures()
+        self.transform = T.Compose([
+            T.NormalizeFeatures(),
+            T.RandomNodeSplit(split='train_rest', num_val=500, num_test=500)
+        ])
 
     def prepare_data(self):
-        Planetoid(root='./data', name='Cora')
+        # Auto-download if not exists
+        Planetoid(root=self.data_dir, name='Cora', transform=self.transform)
 
     def setup(self, stage=None):
-        dataset = Planetoid(root='./data', name='Cora', transform=self.transform)
+        dataset = Planetoid(root=self.data_dir, name='Cora', transform=self.transform)
         self.data = dataset[0]
 
     def train_dataloader(self):
@@ -38,13 +44,12 @@ class CoraDataModule(pl.LightningDataModule):
         return DataLoader([self.data], batch_size=self.batch_size)
 
 # ----------------------------
-# 2. Define LightningModule
+# 2. Model Definition
 # ----------------------------
 class GNNModel(pl.LightningModule):
     def __init__(self, in_channels=1433, hidden_channels=64, out_channels=7, lr=0.01):
         super().__init__()
         self.save_hyperparameters()
-        
         self.conv1 = GCNConv(in_channels, hidden_channels)
         self.conv2 = GCNConv(hidden_channels, out_channels)
         self.lr = lr
@@ -78,53 +83,37 @@ class GNNModel(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
 # ----------------------------
-# 3. Main Training Routine
+# 3. Main Execution
 # ----------------------------
 if __name__ == '__main__':
-
-
-    # Load API key directly
-    load_dotenv('WANDB')
-    wandb.login(key=os.getenv('WANDB_API_KEY'))
     pl.seed_everything(42)
+    
+    # Initialize WandB
+    wandb.login(key=os.getenv('WANDB_API_KEY'))
+    wandb_logger = WandbLogger(project='gnn-cora', log_model=True)
 
-    # Initialize WandB logger
-    wandb_logger = WandbLogger(
-        project='gnn-cora',
-        log_model='all',  # Log model checkpoints
-        save_dir='./logs/',
-        tags=['gcn', 'cora'],
-        entity='your-wandb-team'  # Optional: if using team account
-    )
+    # Ensure data directory exists
+    os.makedirs('./data', exist_ok=True)
 
+    # Initialize components
     dm = CoraDataModule()
     model = GNNModel()
-
+    
     # Callbacks
     early_stop = EarlyStopping(monitor='val_loss', patience=5, mode='min')
-    checkpoint = ModelCheckpoint(
-        monitor='val_acc',
-        mode='max',
-        save_top_k=1,
-        dirpath=wandb_logger.experiment.dir  # Save checkpoints to WandB directory
-    )
+    checkpoint = ModelCheckpoint(monitor='val_acc', mode='max', save_top_k=1)
 
-    # Trainer configuration
+    # Trainer
     trainer = pl.Trainer(
         accelerator='gpu',
         devices=1,
         max_epochs=100,
         logger=wandb_logger,
         callbacks=[early_stop, checkpoint],
-        deterministic=True,
+        deterministic=True
     )
 
-    # Log model architecture
-    wandb_logger.watch(model, log='all', log_freq=100)
-
-    # Train and test
+    # Training
     trainer.fit(model, dm)
     trainer.test(datamodule=dm)
-
-    # Finish WandB run
     wandb.finish()

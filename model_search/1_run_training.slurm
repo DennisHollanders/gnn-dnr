@@ -1,8 +1,7 @@
-# load .env
 #!/bin/bash
-#SBATCH --job-name=gnn_wandb      # Job name
-#SBATCH --output=gnn_wandb_%j.log # Output log
-#SBATCH --error=gnn_wandb_%j.err  # Error log
+#SBATCH --job-name=gnn_train
+#SBATCH --output=logs/slurm-%j.out
+#SBATCH --error=logs/slurm-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
@@ -11,16 +10,17 @@
 #SBATCH --time=1-00:00:00
 #SBATCH --partition=gpu
 
-# Load system modules (CUDA, Python, etc.)
+# Load modules
 module purge
 module load cuda/11.7
 
-# Activate Poetry environment (no manual dependency handling needed)
-export PYTHONPATH=/path/to/your/project:$PYTHONPATH
+# Setup environment
+export PYTHONPATH=$PWD:$PYTHONPATH
 source $(poetry env info --path)/bin/activate
 
-# Set WandB API key 
-export WANDB_API_KEY = 2c88dc1e7e7f2e8531ddf5de32c2aeddb391deee
+# Create required directories
+mkdir -p ./data
+mkdir -p ./logs
 
-# Run with WandB integration
-python gnn_train_wandb.py
+# Run training
+python gnn_train.py
