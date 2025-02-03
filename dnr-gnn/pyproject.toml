@@ -29,6 +29,7 @@ lightning = "^2.5.0.post0"
 gurobipy = "11.0.3"
 lxml = "5.2.2"
 pyomo = "6.7.3"
+seaborn = "^0.13.2"
 
 
 
