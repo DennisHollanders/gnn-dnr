@@ -17,21 +17,20 @@ mkdir -p ./data
 mkdir -p ./logs
 
 # Load modules
-module load python
-
-# Ensure Poetry is available (if not globally installed)
-export PATH="$HOME/.local/bin:$PATH"
+module load Python
+module load CUDA/11.7.0
+module load poetry/1.8.3-GCCcore-13.3.0
 
 # Activate the Poetry environment
-source $(poetry env info --path)/bin/activate
+source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-_o2-hQZ5-py3.12/bin/activate
 
-# module load CUDA/11.7.0
-# module load poetry/1.8.3-GCCcore-13.3.0
-poetry install 
+# Verify Python version
+python --version 
 
-# Setup environment
-export PYTHONPATH=$PWD:$PYTHONPATH
-source $(poetry env info --path)/bin/activate
+# Navigate to the project directory
+cd $HOME/gnn-dnr
+
+dir 
 
 # Run training
-python gnn_train.py
+python model_search/test.py

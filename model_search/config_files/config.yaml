@@ -1,0 +1,17 @@
+data_folder: "C:/Users/denni/Documents/thesis_dnr_gnn_dev/data/1739737645.4646165"
+max_epochs: 100
+project: "graph-autoencoder"
+train_ratio: 0.7
+val_ratio: 0.15
+test_ratio: 0.15
+batch_size: 1
+input_dim: 4
+hidden_dims: [64, 32, 16]
+latent_dim: 8
+learning_rate: 0.001
+weight_decay: 1e-5
+loss_fn: "mse"
+optimizer: "adam"
+scheduler: null
+activation: "relu"
+dropout_rate: 0.0
