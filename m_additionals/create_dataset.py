@@ -13,6 +13,7 @@ if src_path not in sys.path:
     sys.path.append(src_path)
     
 from electrify_subgraph2 import transform_subgraphs
+from logger_setup import logger 
 
 date_str = datetime.now().strftime("%d%m%Y")
 save_location = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / f"transformed_subgraphs_{date_str}"
@@ -81,24 +82,7 @@ kwargs = {
 }
 
 print(f"graphs to be generated: {len(subgraphs) * kwargs['n_samples_per_graph'] * kwargs['n_loadcase_time_intervals']}")
+logger.info(f"Graphs to be generated: {len(subgraphs) * kwargs['n_samples_per_graph'] * kwargs['n_loadcase_time_intervals']}")
 
-logger = None
-if kwargs.get("logging", False):
-        os.makedirs(kwargs["save_location"], exist_ok=True)
-        log_file = os.path.join(kwargs["save_location"], "process_log.log")
-
-        # Configure logger
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-        logger = logging.getLogger()
-        file_handler = logging.FileHandler(log_file, mode="w")
-        formatter = logging.Formatter("%(levelname)s - %(message)s")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-def log_info(message):
-    if logger:
-        logger.info(message)
-
-log_info(f"Graphs to be generated: {len(subgraphs) * kwargs['n_samples_per_graph'] * kwargs['n_loadcase_time_intervals']}")
-
+print("Starting transformation")
 new_subgraphs = transform_subgraphs(subgraphs, distributions,dfs,kwargs, logger)

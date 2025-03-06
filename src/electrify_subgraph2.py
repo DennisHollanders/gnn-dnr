@@ -23,6 +23,8 @@ import json
 from shapely.geometry import Point, LineString
 import re
 
+from logger_setup import logger 
+print(f"opened logger:{logger}")
 
 # Ensure subgraph nodes have valid positions
 def get_subgraph_centroid(subgraph):
@@ -117,7 +119,7 @@ def initialize_distributions(distributions, logger=None):
             raise ValueError(f"Unsupported distribution type: {dist_type}")
 
         distribution_samples[dist_name].append(sample)
-        log_info(f"Sampled {dist_name} -> {sample}")
+        logger.info(f"Sampled {dist_name} -> {sample}")
         return sample
 
     dist_callables = {}
@@ -169,7 +171,7 @@ def find_switch_edges_in_non_radial(subgraph_to_adapt):
 def modify_subgraph(subgraph, kwargs, dist_callable):
     if nx.is_frozen(subgraph):
         subgraph = nx.Graph(subgraph)     
-    log_info('Create new modified graph \n ___________________________')
+    logger.info('Create new modified graph \n ___________________________')
     order_added = 0
     failed_attempts = 0 
 
@@ -198,8 +200,8 @@ def modify_subgraph(subgraph, kwargs, dist_callable):
                 print("Failed to add edges. Stopping.")
                 break
 
-    log_info(f"cycles_added: {order_added}")
-    log_info(f"convex_layers_used: {convex_layers_to_use}")
+    logger.info(f"cycles_added: {order_added}")
+    logger.info(f"convex_layers_used: {convex_layers_to_use}")
     print("shouldplot_added_edge", kwargs["plot_added_edge"])
     if kwargs["plot_added_edge"]:
         fig = plt.figure(figsize=(12, 6))
@@ -634,7 +636,7 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
             for sampled_idx in range(kwargs['n_samples_per_graph']):
                 suffix = suffixes[sampled_idx % len(suffixes)]
                 if kwargs['modify_subgraph_each_sample'] or sampled_idx == 0:
-                    log_info(f"Modifying subgraph {original_subgraph} for sample {sampled_idx + 1}")
+                    logger.info(f"Modifying subgraph {original_subgraph} for sample {sampled_idx + 1}")
                     modified_subgraph = modify_subgraph(original_subgraph, kwargs, dist_callable)
                 else:
                     modified_subgraph = original_subgraph
@@ -663,7 +665,7 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
                     if electrified_network.converged:
                         load_case_of_modified_subgraph[str(date_time)] = {"network": electrified_network, "info": info}
                     else:
-                        log_info(f"Power flow failed for subgraph {original_subgraph} at {date_time}")
+                        logger.info(f"Power flow failed for subgraph {original_subgraph} at {date_time}")
                         load_case_of_modified_subgraph[str(date_time)] = {"network": None, "info": info}
 
                 dict_of_modified_subgraphs[suffix] = {
@@ -675,7 +677,7 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
             subgraph_counter += 1
 
     formatted_subgraphs = pprint.pformat(electrified_subgraphs, indent=4, width=120)
-    log_info(f"Electrified subgraphs:\n{formatted_subgraphs}")
+    logger.info(f"Electrified subgraphs:\n{formatted_subgraphs}")
     return electrified_subgraphs
 
 def transform_subgraphs(subgraphs: List[nx.Graph],
@@ -687,20 +689,20 @@ def transform_subgraphs(subgraphs: List[nx.Graph],
     print("start")
 
     if kwargs['is_iterate']:
-        log_info("Iterating over all subgraphs.")
+        logger.info("Iterating over all subgraphs.")
         print("iterating over all subgraphs")
         electrified_graphs = electrify_graphs(subgraphs, dfs, kwargs, dist_callables)
         print("got here")
 
     else:
-        log_info("Sampling subgraphs.")
+        logger.info("Sampling subgraphs.")
         print("sampling subgraphs")
         n_busses_target = dist_callables["n_busses"]()
         n_busses_range = (n_busses_target - kwargs['range'], n_busses_target + kwargs['range'])
         filtered_subgraphs = [g for g in subgraphs if n_busses_range[0] <= len(g.nodes) <= n_busses_range[1]]
 
         if not filtered_subgraphs:
-            log_info(f"No subgraphs found in range {n_busses_range}. Sampling randomly.")
+            logger.info(f"No subgraphs found in range {n_busses_range}. Sampling randomly.")
             graphs_to_electrify = random.sample(subgraphs, kwargs['amount_of_subgraphs'])
         else:
             graphs_to_electrify = random.choices(filtered_subgraphs, k=kwargs['amount_of_subgraphs'])
@@ -719,7 +721,7 @@ def transform_subgraphs(subgraphs: List[nx.Graph],
     if kwargs["save"]:
         save_graph_data(electrified_graphs, kwargs, distributions, distribution_samples)
 
-    log_info("Transformation process completed.")
+    logger.info("Transformation process completed.")
 
     # Ensure log handlers are closed after the process
     if logger:
