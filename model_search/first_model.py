@@ -22,6 +22,11 @@ from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data, DataLoader
 from torch_geometric.utils import from_networkx
 from torch_geometric.utils import to_networkx
+import copy
+import optuna
+from pathlib import Path
+
+torch.manual_seed(0)
 
 from typing import Optional, Dict, Any, List, Union
 
@@ -29,9 +34,11 @@ wandb_logger = WandbLogger(log_model="all")
 trainer = Trainer(logger=wandb_logger)
 
 def load_graph_data(folder_path):
-    graph_features_path = os.path.join(folder_path, "graph_features.pkl")
-    nx_graphs_path = os.path.join(folder_path, "networkx_graphs.pkl")
-    pp_networks_path = os.path.join(folder_path, "pandapower_networks.json")
+    folder_path = Path(folder_path)  
+    graph_features_path = folder_path / "graph_features.pkl"
+    nx_graphs_path = folder_path / "networkx_graphs.pkl"
+    pp_networks_path = folder_path / "pandapower_networks.json"
+    
     with open(graph_features_path, "rb") as f:
         graph_features = pkl.load(f)
     with open(nx_graphs_path, "rb") as f:
@@ -45,7 +52,7 @@ def split_dataset(dataset, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     train_size = int(total * train_ratio)
     val_size = int(total * val_ratio)
     test_size = total - train_size - val_size
-    return torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
+    return torch.utils.data.random_split(dataset, [train_size, val_size, test_size],seed=1)
 
 def unify_node_attributes(nx_graph, required_node_attrs):
     for node in nx_graph.nodes():
@@ -137,61 +144,42 @@ def create_pyg_dataset(folder_path):
     print(f"total graphs: {total}; Skipped: {skipped}; Processed: {len(data_list)}")
     return data_list
 
-def get_pyg_loader(folder_path, batch_size=1, shuffle=True):
+def get_pyg_loader(folder_path, batch_size=4, shuffle=True):
     data_list = create_pyg_dataset(folder_path)
     loader = DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
     return loader
 
 class GraphAutoencoder(pl.LightningModule):
     def __init__(self, input_dim: int, hidden_dims: list = [64, 32, 16],
-                 latent_dim: int = 8, learning_rate: float = 1e-3, weight_decay: float = 1e-5, 
+                 latent_dim: int = 8, learning_rate: float = 1e-3, weight_decay: float = 1e-5,
                  loss_fn: str = 'mse', optimizer: str = 'adam', scheduler: str = None,
                  activation: str = 'prelu', dropout_rate: float = 0.0):
         super().__init__()
         self.save_hyperparameters()
         self.hparams.learning_rate = float(self.hparams.learning_rate)
         self.hparams.weight_decay = float(self.hparams.weight_decay)
-        
         activation_map = {'relu': F.relu,
                           'leaky_relu': F.leaky_relu,
                           'elu': F.elu,
                           'selu': F.selu,
-                          'prelu': F.prelu} # should add weight
+                          'prelu': F.prelu}
         self.activation = activation_map.get(activation, F.relu)
-        
-        # Encoder layers 
-        self.encoder_layers = torch.nn.ModuleList()
+        self.encoder_layers = nn.ModuleList()
         layer_sizes = [input_dim] + hidden_dims
-        for i in range(len(layer_sizes) - 1):
-            self.encoder_layers.append(
-                pyg_nn.GCNConv(layer_sizes[i], layer_sizes[i+1])
-            )
-        
-        # Latent representation
-        self.fc_mu = torch.nn.Linear(hidden_dims[-1], latent_dim)
-        self.fc_logvar = torch.nn.Linear(hidden_dims[-1], latent_dim)
-        
-        # Decoder layersrs
-        self.decoder_layers = torch.nn.ModuleList()
+        for i in range(len(layer_sizes)-1):
+            self.encoder_layers.append(pyg_nn.GCNConv(layer_sizes[i], layer_sizes[i+1]))
+        self.fc_latent = nn.Linear(hidden_dims[-1], latent_dim)
+        self.decoder_layers = nn.ModuleList()
         reversed_dims = list(reversed(hidden_dims))
         layer_sizes = [latent_dim] + reversed_dims
-        for i in range(len(layer_sizes) - 1):
-            self.decoder_layers.append(
-                torch.nn.Linear(layer_sizes[i], layer_sizes[i+1])
-            )
-        self.decoder_out = torch.nn.Linear(reversed_dims[-1], input_dim)
-        
-        # Metrics
+        for i in range(len(layer_sizes)-1):
+            self.decoder_layers.append(nn.Linear(layer_sizes[i], layer_sizes[i+1]))
+        self.decoder_out = nn.Linear(reversed_dims[-1], input_dim)
         self.train_loss_metric = torchmetrics.MeanMetric()
         self.val_loss_metric = torchmetrics.MeanMetric()
-        self.dropout = torch.nn.Dropout(dropout_rate)
-        self.encoder_batchnorms = torch.nn.ModuleList([
-            torch.nn.BatchNorm1d(dim) for dim in hidden_dims
-        ])
-        reversed_dims = list(reversed(hidden_dims))
-        self.decoder_batchnorms = torch.nn.ModuleList([
-            torch.nn.BatchNorm1d(dim) for dim in reversed_dims
-        ])
+        self.dropout = nn.Dropout(dropout_rate)
+        self.encoder_batchnorms = nn.ModuleList([nn.BatchNorm1d(dim) for dim in hidden_dims])
+        self.decoder_batchnorms = nn.ModuleList([nn.BatchNorm1d(dim) for dim in reversed_dims])
         
     def encode(self, data):
         x, edge_index = data.x.float(), data.edge_index
@@ -199,16 +187,10 @@ class GraphAutoencoder(pl.LightningModule):
             x = layer(x, edge_index)
             x = self.activation(x)
             x = bn(x)
-        mu = self.fc_mu(x)
-        logvar = self.fc_logvar(x)
-        return mu, logvar
+        latent = self.fc_latent(x)
+        return latent
     
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-    
-    def decode(self, z, data):
+    def decode(self, z):
         for layer, bn in zip(self.decoder_layers, self.decoder_batchnorms):
             z = layer(z)
             z = self.activation(z)
@@ -216,56 +198,36 @@ class GraphAutoencoder(pl.LightningModule):
         return self.decoder_out(z)
         
     def training_step(self, batch, batch_idx):
-        batch.x = batch.x.float()  
-        mu, logvar = self.encode(batch)
-        z = self.reparameterize(mu, logvar)
-        x_hat = self.decode(z, batch)
+        batch.x = batch.x.float()
+        z = self.encode(batch)
+        x_hat = self.decode(z)
         if self.hparams.loss_fn == 'mse':
-            recon_loss = F.mse_loss(x_hat, batch.x)
+            loss = F.mse_loss(x_hat, batch.x)
         elif self.hparams.loss_fn == 'mae':
-            recon_loss = F.l1_loss(x_hat, batch.x)
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon_loss + kl_loss
+            loss = F.l1_loss(x_hat, batch.x)
         self.log("train_loss", loss, prog_bar=True)
         self.train_loss_metric(loss)
         return loss
     
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         batch.x = batch.x.float()
-        mu, logvar = self.encode(batch)
-        z = self.reparameterize(mu, logvar)
-        x_hat = self.decode(z, batch)
-        if self.hparams.loss_fn == 'mse':
-            val_loss = F.mse_loss(x_hat, batch.x)
-        elif self.hparams.loss_fn == 'mae':
-            val_loss = F.l1_loss(x_hat, batch.x)
-        self.log("val_loss", val_loss, prog_bar=True)
-        self.val_loss_metric(val_loss)
-        #if batch_idx == 0:
-        #    self._log_reconstructions(batch.x, x_hat)
-        return val_loss
+        z = self.encode(batch)
+        x_hat = self.decode(z)
+        loss = F.mse_loss(x_hat, batch.x) if self.hparams.loss_fn == 'mse' else F.l1_loss(x_hat, batch.x)
+        if dataloader_idx == 0:
+            self.log("val_loss_synthetic", loss, prog_bar=True)
+        else:
+            self.log("val_loss_real", loss, prog_bar=True)
+        self.val_loss_metric(loss)
+        return loss
 
     def test_step(self, batch, batch_idx):
-        mu, logvar = self.encode(batch)
-        z = self.reparameterize(mu, logvar)
-        x_hat = self.decode(z, batch)
-        if self.hparams.loss_fn == 'mse':
-            test_loss = F.mse_loss(x_hat, batch.x)
-        elif self.hparams.loss_fn == 'mae':
-            test_loss = F.l1_loss(x_hat, batch.x)
-        self.log("test_loss", test_loss, prog_bar=True)
-        return test_loss
-    
-    def _log_reconstructions(self, original, reconstructed):
-        plt.figure(figsize=(10, 5))
-        plt.subplot(121)
-        plt.title("Original")
-        sns.heatmap(original.cpu().detach().numpy())
-        plt.subplot(122)
-        plt.title("Reconstructed")
-        sns.heatmap(reconstructed.cpu().detach().numpy())
-        #self.logger.experiment.log({"reconstructions": self.logger.experiment.Image(plt)})
-        plt.close()
+        batch.x = batch.x.float()
+        z = self.encode(batch)
+        x_hat = self.decode(z)
+        loss = F.mse_loss(x_hat, batch.x) if self.hparams.loss_fn == 'mse' else F.l1_loss(x_hat, batch.x)
+        self.log("test_loss", loss, prog_bar=True)
+        return loss
     
     def configure_optimizers(self):
         lr = float(self.hparams.learning_rate)
@@ -279,61 +241,112 @@ class GraphAutoencoder(pl.LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1}}
         return optimizer
 
-def is_radial(data):
-    # Check if the reconstructed graph is radial (i.e. a tree)
-    G = to_networkx(data, to_undirected=True)
-    return nx.is_tree(G)
-
 def load_config(config_path="config.yaml"):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
-def setup_trainer(config):
+def setup_trainer(config, extra_callbacks=None):
+    trainer_params = config.get("trainer_params", {})
+    callbacks_config = config.get("callbacks_config", {})
+
     logger = WandbLogger(
         project=config.get("project", "graph-autoencoder"),
-        save_dir="models/"
+        save_dir=config.get("save_dir", "models/")
     )
+    
+    # Setup checkpoint callback using nested config
+    checkpoint_config = callbacks_config.get("model_checkpoint", {})
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        monitor="val_loss", mode="min", save_top_k=3, filename="{epoch}-{val_loss:.2f}"
+        monitor=checkpoint_config.get("monitor", "val_loss"),
+        mode=checkpoint_config.get("mode", "min"),
+        save_top_k=checkpoint_config.get("save_top_k", 3),
+        filename=checkpoint_config.get("filename", "{epoch}-{val_loss:.2f}")
     )
+    
+    early_stop_config = callbacks_config.get("early_stopping", {})
     early_stop_callback = pl.callbacks.EarlyStopping(
-        monitor="val_loss", patience=10, verbose=True, mode="min"
+        monitor=early_stop_config.get("monitor", "val_loss"),
+        patience=early_stop_config.get("patience", 10),
+        verbose=True,
+        mode=early_stop_config.get("mode", "min")
     )
-    lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval="epoch")
+    
+    lr_monitor_config = callbacks_config.get("lr_monitor", {})
+    lr_monitor = pl.callbacks.LearningRateMonitor(
+        logging_interval=lr_monitor_config.get("logging_interval", "epoch")
+    )
+    
+    callbacks = [checkpoint_callback, early_stop_callback, lr_monitor]
+    if extra_callbacks is not None:
+        callbacks.extend(extra_callbacks)
+    
     trainer = pl.Trainer(
         max_epochs=config.get("max_epochs", 100),
         logger=logger,
-        callbacks=[checkpoint_callback, early_stop_callback, lr_monitor]
+        callbacks=callbacks,
+        **trainer_params
     )
     return trainer, logger
 
-if __name__ == "__main__":
-
-    config =load_config(r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\notebooks\config_files\config.yaml")
-    dataset = create_pyg_dataset(config["data_folder"])
-    train_set, val_set, test_set = split_dataset(dataset, train_ratio=config.get("train_ratio", 0.7), val_ratio=config.get("val_ratio", 0.15),
-    test_ratio=config.get("test_ratio", 0.15))
-    train_loader = DataLoader(train_set, batch_size=config.get("batch_size", 1), shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=config.get("batch_size", 1), shuffle=False)
-    test_loader = DataLoader(test_set, batch_size=config.get("batch_size", 1), shuffle=False)
-
+def objective(trial):
+    config["learning_rate"] = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
+    config["weight_decay"] = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+    config["latent_dim"] = trial.suggest_int("latent_dim", 4, 32)
+    config["hidden_dims"] = trial.suggest_categorical("hidden_dims", [[64,32,16], [128,64,32], [256,128,64], [512,256,128,64]])
+    config["activation"] = trial.suggest_categorical("activation", ["relu", "leaky_relu", "elu", "selu", "prelu", "sigmoid","tanh"])
     model = GraphAutoencoder(
-    input_dim=config["input_dim"],
-    hidden_dims=config.get("hidden_dims", [64, 32, 16]),
-    latent_dim=config.get("latent_dim", 8),
-    learning_rate=config.get("learning_rate", 1e-3),
-    weight_decay=config.get("weight_decay", 1e-5),
-    loss_fn=config.get("loss_fn", "mse"),
-    optimizer=config.get("optimizer", "adam"),
-    scheduler=config.get("scheduler", None),
-    activation=config.get("activation", "prelu"),
-    dropout_rate=config.get("dropout_rate", 0.0)
+        input_dim=config["input_dim"],
+        hidden_dims=config["hidden_dims"],
+        latent_dim=config["latent_dim"],
+        learning_rate=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+        loss_fn=config.get("loss_fn", "mse"),
+        optimizer=config.get("optimizer", "adam"),
+        scheduler=config.get("scheduler", None),
+        activation=config.get("activation", "prelu"),
+        dropout_rate=config["dropout_rate"]
     )
-    # Setup trainer and logger
+    synthetic_loader = get_pyg_loader(config["data_folder"], batch_size=config.get("batch_size", 1), shuffle=True)
+    real_loader = get_pyg_loader(config["real_data_folder"], batch_size=config.get("batch_size", 1), shuffle=True)
     trainer, logger = setup_trainer(config)
     logger.experiment.config.update(config)
+    trainer.fit(model, synthetic_loader, [synthetic_loader, real_loader])
+    val_loss = trainer.callback_metrics.get("val_loss_synthetic")
+    return val_loss.item() if val_loss is not None else float("inf")
 
-    # Train and validate
-    trainer.fit(model, train_loader, val_loader)
-    trainer.save_checkpoint("models/last.ckpt")
+if __name__ == "__main__":
+    config = load_config(Path("C:/Users/denni/Documents/thesis_dnr_gnn_dev/model_search/config_files/config.yaml") )
+    if config.get("hp_search", False):
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=config.get("hp_search_n_trials", 50), callbacks=[optuna.integration.WeightsAndBiasesCallback(metric_name="val_loss_synthetic")])
+        best_params = study.best_params
+        print("Best hyperparameters:", best_params)
+        wandb_logger.experiment.log({"best_hyperparameters": best_params})
+    else:
+        synthetic_dataset = create_pyg_dataset(config["data_folder"])
+        real_dataset = create_pyg_dataset(config["real_data_folder"])
+        train_set, synthetic_val_set, test_set = split_dataset(synthetic_dataset, train_ratio=config.get("train_ratio", 0.7),
+                                                               val_ratio=config.get("val_ratio", 0.15),
+                                                               test_ratio=config.get("test_ratio", 0.15))
+        train_loader = DataLoader(train_set, batch_size=config.get("batch_size", 1), shuffle=True)
+        synthetic_val_loader = DataLoader(synthetic_val_set, batch_size=config.get("batch_size", 1), shuffle=False)
+        real_val_loader = DataLoader(real_dataset, batch_size=config.get("batch_size", 1), shuffle=False)
+        test_loader = DataLoader(test_set, batch_size=config.get("batch_size", 1), shuffle=False)
+        model = GraphAutoencoder(
+            input_dim=config["input_dim"],
+            hidden_dims=config.get("hidden_dims", [64, 32, 16]),
+            latent_dim=config.get("latent_dim", 8),
+            learning_rate=config.get("learning_rate", 1e-3),
+            weight_decay=config.get("weight_decay", 1e-5),
+            loss_fn=config.get("loss_fn", "mse"),
+            optimizer=config.get("optimizer", "adam"),
+            scheduler=config.get("scheduler", None),
+            activation=config.get("activation", "prelu"),
+            dropout_rate=config.get("dropout_rate", 0.0)
+        )
+        trainer, logger = setup_trainer(config)
+        logger.experiment.config.update(config)
+        trainer.fit(model, train_loader, [synthetic_val_loader, real_val_loader])
+        trainer.test(model, test_loader)
+        trainer.save_checkpoint("models/last.ckpt")
