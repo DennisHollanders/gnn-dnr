@@ -347,10 +347,14 @@ def compute_slack_metric(subgraph, node):
     degree = subgraph.degree(node)
     capacities = []
     for _, _, data in subgraph.edges(node, data=True):
-        cap = data.get("pandapower_type", {}).get("max_i_ka", 0.3)
+        pandapower_data = data.get("pandapower_type", {})
+        if not isinstance(pandapower_data, dict):
+            pandapower_data = {}
+        cap = pandapower_data.get("max_i_ka", 0.3)
         capacities.append(cap)
     avg_capacity = np.mean(capacities) if capacities else 0.3
     return degree * avg_capacity
+
 
 def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_data, line_sources):
     if len(net.line) > 0:
