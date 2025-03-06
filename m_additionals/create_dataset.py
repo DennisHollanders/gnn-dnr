@@ -4,8 +4,8 @@ import geopandas as gpd
 import pandas as pd
 import logging 
 import os
-import time
 import sys
+import datetime
 
 # Get the path to the 'src' folder relative to the notebook
 src_path = os.path.abspath(os.path.join("..", "src"))
@@ -13,6 +13,13 @@ if src_path not in sys.path:
     sys.path.append(src_path)
     
 from src.electrify_subgraph2 import transform_subgraphs
+
+date_str = datetime.now().strftime("%d%m%Y")
+save_location = Path("..") / "data" / f"transformed_subgraphs_{date_str}"
+counter = 1
+while save_location.exists():
+    save_location = Path("..") / "data" / f"transformed_subgraphs_{date_str}_{counter}"
+    counter += 1
 
 # load subgraphs
 path_to_graphs = Path("..") / "data" / "filtered_complete_subgraphs.pkl"
@@ -69,7 +76,7 @@ kwargs = {
     "net_load_std": 0.5,
     "interval_duration_minutes": 15,
     "save": True,
-    "save_location": rf"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\{time.time()}", 
+    "save_location": save_location, 
     "logging": False,
 }
 
