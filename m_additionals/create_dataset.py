@@ -15,16 +15,17 @@ if src_path not in sys.path:
 from src.electrify_subgraph2 import transform_subgraphs
 
 # load subgraphs
-with open(r'C:\Users\denni\Documents\thesis_dnr_gnn_dev\data_used\output\filtered_subgraphs.pkl', 'rb') as f:
+path_to_graphs = Path("..") / "data" / "filtered_complete_subgraphs.pkl"
+with open(path_to_graphs, 'rb') as f:
     subgraphs = pkl.load(f)
 
 print("amount of subgraphs opened:", len(subgraphs))
 
 # Load datasets
-cbs_pc6_gpkg = Path("..") / "data_used" / "cbs_pc6_2023.gpkg"
-buurt_to_postcodes_csv = Path("..") / "data_used" / 'output' / 'buurt_to_postcodes.csv'
-consumption_df_path = Path("..") / "data_used" / "output" / "aggregated_kleinverbruik_with_opwek.csv"
-standard_consumption_df_path = Path("..") / "data_used" / "Profielen-elektriciteit-2025" / "cleaned_energ_standard_energy_data.csv"
+cbs_pc6_gpkg = Path("..") / "data" / "cbs_pc6_2023.gpkg"
+buurt_to_postcodes_csv = Path("..") / "data" / 'buurt_to_postcodes.csv'
+consumption_df_path = Path("..") / "data"  "aggregated_kleinverbruik_with_opwek.csv"
+standard_consumption_df_path = Path("..") / "data" / "cleaned_energ_standard_energy_data.csv"
 
 cbs_pc6_gdf = gpd.read_file(cbs_pc6_gpkg.resolve())
 buurt_to_postcodes = pd.read_csv(buurt_to_postcodes_csv.resolve())
