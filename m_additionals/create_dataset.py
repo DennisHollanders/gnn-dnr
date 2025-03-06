@@ -8,31 +8,31 @@ import sys
 from datetime import datetime
 
 # Get the path to the 'src' folder relative to the notebook
-#src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-#if src_path not in sys.path:
-#    sys.path.append(src_path)
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if src_path not in sys.path:
+    sys.path.append(src_path)
     
-from src.electrify_subgraph2 import transform_subgraphs
+from electrify_subgraph2 import transform_subgraphs
 
 date_str = datetime.now().strftime("%d%m%Y")
-save_location = Path("..") / "data" / f"transformed_subgraphs_{date_str}"
+save_location = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / f"transformed_subgraphs_{date_str}"
 counter = 1
 while save_location.exists():
-    save_location = Path("..") / "data" / f"transformed_subgraphs_{date_str}_{counter}"
+    save_location = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / f"transformed_subgraphs_{date_str}_{counter}"
     counter += 1
 
-# load subgraphs
-path_to_graphs = Path("..") / "data" / "filtered_complete_subgraphs.pkl"
+# abs path
+path_to_graphs = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "filtered_complete_subgraphs.pkl")))
 with open(path_to_graphs, 'rb') as f:
     subgraphs = pkl.load(f)
 
 print("amount of subgraphs opened:", len(subgraphs))
 
 # Load datasets
-cbs_pc6_gpkg = Path("..") / "data" / "cbs_pc6_2023.gpkg"
-buurt_to_postcodes_csv = Path("..") / "data" / 'buurt_to_postcodes.csv'
-consumption_df_path = Path("..") / "data"  "aggregated_kleinverbruik_with_opwek.csv"
-standard_consumption_df_path = Path("..") / "data" / "cleaned_energ_standard_energy_data.csv"
+cbs_pc6_gpkg =Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / "cbs_pc6_2023.gpkg"
+buurt_to_postcodes_csv = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) /'buurt_to_postcodes.csv'
+consumption_df_path = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) /  "aggregated_kleinverbruik_with_opwek.csv"
+standard_consumption_df_path = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / "cleaned_energ_standard_energy_data.csv"
 
 cbs_pc6_gdf = gpd.read_file(cbs_pc6_gpkg.resolve())
 buurt_to_postcodes = pd.read_csv(buurt_to_postcodes_csv.resolve())
