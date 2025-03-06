@@ -101,4 +101,4 @@ def log_info(message):
 
 log_info(f"Graphs to be generated: {len(subgraphs) * kwargs['n_samples_per_graph'] * kwargs['n_loadcase_time_intervals']}")
 
-new_subgraphs = transform_subgraphs(subgraphs, distributions,dfs,kwargs)
+new_subgraphs = transform_subgraphs(subgraphs, distributions,dfs,kwargs, logger)

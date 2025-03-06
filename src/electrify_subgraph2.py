@@ -680,7 +680,7 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
 
 def transform_subgraphs(subgraphs: List[nx.Graph],
                         distributions: Dict[str, Any],
-                        dfs: Any, kwargs: Dict[str, Any]) -> Tuple[List[Any], List[nx.Graph]]:
+                        dfs: Any, kwargs: Dict[str, Any], logger) -> Tuple[List[Any], List[nx.Graph]]:
     # Initialize distributions and collect samples
     dist_callables, distribution_samples = initialize_distributions(distributions, logger)
 
