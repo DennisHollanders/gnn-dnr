@@ -10,14 +10,19 @@ import plotly.graph_objects as go
 import os
 import sys 
 import time 
+from pathlib import Path
 
-socp_src_path = os.path.join(os.path.abspath(os.path.join(os.getcwd(), "..")), "socp_lingkang", "src") 
-sys.path.append(socp_src_path)
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "socp_lingkang","src"))
+if src_path not in sys.path:
+    sys.path.append(src_path)
+    
+print(f"src_path: {src_path}")
+
 from SOCP_class import SOCP_class
 
 # Define the save location where original data is stored
-data_folder = os.environ.get("DATA_FOLDER", "/default/path")
-SAVE_LOCATION = os.path.join(os.path.abspath(os.path.join(os.getcwd(), "..")), "data", data_folder) 
+data_folder = os.environ.get("DATA_FOLDER", "test_data")
+SAVE_LOCATION = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / data_folder
 
 def load_original_data(save_location):
     """
