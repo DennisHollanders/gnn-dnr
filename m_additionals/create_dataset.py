@@ -5,12 +5,12 @@ import pandas as pd
 import logging 
 import os
 import sys
-import datetime
+from datetime import datetime
 
 # Get the path to the 'src' folder relative to the notebook
-src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-if src_path not in sys.path:
-    sys.path.append(src_path)
+#src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+#if src_path not in sys.path:
+#    sys.path.append(src_path)
     
 from src.electrify_subgraph2 import transform_subgraphs
 
