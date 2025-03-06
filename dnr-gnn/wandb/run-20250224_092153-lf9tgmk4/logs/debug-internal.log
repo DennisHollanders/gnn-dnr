@@ -1,0 +1,15 @@
+{"time":"2025-02-24T09:21:53.9575747+01:00","level":"INFO","msg":"stream: starting","core version":"0.19.5","symlink path":"C:\\Users\\denni\\Documents\\thesis_dnr_gnn_dev\\dnr-gnn\\wandb\\run-20250224_092153-lf9tgmk4\\logs\\debug-core.log"}
+{"time":"2025-02-24T09:21:54.0862911+01:00","level":"INFO","msg":"created new stream","id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:54.0868265+01:00","level":"INFO","msg":"handler: started","stream_id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:54.0868265+01:00","level":"INFO","msg":"sender: started","stream_id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:54.0868265+01:00","level":"INFO","msg":"writer: Do: started","stream_id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:54.0868265+01:00","level":"INFO","msg":"stream: started","id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:54.3919326+01:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-02-24T09:21:55.0910739+01:00","level":"INFO","msg":"stream: closing","id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:55.0910739+01:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-02-24T09:21:55.0921662+01:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-02-24T09:21:55.8387332+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-02-24T09:21:56.0572152+01:00","level":"INFO","msg":"handler: closed","stream_id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:56.0572152+01:00","level":"INFO","msg":"writer: Close: closed","stream_id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:56.0572152+01:00","level":"INFO","msg":"sender: closed","stream_id":"lf9tgmk4"}
+{"time":"2025-02-24T09:21:56.0577618+01:00","level":"INFO","msg":"stream: closed","id":"lf9tgmk4"}

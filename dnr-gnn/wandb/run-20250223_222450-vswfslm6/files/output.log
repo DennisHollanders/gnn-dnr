@@ -1,0 +1,37 @@
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [64, 32, 16] which is of type list.
+  warnings.warn(message)
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [128, 64, 32] which is of type list.
+  warnings.warn(message)
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [256, 128, 64] which is of type list.
+  warnings.warn(message)
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [512, 256, 128, 64] which is of type list.
+  warnings.warn(message)
+[33m[W 2025-02-23 22:24:52,200][0m Trial 0 failed with parameters: {'learning_rate': 0.005236073011152062, 'weight_decay': 0.0003596933788974396, 'latent_dim': 24, 'hidden_dims': [512, 256, 128, 64], 'activation': 'tanh'} because of the following error: KeyError('input_dim').[0m
+Traceback (most recent call last):
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 197, in _run_trial
+    value_or_values = func(trial)
+                      ^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 299, in objective
+    input_dim=config["input_dim"],
+              ~~~~~~^^^^^^^^^^^^^
+KeyError: 'input_dim'
+[33m[W 2025-02-23 22:24:52,203][0m Trial 0 failed with value None.[0m
+Traceback (most recent call last):
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 322, in <module>
+    study.optimize(objective, n_trials=config.get("hp_search_n_trials", 50), callbacks=[optuna.integration.WeightsAndBiasesCallback(metric_name="val_loss_synthetic")])
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\study.py", line 475, in optimize
+    _optimize(
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 63, in _optimize
+    _optimize_sequential(
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 160, in _optimize_sequential
+    frozen_trial = _run_trial(study, func, catch)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 248, in _run_trial
+    raise func_err
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 197, in _run_trial
+    value_or_values = func(trial)
+                      ^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 299, in objective
+    input_dim=config["input_dim"],
+              ~~~~~~^^^^^^^^^^^^^
+KeyError: 'input_dim'

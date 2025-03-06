@@ -1,0 +1,79 @@
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [64, 32, 16] which is of type list.
+  warnings.warn(message)
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [128, 64, 32] which is of type list.
+  warnings.warn(message)
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [256, 128, 64] which is of type list.
+  warnings.warn(message)
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\distributions.py:515: UserWarning: Choices for a categorical distribution should be a tuple of None, bool, int, float and str for persistent storage but contains [512, 256, 128, 64] which is of type list.
+  warnings.warn(message)
+Skipping: raph graph_1_modification_c_2025-02-12 23:45:00 has missing features
+Skipping: raph graph_2_modification_a_2025-08-07 11:45:00 has missing features
+Skipping: raph graph_2_modification_b_2025-05-19 17:15:00 has missing features
+Skipping: raph graph_2_modification_c_2025-07-18 04:45:00 has missing features
+Skipping: raph graph_4_modification_a_2025-04-10 21:45:00 has missing features
+Skipping: raph graph_4_modification_b_2025-03-23 17:00:00 has missing features
+Skipping: raph graph_4_modification_c_2025-11-24 03:45:00 has missing features
+Skipping: raph graph_10_modification_a_2025-02-02 22:30:00 has missing features
+Skipping: raph graph_10_modification_b_2025-11-20 14:00:00 has missing features
+Skipping: raph graph_10_modification_c_2025-04-24 16:45:00 has missing features
+Skipping: raph graph_11_modification_b_2025-05-31 06:30:00 has missing features
+Skipping: raph graph_11_modification_c_2025-12-25 22:45:00 has missing features
+Skipping: raph graph_12_modification_a_2025-05-28 09:00:00 has missing features
+Skipping: raph graph_12_modification_b_2025-11-30 01:45:00 has missing features
+Skipping: raph graph_12_modification_c_2025-12-07 06:15:00 has missing features
+Skipping: raph graph_13_modification_a_2025-08-06 06:15:00 has missing features
+Skipping: raph graph_13_modification_b_2025-11-18 03:30:00 has missing features
+Skipping: raph graph_13_modification_c_2025-04-20 16:30:00 has missing features
+Skipping: raph graph_14_modification_a_2025-03-03 21:00:00 has missing features
+Skipping: raph graph_14_modification_b_2025-05-21 16:45:00 has missing features
+Skipping: raph graph_14_modification_c_2025-09-23 06:15:00 has missing features
+total graphs: 45; Skipped: 21; Processed: 24
+C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\torch_geometric\deprecation.py:26: UserWarning: 'data.DataLoader' is deprecated, use 'loader.DataLoader' instead
+  warnings.warn(out)
+[33m[W 2025-02-23 22:28:00,519][0m Trial 0 failed with parameters: {'learning_rate': 0.00022536455105269792, 'weight_decay': 4.399024551390456e-06, 'latent_dim': 12, 'hidden_dims': [256, 128, 64], 'activation': 'prelu'} because of the following error: FileNotFoundError(2, 'No such file or directory').[0m
+Traceback (most recent call last):
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 197, in _run_trial
+    value_or_values = func(trial)
+                      ^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 311, in objective
+    real_loader = get_pyg_loader(config["real_data_folder"], batch_size=config.get("batch_size", 1), shuffle=True)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 148, in get_pyg_loader
+    data_list = create_pyg_dataset(folder_path)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 111, in create_pyg_dataset
+    nx_graphs, graph_features, _ = load_graph_data(folder_path)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 42, in load_graph_data
+    with open(graph_features_path, "rb") as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\denni\\Documents\\thesis_dnr_gnn_dev\\data\\real_data\\graph_features.pkl'
+[33m[W 2025-02-23 22:28:00,521][0m Trial 0 failed with value None.[0m
+Traceback (most recent call last):
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 322, in <module>
+    study.optimize(objective, n_trials=config.get("hp_search_n_trials", 50), callbacks=[optuna.integration.WeightsAndBiasesCallback(metric_name="val_loss_synthetic")])
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\study.py", line 475, in optimize
+    _optimize(
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 63, in _optimize
+    _optimize_sequential(
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 160, in _optimize_sequential
+    frozen_trial = _run_trial(study, func, catch)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 248, in _run_trial
+    raise func_err
+  File "C:\Users\denni\AppData\Local\pypoetry\Cache\virtualenvs\dnr-gnn-sOrvVjlK-py3.12\Lib\site-packages\optuna\study\_optimize.py", line 197, in _run_trial
+    value_or_values = func(trial)
+                      ^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 311, in objective
+    real_loader = get_pyg_loader(config["real_data_folder"], batch_size=config.get("batch_size", 1), shuffle=True)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 148, in get_pyg_loader
+    data_list = create_pyg_dataset(folder_path)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 111, in create_pyg_dataset
+    nx_graphs, graph_features, _ = load_graph_data(folder_path)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\first_model.py", line 42, in load_graph_data
+    with open(graph_features_path, "rb") as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\denni\\Documents\\thesis_dnr_gnn_dev\\data\\real_data\\graph_features.pkl'
