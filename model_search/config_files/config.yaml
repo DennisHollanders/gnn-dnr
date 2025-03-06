@@ -1,4 +1,4 @@
-data_folder: r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\data\1739737645.4646165"
+data_folder: r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data"
 real_data_folder: r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\data\data_combined_real_world"  
 project: "graph-autoencoder"
 save_dir: "models/"

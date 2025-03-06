@@ -11,7 +11,7 @@
 #SBATCH --partition=tue.default.q
 
 
-export DATA_FOLDER="/path/to/your/folder"
+export DATA_FOLDER="test_data"
 
 # available partions: CPU: tue.default.q , GPU: tue.gpu.q
 
@@ -23,6 +23,8 @@ mkdir -p ./logs
 module load Python
 module load CUDA/11.7.0
 module load poetry/1.8.3-GCCcore-13.3.0
+
+export GRB_LICENSE_FILE="$HOME/gurobi.lic"
 
 # Activate the Poetry environment
 source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-_o2-hQZ5-py3.12/bin/activate

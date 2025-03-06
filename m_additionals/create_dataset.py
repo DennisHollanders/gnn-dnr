@@ -23,7 +23,7 @@ while save_location.exists():
     counter += 1
 
 # abs path
-path_to_graphs = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "filtered_complete_subgraphs.pkl")))
+path_to_graphs = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "filtered_subgraphs.pkl")))
 with open(path_to_graphs, 'rb') as f:
     subgraphs = pkl.load(f)
 
@@ -55,7 +55,7 @@ distributions = {
 kwargs = {
     'PV': True,                     # If True, add PV to the graph
     "n_loadcase_time_intervals": 1,  # One day (96 intervals of 15 minutes)
-    "n_samples_per_graph": 3,  # Three different samples per subgraph
+    "n_samples_per_graph": 1,  # Three different samples per subgraph
 
     # Subgraph Sampling options 
     'is_iterate': True,            # If True, iterate over all subgraphs.
