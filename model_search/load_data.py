@@ -8,6 +8,8 @@ import torch_geometric
 from torch_geometric.data import Data, DataLoader
 from torch_geometric.utils import from_networkx
 import networkx as nx
+from pandapower.pypower.makeYbus import makeYbus
+import numpy as np 
 
 def load_graph_data(folder_path):
     folder_path = Path(folder_path)
@@ -66,57 +68,102 @@ def merge_features_into_nx(nx_graph, node_feats, edge_feats):
         for feat_key, feat_value in e_feats.items():
             nx_graph[u][v][feat_key] = feat_value
 
-def create_pyg_data(nx_graph):
+def create_pyg_data(nx_graph, pp_net):
     unify_node_attributes(nx_graph, ["p", "q", "v", "theta"])
     unify_edge_attributes(nx_graph, ["R", "X", "switch_state"])
+
     data = from_networkx(
         nx_graph,
         group_node_attrs=["p", "q", "v", "theta"],
         group_edge_attrs=["R", "X", "switch_state"]
     )
-    if hasattr(data, "p"):
-        data.x = torch.stack([data.p, data.q, data.v, data.theta], dim=-1).float()
-        del data.p, data.q, data.v, data.theta
-    if hasattr(data, "R"):
-        data.edge_attr = torch.stack([data.R, data.X], dim=-1).float()
-        del data.R, data.X
-    if hasattr(data, "switch_state"):
-        data.edge_y = data.switch_state.view(-1).float()
-        del data.switch_state
+
+    # Convert features to tensors
+    data.x = torch.stack([data.p, data.q, data.v, data.theta], dim=-1).float()
+    data.edge_attr = torch.stack([data.R, data.X], dim=-1).float()
+    
+    del data.p, data.q, data.v, data.theta
+    del data.R, data.X
+
+    print("ppnet \n ", pp_net, "\n \n ")
+
+    # Ensure valid pp_net before computing Ybus
+    #if pp_net is None:
+    #    raise ValueError("pp_net is None, cannot compute Ybus!")
+
+    #try:
+    _, Ymatrix, _ = makeYbus(pp_net)
+    data.conductance_matrix = torch.tensor(np.real(Ymatrix.toarray()), dtype=torch.float32)
+    #except Exception as e:
+    #    print(f"Error computing conductance matrix for graph: {e}")
+    #    data.conductance_matrix = torch.zeros((len(nx_graph.nodes), len(nx_graph.nodes)), dtype=torch.float32)
+
+    data.adjacency_matrix = torch.tensor(nx.to_numpy_array(nx_graph), dtype=torch.float32)
+    data.switch_matrix = compute_switch_matrix(nx_graph)
+
     return data
 
 def create_pyg_dataset(folder_path):
-    nx_graphs, graph_features, _ = load_graph_data(folder_path)
+    nx_graphs, graph_features, pp_nets = load_graph_data(folder_path)
     data_list = []
     skipped = 0
     total = len(nx_graphs)
+
     for graph_name, nx_graph in nx_graphs.items():
         if nx_graph is None:
+            print(f"Skipping {graph_name}: Graph is None.")
             skipped += 1
             continue
         if graph_name not in graph_features:
+            print(f"Skipping {graph_name}: Missing graph features.")
             skipped += 1
             continue
+
         features_dict = graph_features[graph_name]
         node_feats = features_dict.get("node_features")
         edge_feats = features_dict.get("edge_features")
+
         if node_feats is None or edge_feats is None:
+            print(f"Skipping {graph_name}: Missing node or edge features.")
             skipped += 1
             continue
+
         try:
             merge_features_into_nx(nx_graph, node_feats, edge_feats)
-        except Exception:
+        except Exception as e:
+            print(f"Skipping {graph_name}: Error merging features: {e}")
             skipped += 1
             continue
+
+        if graph_name not in pp_nets:
+            print(f"Skipping {graph_name}: No corresponding pandapower network.")
+            skipped += 1
+            continue
+
         try:
-            data = create_pyg_data(nx_graph)
-        except Exception:
+            data = create_pyg_data(nx_graph, pp_nets[graph_name])
+        except Exception as e:
+            print(f"Skipping {graph_name}: Error creating PyG data: {e}")
             skipped += 1
             continue
+
         data_list.append(data)
+
     print(f"Total graphs: {total}; Skipped: {skipped}; Processed: {len(data_list)}")
     return data_list
+
 
 def get_pyg_loader(folder_path, batch_size=4, shuffle=True):
     data_list = create_pyg_dataset(folder_path)
     return DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
+
+def compute_switch_matrix(nx_graph):
+    num_nodes = len(nx_graph.nodes)
+    switch_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
+
+    for u, v, data in nx_graph.edges(data=True):
+        if "switch_state" in data:
+            switch_matrix[u, v] = data["switch_state"]
+            switch_matrix[v, u] = data["switch_state"]
+
+    return switch_matrix

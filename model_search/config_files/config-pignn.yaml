@@ -1,11 +1,11 @@
-description: "Train Graph Autoencoder"
+description: "Train PIGNN"
 
 # Data
 data_folder: "data\\test_data"
 real_data_folder: "data_combined_real_world"
 
 # Model
-model_module: "GraphAutoencoder"
+model_module: "PIGNN"
 
 # Training
 input_dim: 4
@@ -21,4 +21,5 @@ patience: 10
 hp_search: false
 hp_search_n_trials: 50
 job_name: "first run"
-criterion_name: MSELoss
+criterion_name: PIGNNCriterion
+wandb: false

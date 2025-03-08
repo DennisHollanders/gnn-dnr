@@ -11,6 +11,8 @@ from torch_geometric.data import DataLoader
 import optuna
 import wandb
 import importlib
+from pathlib import Path
+import sys
 
 
 DESCRIPTION = "Train Graph Autoencoder" 
@@ -27,6 +29,7 @@ def parse_args():
     parser.add_argument("--latent_dim", type=int, default=8, help="Latent dimension")
     parser.add_argument("--activation", type=str, default="prelu",
                         choices=["relu", "leaky_relu", "elu", "selu", "prelu", "sigmoid", "tanh"])
+    parser.add_argument("--criterion_name", type=str, default="MSELoss", help="Criterion")
     parser.add_argument("--dropout_rate", type=float, default=0.0, help="Dropout rate")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
@@ -42,14 +45,14 @@ def parse_args():
 def save_args_to_yaml(args):
     """Save the current arguments to a YAML file named with the wandb job name."""
     config = vars(args)
-    filename = os.path.join("model_search","config_files", f"{args.model_module}------{args.job_name}.yaml")
+    filename = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model_search"))) / f"config_files" / f"{args.model_module}------{args.job_name}.yaml"
     with open(filename, "w") as f:
         yaml.dump(config, f)
     print(f"Configuration saved to {filename}")
 
 def load_args_from_yaml(filepath):
     """Load arguments from a YAML config file and return an argparse.Namespace object."""
-    filename = os.path.join("model_search","config_files", filepath)
+    filename = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model_search"))) / f"config_files" / f"{filepath}"
     with open(filename, "r") as f:
         config = yaml.safe_load(f)
     return argparse.Namespace(**config)
@@ -60,9 +63,9 @@ def main():
     # If a YAML config is provided, load it to override command-line arguments.
     if args.config:
         args = load_args_from_yaml(args.config)
-
-    run = wandb.init(project=DESCRIPTION, job_type="train",config=vars(args))
-    args.job_name = run.name    
+    if args.wandb:
+        run = wandb.init(project=DESCRIPTION, job_type="train",config=vars(args))
+        args.job_name = run.name    
 
     save_args_to_yaml(args)
     
@@ -74,8 +77,26 @@ def main():
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
 
+    ROOT_DIR = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    if str(ROOT_DIR) not in sys.path:
+        sys.path.append(str(ROOT_DIR))
+
     model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
     model_class = getattr(model_module, args.model_module)
+    
+    try:
+        criterion_class = getattr(model_module, args.criterion_name)
+        criterion = criterion_class(weight_switch=1.0, weight_physics=10.0)  # Initialize
+    except (ImportError, AttributeError) as e:
+        print(f"Error loading {args.criterion_name} from {model_module}: {e}")
+        if args.criterion_name == "MSELoss":
+            criterion = nn.MSELoss()
+        elif "L1Loss":
+            criterion = nn.L1Loss()
+        elif "SmoothL1Loss":
+            criterion = nn.SmoothL1Loss()
+        
+
 
     model = model_class(
         input_dim=args.input_dim,
@@ -87,15 +108,16 @@ def main():
     
     
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    criterion = nn.MSELoss()
     
     best_loss = float("inf")
     patience = 0
 
     for epoch in range(args.epochs):
-        train_loss = train(model, train_loader, optimizer, criterion, device)
-        val_loss = test(model, val_loader, criterion, device)
+        train_loss,train_dict = train(model, train_loader, optimizer, criterion, device)
+        val_loss, val_dict = test(model, val_loader, criterion, device)
         print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+        if args.wandb:
+            wandb.log({"train_loss": train_loss, "val_loss": val_loss}, train_dict, val_dict)
         if val_loss < best_loss:
             best_loss = val_loss
             patience = 0
