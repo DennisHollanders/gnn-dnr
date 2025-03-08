@@ -276,10 +276,10 @@ def add_edge_via_convex_layers(subgraph_to_adapt, layers, layer_list, max_distan
         for j in range(i + 1, len(selected_nodes)):
             u, v = selected_nodes[i], selected_nodes[j]
             if subgraph_to_adapt.has_edge(u, v):
-                continue  # Skip if the edge already exists
+                continue  
             distance = np.linalg.norm(np.array(pos[u]) - np.array(pos[v]))
             if distance < kwargs.get('min_distance_threshold', 1.0):
-                continue  # Skip if nodes are too close
+                continue  
             edge = (u, v)
             score = check_and_add_edge(edge, subgraph_to_adapt, pos, max_distance, max_cycle_length, kwargs['weight_factor'])
             if score is not None:
@@ -657,14 +657,11 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
                     for node in modified_subgraph.nodes:
                         consumption_value = np.random.normal(consumption, consumption * kwargs["consumption_std"])
                         production_value = np.random.normal(production, production * kwargs["production_std"])
-                        print("consumption:",consumption_value,
-                              "\n production:",production_value)
-                        net_load = 0.03 #np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* kwargs["net_load_std"])
-                        #print("net_load:",net_load)	
+                        
+                        net_load = np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* kwargs["net_load_std"])
+               
                         
                         modified_subgraph.nodes[node]["net_load"] = net_load
-                    #print("estimated_total_nodal_load",estimate_total_nodal_load(modified_subgraph),
-                    #      "total_nodal_load:",sum([modified_subgraph.nodes[node]["net_load"] for node in modified_subgraph.nodes]))
                     electrified_network, info = create_pandapower_network(modified_subgraph, kwargs, dist_callable)
                     if electrified_network.converged:
                         load_case_of_modified_subgraph[str(date_time)] = {"network": electrified_network, "info": info}

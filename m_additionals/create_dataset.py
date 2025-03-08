@@ -45,9 +45,9 @@ dfs = [consumption_df, cbs_pc6_gdf, buurt_to_postcodes, standard_consumption_df]
 
 distributions = {
     'n_switches': {'type': 'normal', 'mean': 2, 'std':1,  'min': 1, 'max': 5,  'is_integer': True},
-    "num_substations": {'type': 'normal', 'mean': 1, 'std':1,  'min': 1, 'max': 3,  'is_integer': True},
+    "num_substations": {'type': 'normal', 'mean': 2, 'std':1,  'min': 1, 'max': 3,  'is_integer': True},
     'n_busses': {'type': 'normal', 'mean': 25, 'std': 10, 'min': 10, 'max': 200,  'is_integer': True},
-    'layer_list': {'type': 'categorical', 'choices': [[0,1,2,3,4,5]], 'weights': [1]},
+    'layer_list': {'type': 'categorical', 'choices': [[0,1,2,3,4,5], [0,6,7],[0,1,3],[0,2,3,4],[0,2,5]], 'weights': [0.2, 0.2, 0.2, 0.2, 0.2]},
     "split": {'type': 'categorical', 'choices': ['load', 'gen', 'transfer'], 'weights': [0.9, 0.1, 0.0]},
     "standard_cables": {'type': 'categorical', 'choices': ['standard_cable_1', 'standard_cable_2', 'standard_cable_3'], 'weights': [0.3, 0.3, 0.3]},
 
@@ -55,12 +55,12 @@ distributions = {
 kwargs = {
     'PV': True,                     # If True, add PV to the graph
     "n_loadcase_time_intervals": 1,  # One day (96 intervals of 15 minutes)
-    "n_samples_per_graph": 1,  # Three different samples per subgraph
+    "n_samples_per_graph": 5,  # Three different samples per subgraph
 
     # Subgraph Sampling options 
     'is_iterate': True,            # If True, iterate over all subgraphs.
     'amount_of_subgraphs':3,       # Amount of subgraphs to sample if is_iterate is False.
-    "plot_added_edge": True,
+    "plot_added_edge": False,
     'plot_subgraphs': False,         # If True, plot the transformed subgraphs.
     'plot_distributions': False,     # If True, plot the distributions.
     'amount_to_plot': 3,            # Amount of subgraphs to plot.

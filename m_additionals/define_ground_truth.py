@@ -15,8 +15,6 @@ from pathlib import Path
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "socp_lingkang","src"))
 if src_path not in sys.path:
     sys.path.append(src_path)
-    
-print(f"src_path: {src_path}")
 
 from SOCP_class import SOCP_class
 
@@ -118,5 +116,5 @@ def apply_socp_and_store_ground_truths(save_location, pp_networks, features):
     print(" Saved updated graph features with ground truths in 'graph_features.pkl'.")
 
 graph_dict, pp_networks, features = load_original_data(SAVE_LOCATION)
-print("graph_dict", pp_networks)
+#print("graph_dict", pp_networks)
 apply_socp_and_store_ground_truths(SAVE_LOCATION, pp_networks, features)
