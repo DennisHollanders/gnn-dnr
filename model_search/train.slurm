@@ -10,9 +10,8 @@
 #SBATCH --time=1-00:00:00
 #SBATCH --partition=tue.gpu.q
 
-# available partions: CPU: tue.default.q , GPU: tue.gpu.q
+# available partitions: CPU: tue.default.q , GPU: tue.gpu.q
 
-# Create required directories
 mkdir -p ./data
 mkdir -p ./logs
 
@@ -24,13 +23,23 @@ module load poetry/1.8.3-GCCcore-13.3.0
 # Activate the Poetry environment
 source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-_o2-hQZ5-py3.12/bin/activate
 
-# Verify Python version
 python --version 
-
-# Navigate to the project directory
 cd $HOME/gnn-dnr
+ls
 
-dir 
+python model_search/main.py --config model_search/config_files/config.yaml
 
-# Run training
-python model_search/test.py
+# python model_search/main.py \
+#    --data_folder data/test_data \
+#    --real_data_folder data_combined_real_world \
+#    --input_dim 4 \
+#    --hidden_dims 64 32 16 \
+#    --latent_dim 8 \
+#    --activation prelu \
+#    --dropout_rate 0.0 \
+#    --learning_rate 0.001 \
+#    --weight_decay 1e-5 \
+#    --batch_size 4 \
+#    --epochs 100 \
+#    --patience 10 \
+#    --model_module GraphAutoencoder
