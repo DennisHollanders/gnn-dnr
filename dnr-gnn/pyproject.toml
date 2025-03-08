@@ -38,6 +38,7 @@ simbench = "^1.5.3"
 graphviz = "^0.20.3"
 optuna = "^4.2.1"
 optuna-integration = {extras = ["wandb"], version = "^4.2.1"}
+psutil = "^7.0.0"
 
 
 
