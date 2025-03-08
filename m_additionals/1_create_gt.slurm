@@ -20,11 +20,10 @@ mkdir -p ./data
 mkdir -p ./logs
 
 # Load modules
-module load Python
+# module load Python
 module load CUDA/11.7.0
 module load poetry/1.8.3-GCCcore-13.3.0
-
-export GRB_LICENSE_FILE="$HOME/gurobi.lic"
+module load Gurobi/11.0.3-GCCcore-12.3.0
 
 # Activate the Poetry environment
 source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-_o2-hQZ5-py3.12/bin/activate
