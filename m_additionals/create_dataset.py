@@ -46,7 +46,7 @@ dfs = [consumption_df, cbs_pc6_gdf, buurt_to_postcodes, standard_consumption_df]
 distributions = {
     'n_switches': {'type': 'normal', 'mean': 2, 'std':1,  'min': 1, 'max': 5,  'is_integer': True},
     "num_substations": {'type': 'normal', 'mean': 2, 'std':1,  'min': 1, 'max': 3,  'is_integer': True},
-    'n_busses': {'type': 'normal', 'mean': 35, 'std': 2, 'min': 30, 'max': 40,  'is_integer': True},
+    'n_busses': {'type': 'normal', 'mean': 35, 'std': 5, 'min': 30, 'max': 40,  'is_integer': True},
     'layer_list': {'type': 'categorical', 'choices': [[0,1,2], [0,3,],[0,1,3],[0,2,3,4],[1,2]], 'weights': [0.2, 0.2, 0.2, 0.2, 0.2]},
     "split": {'type': 'categorical', 'choices': ['load', 'gen', 'transfer'], 'weights': [0.9, 0.1, 0.0]},
     "standard_cables": {'type': 'categorical', 'choices': ['standard_cable_1', 'standard_cable_2', 'standard_cable_3'], 'weights': [0.3, 0.3, 0.3]},
@@ -64,6 +64,7 @@ kwargs = {
     'plot_subgraphs': False,         # If True, plot the transformed subgraphs.
     'plot_distributions': False,     # If True, plot the distributions.
     'amount_to_plot': 3,            # Amount of subgraphs to plot.
+    "range" : distributions['n_busses']['std'],
 
     # Hyperparameters for edge selection
     'deterministic': False,         # If True, always select the best switch edge. If False, sample from top_x.
