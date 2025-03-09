@@ -638,13 +638,16 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
             dict_of_modified_subgraphs = {}
             original_subgraph = copy.deepcopy(subgraph)
             for sampled_idx in range(kwargs['n_samples_per_graph']):
-                suffix = suffixes[sampled_idx % len(suffixes)]
-                if kwargs['modify_subgraph_each_sample'] or sampled_idx == 0:
-                    logger.info(f"Modifying subgraph {original_subgraph} for sample {sampled_idx + 1}")
-                    modified_subgraph = modify_subgraph(original_subgraph, kwargs, dist_callable)
-                else:
-                    modified_subgraph = original_subgraph
-
+                try: 
+                    suffix = suffixes[sampled_idx % len(suffixes)]
+                    if kwargs['modify_subgraph_each_sample'] or sampled_idx == 0:
+                        logger.info(f"Modifying subgraph {original_subgraph} for sample {sampled_idx + 1}")
+                        modified_subgraph = modify_subgraph(original_subgraph, kwargs, dist_callable)
+                    else:
+                        modified_subgraph = original_subgraph
+                except:
+                    logger.info(f"Failed to modify subgraph {original_subgraph} for sample {sampled_idx + 1}")
+                    continue    
                 timeframes = sample_timeframes(kwargs["n_loadcase_time_intervals"], kwargs["interval_duration_minutes"])
                 load_case_of_modified_subgraph = {}
 

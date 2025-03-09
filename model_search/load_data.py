@@ -153,8 +153,10 @@ def create_pyg_dataset(folder_path):
     return data_list
 
 
-def get_pyg_loader(folder_path, batch_size=4, shuffle=True):
+def get_pyg_loader(folder_path, batch_size=4, shuffle=True,transform=None):
     data_list = create_pyg_dataset(folder_path)
+    if transform:
+        dataset = [transform(data) for data in dataset]
     return DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
 
 def compute_switch_matrix(nx_graph):
@@ -167,3 +169,13 @@ def compute_switch_matrix(nx_graph):
             switch_matrix[v, u] = data["switch_state"]
 
     return switch_matrix
+
+def combined_augmentations(data):
+    data = normalize_features(data)
+    data = gaussian_noise_injection(data, noise_std=0.01)
+    data = switch_state_augmentation(data, flip_prob=0.1)
+    data = domain_specific_feature_augmentation(data)
+    data = feature_dropout(data, dropout_prob=0.2)
+    data = global_node_addition(data)
+    
+    return data
