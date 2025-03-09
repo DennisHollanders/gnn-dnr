@@ -35,4 +35,4 @@ python --version
 cd $HOME/gnn-dnr
 
 # Run training
-python m_additionals/define_ground_truth.py
+python data_generation/define_ground_truth.py

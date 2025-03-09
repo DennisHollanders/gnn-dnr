@@ -31,4 +31,4 @@ python --version
 cd $HOME/gnn-dnr
 
 # Run training
-python m_additionals/create_dataset.py
+python data_generation/create_dataset.py
