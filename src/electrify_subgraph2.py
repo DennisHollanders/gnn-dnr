@@ -700,11 +700,13 @@ def transform_subgraphs(subgraphs: List[nx.Graph],
         print("sampling subgraphs")
         n_busses_target = dist_callables["n_busses"]()
         n_busses_range = (n_busses_target - kwargs['range'], n_busses_target + kwargs['range'])
+        print("n_busses_range", n_busses_range)
+        logger.info(f"Target number of busses: {n_busses_target}, range: {n_busses_range}")
         filtered_subgraphs = [g for g in subgraphs if n_busses_range[0] <= len(g.nodes) <= n_busses_range[1]]
 
         if not filtered_subgraphs:
             logger.info(f"No subgraphs found in range {n_busses_range}. Sampling randomly.")
-            graphs_to_electrify = random.sample(subgraphs, kwargs['amount_of_subgraphs'])
+            graphs_to_electrify = random.choices(subgraphs, k=kwargs['amount_of_subgraphs'])
         else:
             graphs_to_electrify = random.choices(filtered_subgraphs, k=kwargs['amount_of_subgraphs'])
         
