@@ -6,7 +6,7 @@ authors = ["Dennis Hollanders <dennis.hollanders17@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "3.12.3"
+python = ">=3.11,<3.13"
 folium = "^0.18.0"
 networkx = "^3.4.2"
 geopandas = "^1.0.1"
