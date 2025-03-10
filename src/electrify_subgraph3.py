@@ -584,7 +584,7 @@ def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: d
     return net, info
 
 
-def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
+def electrify_graphs(subgraphs, dfs, kwargs, dist_callable, save_location=None):
     consumption_df = dfs[0]
     postal_code_list = find_postcode6s_and_buurts(subgraphs, dfs)
     clustered_subgraphs = {}  # Key: CBS buurt, Value: list of subgraphs
@@ -595,8 +595,10 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
         clustered_subgraphs[cbs_buurt].append(subgraph)
 
     suffixes = list(string.ascii_lowercase)
-    electrified_subgraphs = {}
     subgraph_counter = 0
+
+    # Dictionary to track counts for reporting purposes
+    processed_counts = {"total": 0, "successful": 0, "failed": 0}
 
     for cbs_buurt, subgraph_list in clustered_subgraphs.items():
         total_nodes = sum(len(subgraph.nodes) for subgraph in subgraph_list)
@@ -630,69 +632,79 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable):
         }
 
         for subgraph in subgraph_list:
-            electrified_subgraphs[f"graph_{subgraph_counter}"] = {
-                "original_graph": subgraph,
-                "modified_graphs": {}
-            }
-            dict_of_modified_subgraphs = {}
+            graph_id = f"graph_{subgraph_counter}"
+            processed_counts["total"] += 1
+
             original_subgraph = copy.deepcopy(subgraph)
             for sampled_idx in range(kwargs['n_samples_per_graph']):
-                try: 
+                try:
                     suffix = suffixes[sampled_idx % len(suffixes)]
                     if kwargs['modify_subgraph_each_sample'] or sampled_idx == 0:
-                        logger.info(f"Modifying subgraph {original_subgraph} for sample {sampled_idx + 1}")
+                        logger.info(f"Modifying subgraph {subgraph_counter} for sample {sampled_idx + 1}")
                         modified_subgraph = modify_subgraph(original_subgraph, kwargs, dist_callable)
                     else:
                         modified_subgraph = original_subgraph
-                except:
-                    logger.info(f"Failed to modify subgraph {original_subgraph} for sample {sampled_idx + 1}")
-                    continue    
-                timeframes = sample_timeframes(kwargs["n_loadcase_time_intervals"], kwargs["interval_duration_minutes"])
-                load_case_of_modified_subgraph = {}
-
-                for date_time in timeframes:
-                    consumption, production, max_consumption,max_production = retrieve_standard_production(date_time, dfs[3])
-                    # Scale consumption and production based on average consumption per node
-                    consumption = avg_consumption_per_node * consumption/max_consumption
-                    production =  opwek_groot * production/max_production
-
-                    for node in modified_subgraph.nodes:
-                        consumption_value = np.random.normal(consumption, consumption * kwargs["consumption_std"])
-                        production_value = np.random.normal(production, production * kwargs["production_std"])
                         
-                        net_load = np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* kwargs["net_load_std"])
+                    # Sample timeframes
+                    timeframes = sample_timeframes(kwargs["n_loadcase_time_intervals"], kwargs["interval_duration_minutes"])
+                    
+                    # Process each timeframe and save immediately
+                    for date_time in timeframes:
+                        consumption, production, max_consumption,max_production = retrieve_standard_production(date_time, dfs[3])
+                        # Scale consumption and production based on average consumption per node
+                        consumption = avg_consumption_per_node * consumption/max_consumption
+                        production =  opwek_groot * production/max_production
+
+                        for node in modified_subgraph.nodes:
+                            consumption_value = np.random.normal(consumption, consumption * kwargs["consumption_std"])
+                            production_value = np.random.normal(production, production * kwargs["production_std"])
+                        
+                            net_load = np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* kwargs["net_load_std"])
                
                         
-                        modified_subgraph.nodes[node]["net_load"] = net_load
-                    electrified_network, info = create_pandapower_network(modified_subgraph, kwargs, dist_callable)
-                    if electrified_network.converged:
-                        load_case_of_modified_subgraph[str(date_time)] = {"network": electrified_network, "info": info}
-                    else:
-                        logger.info(f"Power flow failed for subgraph {original_subgraph} at {date_time}")
-                        load_case_of_modified_subgraph[str(date_time)] = {"network": None, "info": info}
-
-                dict_of_modified_subgraphs[suffix] = {
-                    "subgraph": modified_subgraph,
-                    "loadcases": load_case_of_modified_subgraph,
-                }
-
-            electrified_subgraphs[f"graph_{subgraph_counter}"]["modified_graphs"] = dict_of_modified_subgraphs
+                            modified_subgraph.nodes[node]["net_load"] = net_load
+                        electrified_network, info = create_pandapower_network(modified_subgraph, kwargs, dist_callable)
+                        if electrified_network.converged:
+                            processed_counts["successful"] += 1
+                            if kwargs["save"] and save_location:
+                                graph_name = f"{graph_id}_modification_{suffix}_{date_time}"
+                                save_single_graph(
+                                    graph_name, 
+                                    modified_subgraph, 
+                                    electrified_network, 
+                                    info, 
+                                    save_location
+                                )
+                        else:
+                            processed_counts["failed"] += 1
+                            logger.info(f"Power flow failed for subgraph {subgraph_counter} at {date_time}")
+                            
+                except Exception as e:
+                    logger.error(f"Error processing subgraph {subgraph_counter}: {e}")
+                    processed_counts["failed"] += 1
+                    continue
+                
             subgraph_counter += 1
-
-    formatted_subgraphs = pprint.pformat(electrified_subgraphs, indent=4, width=120)
-    logger.info(f"Electrified subgraphs:\n{formatted_subgraphs}")
-    return electrified_subgraphs
+            
+    logger.info(f"Processing summary: Total: {processed_counts['total']}, Successful: {processed_counts['successful']}, Failed: {processed_counts['failed']}")
+    return processed_counts  
 
 def transform_subgraphs(subgraphs: List[nx.Graph],
                         distributions: Dict[str, Any],
-                        dfs: Any, kwargs: Dict[str, Any], logger) -> Tuple[List[Any], List[nx.Graph]]:
+                        dfs: Any, kwargs: Dict[str, Any], logger) -> Tuple[Dict[str, int], List[nx.Graph]]:
     # Initialize distributions and collect samples
     dist_callables, distribution_samples = initialize_distributions(distributions, logger)
-
+    
+    # Make sure save_location is passed to electrify_graphs
+    save_location = kwargs.get("save_location", None)
+    if kwargs["save"] and not save_location:
+        logger.warning("Save option is enabled but no save_location provided. Using default './saved_graphs'")
+        save_location = "./saved_graphs"
+        
     if kwargs['is_iterate']:
         logger.info("Iterating over all subgraphs.")
         print("iterating over all subgraphs")
-        electrified_graphs = electrify_graphs(subgraphs, dfs, kwargs, dist_callables)
+        processing_stats = electrify_graphs(subgraphs, dfs, kwargs, dist_callables, save_location)
     else:
         logger.info("Sampling subgraphs.")
         print("sampling subgraphs")
@@ -708,21 +720,13 @@ def transform_subgraphs(subgraphs: List[nx.Graph],
         else:
             graphs_to_electrify = random.choices(filtered_subgraphs, k=kwargs['amount_of_subgraphs'])
         
-        electrified_graphs = electrify_graphs(graphs_to_electrify, dfs, kwargs, dist_callables)
+        processing_stats = electrify_graphs(graphs_to_electrify, dfs, kwargs, dist_callables, save_location)
 
-    if kwargs['plot_subgraphs']:
-        plot_sampled_subgraphs(
-            [g for g in electrified_graphs.values() if g is not None][:kwargs['amount_to_plot']], 
-            [g for g in electrified_graphs.values() if g is not None][:kwargs['amount_to_plot']]
-        )
     if kwargs['plot_distributions']:
-        plot_distributions(distributions, graph_parameters)
-
-    # kwarg saving
-    if kwargs["save"]:
-        save_graph_data(electrified_graphs, kwargs, distributions, distribution_samples)
+        plot_distributions(distributions, distribution_samples)
 
     logger.info("Transformation process completed.")
+    logger.info(f"Processing summary: {processing_stats}")
 
     # Ensure log handlers are closed after the process
     if logger:
@@ -732,7 +736,7 @@ def transform_subgraphs(subgraphs: List[nx.Graph],
             handler.close()
             logger.removeHandler(handler)
 
-    return electrified_graphs
+    return processing_stats
 
 def extract_node_features(net, nx_graph):
     nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
@@ -769,64 +773,95 @@ def extract_edge_features(net, nx_graph):
         }
     return edge_features
 
-def save_graph_data(electrified_graphs, kwargs, distributions, distribution_samples):
-    """
-    Save networkx graphs as a dictionary in a Pickle file,
-    Pandapower networks as JSON, and features in a separate Pickle file.
-    """
-    save_location = kwargs["save_location"]
+# def save_graph_data(electrified_graphs, kwargs, distributions, distribution_samples):
+#     """
+#     Save networkx graphs as a dictionary in a Pickle file,
+#     Pandapower networks as JSON, and features in a separate Pickle file.
+#     """
+#     save_location = kwargs["save_location"]
+#     os.makedirs(save_location, exist_ok=True)
+    
+#     print("Starting the saving process")
+
+#     nx_graphs = {}
+#     pp_networks = {}
+#     features = {}
+
+#     for graph_id, graph_data in electrified_graphs.items():
+#         if graph_data is None:
+#             print(f"Skipping graph {graph_id} as it did not converge.")
+#             continue
+
+#         original_graph = graph_data["original_graph"]
+#         modified_graphs = graph_data.get("modified_graphs", {})
+
+#         for suffix, modified_graph_data in modified_graphs.items():
+#             modified_subgraph = modified_graph_data["subgraph"]
+#             loadcases = modified_graph_data["loadcases"]
+
+#             for timestamp, loadcase_data in loadcases.items():
+#                 if loadcase_data is None:
+#                     print(f"Skipping {graph_id} - {suffix} - {timestamp} due to non-converged network.")
+#                     continue
+
+#                 graph_name = f"{graph_id}_modification_{suffix}_{timestamp}"
+
+#                 # Store NetworkX graph
+#                 nx_graphs[graph_name] = modified_subgraph
+
+#                 if loadcase_data["network"]:
+#                     pp_networks[graph_name] = pp.to_json(loadcase_data["network"])
+
+#                 # Extract node & edge features
+#                 node_features = extract_node_features(loadcase_data["network"], modified_subgraph) if loadcase_data["network"] else None
+#                 edge_features = extract_edge_features(loadcase_data["network"], modified_subgraph) if loadcase_data["network"] else None
+
+#                 features[graph_name] = {"node_features": node_features, "edge_features": edge_features}
+
+#     # Save NetworkX graphs as a Pickle file
+#     with open(f"{save_location}/networkx_graphs.pkl", "wb") as f:
+#         pkl.dump(nx_graphs, f)
+#     print("Saved NetworkX graphs.")
+
+#     # Save Pandapower networks as a JSON file
+#     with open(f"{save_location}/pandapower_networks.json", "w") as f:
+#         f.write(pp.to_json(pp_networks))
+#     print("Saved Pandapower networks.")
+
+#     # Save node and edge features as a Pickle file
+#     with open(f"{save_location}/graph_features.pkl", "wb") as f:
+#         pkl.dump(features, f)
+#     print("Saved node and edge features.")
+
+#     print("Saving process completed successfully.")
+
+# New function to save a single graph
+def save_single_graph(graph_name, nx_graph, pp_network, info, save_location):
+    """Save a single graph to disk immediately after processing."""
     os.makedirs(save_location, exist_ok=True)
     
-    print("Starting the saving process")
-
-    nx_graphs = {}
-    pp_networks = {}
-    features = {}
-
-    for graph_id, graph_data in electrified_graphs.items():
-        if graph_data is None:
-            print(f"Skipping graph {graph_id} as it did not converge.")
-            continue
-
-        original_graph = graph_data["original_graph"]
-        modified_graphs = graph_data.get("modified_graphs", {})
-
-        for suffix, modified_graph_data in modified_graphs.items():
-            modified_subgraph = modified_graph_data["subgraph"]
-            loadcases = modified_graph_data["loadcases"]
-
-            for timestamp, loadcase_data in loadcases.items():
-                if loadcase_data is None:
-                    print(f"Skipping {graph_id} - {suffix} - {timestamp} due to non-converged network.")
-                    continue
-
-                graph_name = f"{graph_id}_modification_{suffix}_{timestamp}"
-
-                # Store NetworkX graph
-                nx_graphs[graph_name] = modified_subgraph
-
-                if loadcase_data["network"]:
-                    pp_networks[graph_name] = pp.to_json(loadcase_data["network"])
-
-                # Extract node & edge features
-                node_features = extract_node_features(loadcase_data["network"], modified_subgraph) if loadcase_data["network"] else None
-                edge_features = extract_edge_features(loadcase_data["network"], modified_subgraph) if loadcase_data["network"] else None
-
-                features[graph_name] = {"node_features": node_features, "edge_features": edge_features}
-
-    # Save NetworkX graphs as a Pickle file
-    with open(f"{save_location}/networkx_graphs.pkl", "wb") as f:
-        pkl.dump(nx_graphs, f)
-    print("Saved NetworkX graphs.")
-
-    # Save Pandapower networks as a JSON file
-    with open(f"{save_location}/pandapower_networks.json", "w") as f:
-        f.write(pp.to_json(pp_networks))
-    print("Saved Pandapower networks.")
-
-    # Save node and edge features as a Pickle file
-    with open(f"{save_location}/graph_features.pkl", "wb") as f:
+    # Extract features
+    node_features = extract_node_features(pp_network, nx_graph)
+    edge_features = extract_edge_features(pp_network, nx_graph)
+    features = {"node_features": node_features, "edge_features": edge_features}
+    
+    # Create subfolders for better organization
+    nx_dir = os.path.join(save_location, "networkx_graphs")
+    pp_dir = os.path.join(save_location, "pandapower_networks")
+    features_dir = os.path.join(save_location, "graph_features")
+    
+    os.makedirs(nx_dir, exist_ok=True)
+    os.makedirs(pp_dir, exist_ok=True)
+    os.makedirs(features_dir, exist_ok=True)
+    
+    # Save NetworkX graph
+    with open(f"{nx_dir}/{graph_name}.pkl", "wb") as f:
+        pkl.dump(nx_graph, f)
+    
+    # Save Pandapower network
+    with open(f"{pp_dir}/{graph_name}.json", "w") as f:
+        f.write(pp.to_json(pp_network))
+    
+    # Save features
+    with open(f"{features_dir}/{graph_name}.pkl", "wb") as f:
         pkl.dump(features, f)
-    print("Saved node and edge features.")
-
-    print("Saving process completed successfully.")

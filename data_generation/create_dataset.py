@@ -12,7 +12,7 @@ src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if src_path not in sys.path:
     sys.path.append(src_path)
     
-from electrify_subgraph2 import transform_subgraphs
+from electrify_subgraph3 import transform_subgraphs
 from logger_setup import logger 
 
 date_str = datetime.now().strftime("%d%m%Y")
@@ -23,7 +23,7 @@ while save_location.exists():
     counter += 1
 
 # abs path
-path_to_graphs = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "filtered_subgraphs.pkl")))
+path_to_graphs = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "filtered_complete_subgraphs_final.pkl")))
 with open(path_to_graphs, 'rb') as f:
     subgraphs = pkl.load(f)
 
@@ -59,7 +59,7 @@ kwargs = {
 
     # Subgraph Sampling options 
     'is_iterate': False,            # If True, iterate over all subgraphs.
-    'amount_of_subgraphs': 1000,       # Amount of subgraphs to sample if is_iterate is False.
+    'amount_of_subgraphs': 100,       # Amount of subgraphs to sample if is_iterate is False.
     "plot_added_edge": False,
     'plot_subgraphs': False,         # If True, plot the transformed subgraphs.
     'plot_distributions': False,     # If True, plot the distributions.

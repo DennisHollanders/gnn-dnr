@@ -86,7 +86,7 @@ def main():
     
     try:
         criterion_class = getattr(model_module, args.criterion_name)
-        criterion = criterion_class(weight_switch=1.0, weight_physics=10.0)  # Initialize
+        criterion = criterion_class(weight_switch=1.0, weight_physics=10.0)  
     except (ImportError, AttributeError) as e:
         print(f"Error loading {args.criterion_name} from {model_module}: {e}")
         if args.criterion_name == "MSELoss":
@@ -121,7 +121,7 @@ def main():
         if val_loss < best_loss:
             best_loss = val_loss
             patience = 0
-            torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{run.name}-Best.pt")
+            torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Best.pt")
         else:
             patience += 1
             if patience == args.patience:

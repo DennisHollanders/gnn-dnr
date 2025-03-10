@@ -1,7 +1,7 @@
 description: "Train Graph Autoencoder"
 
 # Data
-data_folder: "data\\test_data"
+data_folder: "data\\transformed_subgraphs_08032025_2"
 real_data_folder: "data_combined_real_world"
 
 # Model
@@ -15,10 +15,11 @@ activation: "relu"
 dropout_rate: 0.0
 learning_rate: 0.001
 weight_decay: 0.00005
-batch_size: 4
+batch_size: 1
 epochs: 100
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
 job_name: "first run"
 criterion_name: MSELoss
+wandb: False

@@ -1,0 +1,24 @@
+activation: relu
+batch_size: 1
+criterion_name: PIGNNCriterion
+data_folder: data\test_data
+description: Train PIGNN
+dropout_rate: 0.0
+epochs: 100
+hidden_dims:
+- 256
+- 128
+- 64
+- 32
+- 16
+hp_search: false
+hp_search_n_trials: 50
+input_dim: 4
+job_name: first run
+latent_dim: 8
+learning_rate: 0.001
+model_module: PIGNN
+patience: 10
+real_data_folder: data_combined_real_world
+wandb: false
+weight_decay: 5.0e-05

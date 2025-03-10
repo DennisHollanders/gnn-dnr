@@ -69,39 +69,125 @@ def merge_features_into_nx(nx_graph, node_feats, edge_feats):
             nx_graph[u][v][feat_key] = feat_value
 
 def create_pyg_data(nx_graph, pp_net):
+    # Make sure required attributes exist in the graph
     unify_node_attributes(nx_graph, ["p", "q", "v", "theta"])
     unify_edge_attributes(nx_graph, ["R", "X", "switch_state"])
 
+    # Print node and edge count before conversion
+    print(f"NetworkX graph has {nx_graph.number_of_nodes()} nodes and {nx_graph.number_of_edges()} edges")
+    
+    # Convert networkx to PyG
     data = from_networkx(
         nx_graph,
         group_node_attrs=["p", "q", "v", "theta"],
         group_edge_attrs=["R", "X", "switch_state"]
     )
 
-    # Convert features to tensors
-    data.x = torch.stack([data.p, data.q, data.v, data.theta], dim=-1).float()
-    data.edge_attr = torch.stack([data.R, data.X], dim=-1).float()
+    # Debug the data structure after conversion
+    print(f"PyG data has {data.num_nodes} nodes and {data.num_edges} edges")
+    print("Available node attributes:", [key for key in data.keys() if isinstance(data[key], torch.Tensor) and data[key].size(0) == data.num_nodes])
+    print("Available edge attributes:", [key for key in data.keys() if isinstance(data[key], torch.Tensor) and data[key].size(0) == data.num_edges])
     
-    del data.p, data.q, data.v, data.theta
-    del data.R, data.X
+    # Process node features
+    if hasattr(data, 'p') and hasattr(data, 'q') and hasattr(data, 'v') and hasattr(data, 'theta'):
+        # If they exist as separate attributes
+        data.x = torch.stack([data.p, data.q, data.v, data.theta], dim=-1).float()
+        del data.p, data.q, data.v, data.theta
+    elif hasattr(data, 'x') and data.x.size(-1) == 4:
+        # If they've been automatically grouped into x
+        pass
+    else:
+        # If the structure is different than expected, create default features
+        print(f"Warning: Node features not found in expected format, creating zeros")
+        data.x = torch.zeros((data.num_nodes, 4), dtype=torch.float32)
+    
+    # Process edge features
+    if hasattr(data, 'R') and hasattr(data, 'X'):
+        data.edge_attr = torch.stack([data.R, data.X], dim=-1).float()
+        del data.R, data.X
+    elif hasattr(data, 'edge_attr') and data.edge_attr.size(-1) >= 2:
+        # If they've been automatically grouped
+        if data.edge_attr.size(-1) > 2:
+            # Only keep the first two features (R and X)
+            data.edge_attr = data.edge_attr[:, :2].float()
+    else:
+        print(f"Warning: Edge features not found in expected format, creating zeros")
+        data.edge_attr = torch.zeros((data.num_edges, 2), dtype=torch.float32)
+    
+    # Clean up switch_state if it exists
+    if hasattr(data, 'switch_state'):
+        del data.switch_state
 
-    print("ppnet \n ", pp_net, "\n \n ")
+    conductance_matrix = compute_conductance_matrix(nx_graph, data.num_nodes)
+    data.conductance_matrix = conductance_matrix
 
-    # Ensure valid pp_net before computing Ybus
-    #if pp_net is None:
-    #    raise ValueError("pp_net is None, cannot compute Ybus!")
-
-    #try:
-    _, Ymatrix, _ = makeYbus(pp_net)
-    data.conductance_matrix = torch.tensor(np.real(Ymatrix.toarray()), dtype=torch.float32)
-    #except Exception as e:
-    #    print(f"Error computing conductance matrix for graph: {e}")
-    #    data.conductance_matrix = torch.zeros((len(nx_graph.nodes), len(nx_graph.nodes)), dtype=torch.float32)
-
-    data.adjacency_matrix = torch.tensor(nx.to_numpy_array(nx_graph), dtype=torch.float32)
-    data.switch_matrix = compute_switch_matrix(nx_graph)
-
+    data._store_attr = ["conductance_matrix"]
+    
+    # Add line currents and net injection placeholders for physics calculations
+    data.line_currents = torch.zeros(data.num_edges, dtype=torch.float32)
+    data.net_injection = torch.zeros(data.num_nodes, dtype=torch.float32)
+    
+    # Create safe version of compute_switch_matrix 
+    #data.switch_matrix = safe_compute_switch_matrix(nx_graph, data.num_nodes)
+    
+    # Create safe adjacency matrix
+    # try:
+    #     # Get node mapping from networkx to PyG (important!)
+    #     if hasattr(data, '_mapping'):
+    #         node_mapping = data._mapping
+    #         # Create adjacency matrix with the correct indices
+    #         adj_matrix = torch.zeros((data.num_nodes, data.num_nodes), dtype=torch.float32)
+            
+    #         for u, v in nx_graph.edges():
+    #             # Map original indices to PyG indices
+    #             if u in node_mapping and v in node_mapping:
+    #                 u_idx, v_idx = node_mapping[u], node_mapping[v]
+    #                 if u_idx < data.num_nodes and v_idx < data.num_nodes:
+    #                     adj_matrix[u_idx, v_idx] = 1.0
+    #                     adj_matrix[v_idx, u_idx] = 1.0
+            
+    #         data.adjacency_matrix = adj_matrix
+    #     else:
+    #         # Fallback to using the numpy array method, but be careful with indices
+    #         adj_np = nx.to_numpy_array(nx_graph)
+    #         # Ensure the matrix size matches the number of nodes in PyG data
+    #         if adj_np.shape[0] > data.num_nodes:
+    #             adj_np = adj_np[:data.num_nodes, :data.num_nodes]
+    #         elif adj_np.shape[0] < data.num_nodes:
+    #             # Pad with zeros if needed
+    #             new_adj = np.zeros((data.num_nodes, data.num_nodes))
+    #             new_adj[:adj_np.shape[0], :adj_np.shape[1]] = adj_np
+    #             adj_np = new_adj
+                
+    #         data.adjacency_matrix = torch.tensor(adj_np, dtype=torch.float32)
+    # except Exception as e:
+    #     print(f"Error creating adjacency matrix: {e}")
+    #     data.adjacency_matrix = torch.zeros((data.num_nodes, data.num_nodes), dtype=torch.float32)
+    print(data)
     return data
+
+def safe_compute_switch_matrix(nx_graph, num_nodes):
+    """Create a switch matrix that handles index mapping safely"""
+    switch_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
+    
+    # Get a mapping of networkx node IDs to consecutive indices
+    # This is needed because networkx can have non-consecutive node IDs
+    node_list = list(nx_graph.nodes())
+    node_to_idx = {node: i for i, node in enumerate(node_list)}
+    
+    try:
+        for u, v, data in nx_graph.edges(data=True):
+            if "switch_state" in data:
+                # Check if indices are within bounds
+                u_idx, v_idx = node_to_idx.get(u), node_to_idx.get(v)
+                if u_idx is not None and v_idx is not None:
+                    if u_idx < num_nodes and v_idx < num_nodes:
+                        switch_matrix[u_idx, v_idx] = data["switch_state"]
+                        switch_matrix[v_idx, u_idx] = data["switch_state"]
+    except Exception as e:
+        print(f"Error in computing switch matrix: {e}")
+    
+    return switch_matrix
 
 def create_pyg_dataset(folder_path):
     nx_graphs, graph_features, pp_nets = load_graph_data(folder_path)
@@ -110,6 +196,7 @@ def create_pyg_dataset(folder_path):
     total = len(nx_graphs)
 
     for graph_name, nx_graph in nx_graphs.items():
+        print("graph_name", graph_name) 
         if nx_graph is None:
             print(f"Skipping {graph_name}: Graph is None.")
             skipped += 1
@@ -141,7 +228,9 @@ def create_pyg_dataset(folder_path):
             continue
 
         try:
-            data = create_pyg_data(nx_graph, pp_nets[graph_name])
+            pp_net = pp_nets[graph_name]
+            #print(pp_net)
+            data = create_pyg_data(nx_graph, pp_net)
         except Exception as e:
             print(f"Skipping {graph_name}: Error creating PyG data: {e}")
             skipped += 1
@@ -153,22 +242,13 @@ def create_pyg_dataset(folder_path):
     return data_list
 
 
-def get_pyg_loader(folder_path, batch_size=4, shuffle=True,transform=None):
+def get_pyg_loader(folder_path, batch_size=4, shuffle=True, transform=None):
     data_list = create_pyg_dataset(folder_path)
+    
     if transform:
-        dataset = [transform(data) for data in dataset]
+        data_list = [transform(data) for data in data_list]
+
     return DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
-
-def compute_switch_matrix(nx_graph):
-    num_nodes = len(nx_graph.nodes)
-    switch_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
-
-    for u, v, data in nx_graph.edges(data=True):
-        if "switch_state" in data:
-            switch_matrix[u, v] = data["switch_state"]
-            switch_matrix[v, u] = data["switch_state"]
-
-    return switch_matrix
 
 def combined_augmentations(data):
     data = normalize_features(data)
@@ -179,3 +259,43 @@ def combined_augmentations(data):
     data = global_node_addition(data)
     
     return data
+def compute_conductance_matrix(nx_graph, num_nodes):
+    """Compute the conductance matrix from impedance values in the graph"""
+    conductance_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
+    
+    # Get a mapping of networkx node IDs to consecutive indices
+    node_list = list(nx_graph.nodes())
+    node_to_idx = {node: i for i, node in enumerate(node_list)}
+    
+    try:
+        for u, v, data in nx_graph.edges(data=True):
+            if "R" in data and "X" in data:
+                # Get the indices
+                u_idx, v_idx = node_to_idx.get(u), node_to_idx.get(v)
+                if u_idx is not None and v_idx is not None:
+                    if u_idx < num_nodes and v_idx < num_nodes:
+                        # Calculate conductance from resistance (ignore reactance for simplicity)
+                        # In a more complete implementation, you'd use complex admittance
+                        r_value = data["R"]
+                        x_value = data["X"]
+                        
+                        # Avoid division by zero
+                        if r_value > 0:
+                            g_value = 1.0 / r_value
+                            # Fill the conductance matrix (symmetric)
+                            conductance_matrix[u_idx, v_idx] = g_value
+                            conductance_matrix[v_idx, u_idx] = g_value
+                            # Diagonal elements (negative sum of row)
+                            conductance_matrix[u_idx, u_idx] -= g_value
+                            conductance_matrix[v_idx, v_idx] -= g_value
+    except Exception as e:
+        print(f"Error in computing conductance matrix: {e}")
+    
+    return conductance_matrix
+
+
+if __name__ == "__main__":
+    folder_path = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\1741471046.04005"
+    loader = get_pyg_loader(folder_path)
+    for data in loader:
+        print(data)
