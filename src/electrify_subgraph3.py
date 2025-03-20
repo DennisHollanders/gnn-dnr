@@ -22,6 +22,13 @@ from pathlib import Path
 import json 
 from shapely.geometry import Point, LineString
 import re
+import glob
+import math
+import time
+import simbench
+import pandapower.networks as pn 
+import concurrent.futures
+
 
 from logger_setup import logger 
 print(f"opened logger:{logger}")
@@ -179,7 +186,7 @@ def modify_subgraph(subgraph, kwargs, dist_callable):
     subgraph_to_adapt, n_cycles = find_switch_edges_in_non_radial(subgraph)
     max_distance = calculate_max_distance(subgraph_to_adapt)
     max_cycle_length = calculate_max_theoretical_cycle_length(subgraph_to_adapt)
-
+    logger.info(f"initial cycles: {n_cycles}, max cycle length: {max_cycle_length}, max distance: {max_distance}")
     required_switches = dist_callable['n_switches']()
     convex_layers_to_use = dist_callable['layer_list']()
     layers = extract_layers(nx.get_node_attributes(subgraph_to_adapt, 'position'), max(convex_layers_to_use))
@@ -240,7 +247,7 @@ def calculate_max_theoretical_cycle_length(subgraph):
     if len(longest_paths) >= 2:
         return longest_paths[0] + longest_paths[1] + 1  # Connecting the two longest paths
     elif len(longest_paths) == 1:
-        return longest_paths[0] + 1  # Single longest path plus one edge
+        return longest_paths[0] + 1  # longest path plus one edge
     return 0
 
 def calculate_max_distance(subgraph_to_adapt):
@@ -355,33 +362,123 @@ def compute_slack_metric(subgraph, node):
     return degree * avg_capacity
 
 
-def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_data, line_sources):
+# def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_data, line_sources):
+#     if len(net.line) > 0:
+#         print("Interpolating failed lines.")
+#         avg_params = {
+#             "r_ohm_per_km": net.line["r_ohm_per_km"].mean(),
+#             "x_ohm_per_km": net.line["x_ohm_per_km"].mean(),
+#             "c_nf_per_km": net.line["c_nf_per_km"].mean(),
+#             "max_i_ka": net.line["max_i_ka"].mean(),
+#             "q_mm2": net.line["q_mm2"].mean(),
+#             "alpha": net.line["alpha"].mean()
+#         }
+#         for u, v in failed_lines:
+#             from_bus = nx_to_pp_bus_map[u]
+#             to_bus = nx_to_pp_bus_map[v]
+#             create_line_and_switch(net, from_bus, to_bus, avg_params, line_sources,
+#                                      line_type="interpolated", line_name=f"{u}--{v}: interpolated->average")
+#     else:
+#         print("Creating random lines for failed lines.")	
+#         for u, v in failed_lines:
+#             from_bus = nx_to_pp_bus_map[u]
+#             to_bus = nx_to_pp_bus_map[v]
+#             create_line_and_switch(net, from_bus, to_bus, random_cable_data, line_sources,
+#                                      line_type="standard_cable", line_name=f"{u}--{v}: interpolated->random:{random_cable_data}")
+#     return net, line_sources
+def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_data, line_sources, subgraph=None):
+    """
+    Interpolate failed lines by selecting appropriate line types from existing lines
+    rather than averaging parameters.
+    """
+    print("Interpolating failed lines with improved method.")
+    
+    # First collect all existing line types in the network
+    existing_line_types = []
     if len(net.line) > 0:
-        avg_params = {
-            "r_ohm_per_km": net.line["r_ohm_per_km"].mean(),
-            "x_ohm_per_km": net.line["x_ohm_per_km"].mean(),
-            "c_nf_per_km": net.line["c_nf_per_km"].mean(),
-            "max_i_ka": net.line["max_i_ka"].mean(),
-            "q_mm2": net.line["q_mm2"].mean(),
-            "alpha": net.line["alpha"].mean()
-        }
-        for u, v in failed_lines:
-            from_bus = nx_to_pp_bus_map[u]
-            to_bus = nx_to_pp_bus_map[v]
-            create_line_and_switch(net, from_bus, to_bus, avg_params, line_sources,
-                                     line_type="interpolated", line_name=f"{u}--{v}: interpolated->average")
-    else:
+        # Group lines by their electrical parameters to identify distinct types
+        line_params = net.line[["r_ohm_per_km", "x_ohm_per_km", "c_nf_per_km", 
+                                "max_i_ka", "q_mm2", "alpha"]].copy()
+        line_params["type"] = net.line.get("type", "cs")
+        
+        # Round slightly to handle floating point variations
+        line_params = line_params.round(6)
+        
+        # Get unique parameter combinations
+        unique_params = line_params.drop_duplicates().to_dict('records')
+        existing_line_types = unique_params
+        
+        print(f"Found {len(existing_line_types)} unique line types in network")
+    
+    # If no existing line types, use the provided standard cable
+    if not existing_line_types:
+        print("No existing line types found, using standard cable")
         for u, v in failed_lines:
             from_bus = nx_to_pp_bus_map[u]
             to_bus = nx_to_pp_bus_map[v]
             create_line_and_switch(net, from_bus, to_bus, random_cable_data, line_sources,
-                                     line_type="standard_cable", line_name=f"{u}--{v}: interpolated->random:{random_cable_data}")
+                                  line_type="standard_cable", line_name=f"{u}--{v}: interpolated->standard")
+        return net, line_sources
+    
+    # For each failed line, find the most appropriate line type
+    for u, v in failed_lines:
+        from_bus = nx_to_pp_bus_map[u]
+        to_bus = nx_to_pp_bus_map[v]
+        
+        selected_line_type = None
+        
+        # APPROACH 1: Check if we can find line types connected to either node
+        if subgraph:
+            # First try to find line types connected to these nodes in the original graph
+            adjacent_edge_types = []
+            
+            # Look at all adjacent edges of u and v in subgraph
+            for node in [u, v]:
+                for neighbor in subgraph.neighbors(node):
+                    if subgraph.has_edge(node, neighbor):
+                        edge_data = subgraph.edges[node, neighbor]
+                        if "pandapower_type" in edge_data and isinstance(edge_data["pandapower_type"], dict):
+                            adjacent_edge_types.append(edge_data["pandapower_type"])
+            
+            if adjacent_edge_types:
+                # If we have adjacent edge types, pick the most common one
+                selected_line_type = adjacent_edge_types[0]
+                print(f"Using adjacent line type for {u}--{v}")
+        
+        # APPROACH 2: If no adjacent line types or no subgraph, use most common line type
+        if not selected_line_type:
+            # If multiple line types exist, use the most common one
+            if len(existing_line_types) == 1:
+                selected_line_type = existing_line_types[0]
+            else:
+                # Find the line type with highest capacity - usually a good choice
+                # for reliability (this is a simple heuristic)
+                selected_line_type = max(existing_line_types, 
+                                        key=lambda x: x.get("max_i_ka", 0))
+            
+            print(f"Using common line type for {u}--{v}")
+        
+        # Ensure we don't have zero values for critical parameters
+        for param in ["r_ohm_per_km", "x_ohm_per_km"]:
+            if selected_line_type[param] <= 1e-10:
+                # Use a small non-zero value to avoid division by zero
+                selected_line_type[param] = 0.01
+                print(f"WARNING: Fixed zero {param} for line {u}--{v}")
+        
+        create_line_and_switch(net, from_bus, to_bus, selected_line_type, line_sources,
+                              line_type="interpolated", line_name=f"{u}--{v}: interpolated->selected")
+    
     return net, line_sources
 
 def find_operating_voltage(subgraph):
     for _, _, data in subgraph.edges(data=True):
         if 'operatingvoltage' in data and not pd.isna(data['operatingvoltage']):
-            return data['operatingvoltage'] / 1000
+            if data["operatingvoltage"] > 1000:
+                return data["operatingvoltage"] / 1000
+            elif data["operatingvoltage"] < 1:
+                return data["operatingvoltage"] * 1000
+            else:
+                return data['operatingvoltage']
     return 10
 
 def create_line_and_switch(net, from_bus, to_bus, line_params, line_sources, line_type, line_name, is_switch=True):
@@ -406,9 +503,76 @@ def create_line_and_switch(net, from_bus, to_bus, line_params, line_sources, lin
         print(f"Failed to create line {line_name}: {e}")
         line_sources["failed"] += 1
 
+
+def scale_slack_buses(base_value, node_count, min_slack=1, max_slack=None):
+    if max_slack is None:
+        max_slack = min(int(node_count * 0.1), 20)
+
+    min_slack = max(1, min_slack)
+    max_slack = max(min_slack + 1, max_slack)
+    
+    small_graph = 50    
+    large_graph = 500   
+    if node_count <= small_graph:
+        scale_factor = 1.0
+    else:
+        log_ratio = math.log(node_count / small_graph, 2) 
+        scale_factor = 1.0 + (log_ratio * 0.5)  #
+    scaled_value = int(base_value * scale_factor)
+
+    noise = random.uniform(-0.3, 0.3)
+    final_value = int(scaled_value + noise * scaled_value)
+
+    final_value = max(min_slack, min(final_value, max_slack))
+    
+    return final_value
+
+def select_top_slack_nodes(subgraph, candidate_nodes, num_slack):
+    min_distance = len(subgraph.edges)**0.5 / 2.0
+    metrics = {node: compute_slack_metric(subgraph, node) for node in candidate_nodes}
+    
+    sorted_nodes = sorted(metrics.items(), key=lambda x: x[1], reverse=True)
+    
+    selected_slack_nodes = []
+    considered_nodes = []
+
+    for node, metric in sorted_nodes:
+        considered_nodes.append(node)
+        too_close = False
+        for selected_node in selected_slack_nodes:
+            try:
+                distance = nx.shortest_path_length(subgraph, node, selected_node)
+                if distance < min_distance:
+                    too_close = True
+                    break
+            except nx.NetworkXNoPath:
+                # Nodes are in different components, so they're far apart
+                pass
+        
+        if not too_close:
+            selected_slack_nodes.append(node)
+            print(f"Selected slack node {node} with metric {metric:.4f}")
+        if len(selected_slack_nodes) >= num_slack:
+            break
+    if len(selected_slack_nodes) < num_slack:
+        print(f"Could only select {len(selected_slack_nodes)} nodes with spacing constraint, filling remaining {num_slack - len(selected_slack_nodes)}")
+        remaining_candidates = [node for node, _ in sorted_nodes if node not in selected_slack_nodes]
+        additional_nodes = remaining_candidates[:min(num_slack - len(selected_slack_nodes), len(remaining_candidates))]
+        
+        for node in additional_nodes:
+            selected_slack_nodes.append(node)
+            print(f"Added additional slack node {node} with metric {metrics[node]}")
+    return selected_slack_nodes
+
+
 def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: dict) -> pp.pandapowerNet:
     net = pp.create_empty_network()
-    num_slack = 4 # dist_callable["n_slack"]()
+
+    base_num_slack = dist_callable["n_slack_busses"]()
+    num_slack = scale_slack_buses(base_num_slack, len(subgraph.nodes))
+    
+    print(f"Graph has {len(subgraph.nodes)} nodes. Base slack buses: {base_num_slack}, Scaled slack buses: {num_slack}")
+    
     vn_kv = find_operating_voltage(subgraph)
     print(f"Operating voltage: {vn_kv} kV")
     
@@ -424,11 +588,8 @@ def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: d
                             coords=(data["geometry"].x, data["geometry"].y))
         nx_to_pp_bus_map[node] = bus
     net["nx_to_pp_bus_map"] = nx_to_pp_bus_map
-    
-    metrics = {node: compute_slack_metric(subgraph, node) for node in candidate_nodes}
-    max_metric = max(metrics.values())
-    top_candidates = [node for node, m in metrics.items() if m == max_metric]
-    selected_slack_nodes = random.sample(top_candidates, k=min(num_slack, len(top_candidates)))
+
+    selected_slack_nodes = select_top_slack_nodes(subgraph, candidate_nodes, num_slack)
 
     total_load = sum(data.get("net_load", 0) for node, data in subgraph.nodes(data=True) if data.get("net_load", 0) > 0)
     slack_power = total_load / len(selected_slack_nodes) if selected_slack_nodes else 0
@@ -455,6 +616,7 @@ def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: d
                 net.bus.loc[bus_id, "name"] = f"{node}_Neutral"
                 
     failed_lines = []
+
     for u, v, edge_data in subgraph.edges(data=True):
         from_bus = nx_to_pp_bus_map[u]
         to_bus = nx_to_pp_bus_map[v]
@@ -467,7 +629,8 @@ def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: d
                                      is_switch=is_switch)
         except Exception as e:
             failed_lines.append((u, v))
-    
+    print("succesfull lines: ", (len(subgraph.edges) - len(failed_lines) )/ len(subgraph.edges), "%")
+
     if failed_lines:
         standard_cable_mapping = {
             'standard_cable_1': {"r_ohm_per_km": 0.124, "x_ohm_per_km": 0.08,
@@ -486,10 +649,18 @@ def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: d
     
     logging.info(f"line_sources: {line_sources}")
     net.gen.loc[net.gen.slack, 'slack_weight'] = 1.0/len(net.gen[net.gen.slack])   
-    net.sn_mva = 10.0
- 
-    island_nodes = None
 
+
+    r_ohm = net.line["r_ohm_per_km"]
+    x_ohm = net.line["x_ohm_per_km"]
+    
+    # Handle empty series and make sure there are values before taking min
+    if not r_ohm.empty and not x_ohm.empty:
+        min_r = r_ohm.min()
+        min_x = x_ohm.min()
+        print("Minimum r and x values: ", min_r, min_x)
+    else:
+        print("No resistance or reactance values found")
     max_attempts = 5
     attempt = 0
     converged = False
@@ -550,8 +721,9 @@ def create_pandapower_network(subgraph: nx.Graph, kwargs: dict, dist_callable: d
                 print(f"Error converting island node strings to integers: {e}")
     #if island_nodes is not None: 
     #    plot_network(net, island_nodes)
-    result = pp.diagnostic(net, detailed_report= True,warnings_only=False)
-    #print(result)
+    if kwargs["show_pandapower_report"]:
+        result = pp.diagnostic(net, detailed_report= True,warnings_only=False)
+        print(result)
 
     info = {
         "num_buses": len(net.bus),
@@ -649,7 +821,7 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable, save_location=None):
                     timeframes = sample_timeframes(kwargs["n_loadcase_time_intervals"], kwargs["interval_duration_minutes"])
                     
                     # Process each timeframe and save immediately
-                    for date_time in timeframes:
+                    for idx,date_time in enumerate(timeframes):
                         consumption, production, max_consumption,max_production = retrieve_standard_production(date_time, dfs[3])
                         # Scale consumption and production based on average consumption per node
                         consumption = avg_consumption_per_node * consumption/max_consumption
@@ -658,16 +830,13 @@ def electrify_graphs(subgraphs, dfs, kwargs, dist_callable, save_location=None):
                         for node in modified_subgraph.nodes:
                             consumption_value = np.random.normal(consumption, consumption * kwargs["consumption_std"])
                             production_value = np.random.normal(production, production * kwargs["production_std"])
-                        
-                            net_load = np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* kwargs["net_load_std"])
-               
-                        
+                            net_load = np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* kwargs["net_load_std"])                      
                             modified_subgraph.nodes[node]["net_load"] = net_load
                         electrified_network, info = create_pandapower_network(modified_subgraph, kwargs, dist_callable)
                         if electrified_network.converged:
                             processed_counts["successful"] += 1
                             if kwargs["save"] and save_location:
-                                graph_name = f"{graph_id}_modification_{suffix}_{date_time}"
+                                graph_name = f"{graph_id}_modification_{suffix}_{idx}"
                                 save_single_graph(
                                     graph_name, 
                                     modified_subgraph, 
@@ -749,6 +918,7 @@ def extract_node_features(net, nx_graph):
             "v": net.res_bus.vm_pu.at[pp_bus_idx],
             "theta": net.res_bus.va_degree.at[pp_bus_idx]
         }
+    #print(node_features)
     return node_features
 
 def extract_edge_features(net, nx_graph):
@@ -771,97 +941,578 @@ def extract_edge_features(net, nx_graph):
             "X": X,
             "switch_state": switch_status,
         }
+    #print(edge_features)
     return edge_features
 
-# def save_graph_data(electrified_graphs, kwargs, distributions, distribution_samples):
-#     """
-#     Save networkx graphs as a dictionary in a Pickle file,
-#     Pandapower networks as JSON, and features in a separate Pickle file.
-#     """
-#     save_location = kwargs["save_location"]
-#     os.makedirs(save_location, exist_ok=True)
+def print_feature_statistics(node_feats, edge_feats):
+    """
+    Print average values and statistics for node and edge features from feature dictionaries.
     
-#     print("Starting the saving process")
+    Args:
+        node_feats: Dictionary of node features
+        edge_feats: Dictionary of edge features
+    """
+    # Collect node feature values
+    node_features = {
+        "p": [],
+        "q": [],
+        "v": [],
+        "theta": []
+    }
+    
+    for node_id, features in node_feats.items():
+        for feature in node_features:
+            if feature in features:
+                value = features[feature]
+                if not np.isnan(value):
+                    node_features[feature].append(value)
+    
+    # Collect edge feature values
+    edge_features = {
+        "R": [],
+        "X": [],
+        "switch_state": []
+    }
+    
+    for edge_id, features in edge_feats.items():
+        for feature in edge_features:
+            if feature in features:
+                value = features[feature]
+                if not np.isnan(value):
+                    edge_features[feature].append(value)
+    
+    # Print node statistics
+    print("\n---- Node Feature Statistics ----")
+    for feature, values in node_features.items():
+        if values:
+            print(f"{feature:>6}: avg={np.mean(values):.4f}, min={np.min(values):.4f}, "
+                  f"max={np.max(values):.4f}, std={np.std(values):.4f}, count={len(values)}")
+        else:
+            print(f"{feature:>6}: No valid values")
+    
+    # Print edge statistics
+    print("\n---- Edge Feature Statistics ----")
+    for feature, values in edge_features.items():
+        if values:
+            print(f"{feature:>12}: avg={np.mean(values):.4f}, min={np.min(values):.4f}, "
+                  f"max={np.max(values):.4f}, std={np.std(values):.4f}, count={len(values)}")
+        else:
+            print(f"{feature:>12}: No valid values")
+    
+    # Print switch state counts
+    switch_states = edge_features["switch_state"]
+    if switch_states:
+        switch_closed = sum(1 for s in switch_states if s > 0.5)
+        switch_open = len(switch_states) - switch_closed
+        print(f"\nSwitch states: {switch_closed} closed, {switch_open} open "
+              f"({switch_closed/len(switch_states)*100:.1f}% closed)")
+        
+def build_clean_graph(nx_graph, node_feats, edge_feats):
+    # Define the essential attributes we need
+    essential_node_attrs = ["p", "q", "v", "theta"]
+    essential_edge_attrs = ["R", "X", "switch_state"]
+    
+    clean_graph = nx.Graph()
+    
+    if hasattr(nx_graph, "name"):
+        clean_graph.name = nx_graph.name
+    
+    # Relabel the graph nodes to consecutive integers
+    node_mapping = {node: i for i, node in enumerate(nx_graph.nodes())}
+    missing_node_attrs_count = 0
+    
+    for node in nx_graph.nodes():
+        new_node_id = node_mapping[node]
+        node_attrs = {"p": 0.0, "q": 0.0, "v": 0.0, "theta": 0.0}
+        
+        # Process each required attribute
+        for attr in essential_node_attrs:
+            # Try to get from node_feats first (preferred source)
+            if node_feats and node in node_feats and attr in node_feats[node]:
+                node_attrs[attr] = node_feats[node][attr]
+            # If not in node_feats, try original graph
+            elif attr in nx_graph.nodes[node]:
+                node_attrs[attr] = nx_graph.nodes[node][attr]
+            # If we got here, the attribute is truly missing (not in either source)
+            # We'll use the default value from node_attrs initialization
+        
+        clean_graph.add_node(new_node_id, **node_attrs)
 
-#     nx_graphs = {}
-#     pp_networks = {}
-#     features = {}
+    missing_edge_attrs_count = 0
+    
+    for u, v in nx_graph.edges():
+        new_u = node_mapping[u]
+        new_v = node_mapping[v]
+        
+        edge_attrs = {
+            "R": 0.00,
+            "X": 0.00,
+            "switch_state": 0.0
+        }
+        
+        # Check both possible edge orientations in edge_feats
+        edge = (u, v)
+        reverse_edge = (v, u)
+        edge_found = False
+        
+        # Process each required attribute
+        for attr in essential_edge_attrs:
+            # Try edge_feats first (in both orientations)
+            if edge_feats:
+                if edge in edge_feats and attr in edge_feats[edge]:
+                    edge_attrs[attr] = edge_feats[edge][attr]
+                    edge_found = True
+                elif reverse_edge in edge_feats and attr in edge_feats[reverse_edge]:
+                    edge_attrs[attr] = edge_feats[reverse_edge][attr]
+                    edge_found = True
+                # If not in edge_feats, try original graph
+                elif attr in nx_graph[u][v]:
+                    edge_attrs[attr] = nx_graph[u][v][attr]
+                    edge_found = True
+            # If edge_feats isn't available, try the original graph
+            elif attr in nx_graph[u][v]:
+                edge_attrs[attr] = nx_graph[u][v][attr]
+                edge_found = True
+                
+        clean_graph.add_edge(new_u, new_v, **edge_attrs)
+        
+        if not edge_found:
+            missing_edge_attrs_count += 1
+    
+    assert missing_node_attrs_count == 0, f"Missing node attributes: {missing_node_attrs_count}"
+    assert missing_edge_attrs_count == 0, f"Missing edge attributes: {missing_edge_attrs_count}"
+    return clean_graph
 
-#     for graph_id, graph_data in electrified_graphs.items():
-#         if graph_data is None:
-#             print(f"Skipping graph {graph_id} as it did not converge.")
-#             continue
-
-#         original_graph = graph_data["original_graph"]
-#         modified_graphs = graph_data.get("modified_graphs", {})
-
-#         for suffix, modified_graph_data in modified_graphs.items():
-#             modified_subgraph = modified_graph_data["subgraph"]
-#             loadcases = modified_graph_data["loadcases"]
-
-#             for timestamp, loadcase_data in loadcases.items():
-#                 if loadcase_data is None:
-#                     print(f"Skipping {graph_id} - {suffix} - {timestamp} due to non-converged network.")
-#                     continue
-
-#                 graph_name = f"{graph_id}_modification_{suffix}_{timestamp}"
-
-#                 # Store NetworkX graph
-#                 nx_graphs[graph_name] = modified_subgraph
-
-#                 if loadcase_data["network"]:
-#                     pp_networks[graph_name] = pp.to_json(loadcase_data["network"])
-
-#                 # Extract node & edge features
-#                 node_features = extract_node_features(loadcase_data["network"], modified_subgraph) if loadcase_data["network"] else None
-#                 edge_features = extract_edge_features(loadcase_data["network"], modified_subgraph) if loadcase_data["network"] else None
-
-#                 features[graph_name] = {"node_features": node_features, "edge_features": edge_features}
-
-#     # Save NetworkX graphs as a Pickle file
-#     with open(f"{save_location}/networkx_graphs.pkl", "wb") as f:
-#         pkl.dump(nx_graphs, f)
-#     print("Saved NetworkX graphs.")
-
-#     # Save Pandapower networks as a JSON file
-#     with open(f"{save_location}/pandapower_networks.json", "w") as f:
-#         f.write(pp.to_json(pp_networks))
-#     print("Saved Pandapower networks.")
-
-#     # Save node and edge features as a Pickle file
-#     with open(f"{save_location}/graph_features.pkl", "wb") as f:
-#         pkl.dump(features, f)
-#     print("Saved node and edge features.")
-
-#     print("Saving process completed successfully.")
-
-# New function to save a single graph
 def save_single_graph(graph_name, nx_graph, pp_network, info, save_location):
-    """Save a single graph to disk immediately after processing."""
-    os.makedirs(save_location, exist_ok=True)
-    
-    # Extract features
-    node_features = extract_node_features(pp_network, nx_graph)
-    edge_features = extract_edge_features(pp_network, nx_graph)
-    features = {"node_features": node_features, "edge_features": edge_features}
-    
-    # Create subfolders for better organization
     nx_dir = os.path.join(save_location, "networkx_graphs")
     pp_dir = os.path.join(save_location, "pandapower_networks")
-    features_dir = os.path.join(save_location, "graph_features")
+    feat_dir = os.path.join(save_location, "graph_features")
+
+    for directory in [nx_dir, pp_dir, feat_dir]:
+        os.makedirs(directory, exist_ok=True)
+
+    try:
+        pp.runpp(pp_network, max_iteration=100, v_debug=False, run_control=True, initialization="dc", calculate_voltage_angles=True)
+    except Exception as e:
+        print(f"Power flow did not converge for {graph_name}: {e}")
+
+    node_feats = extract_node_features(pp_network, nx_graph)
+    edge_feats = extract_edge_features(pp_network, nx_graph)
+
+    # Print feature statistics directly from the feature dictionaries
+    print(f"\n===== Feature Statistics for {graph_name} =====")
+    print_feature_statistics(node_feats, edge_feats)
+    print("=" * 50)
+
+    clean_graph = build_clean_graph(nx_graph, node_feats, edge_feats)
+
+    print(len(clean_graph.nodes))
+    print(clean_graph.nodes(data=True))
     
-    os.makedirs(nx_dir, exist_ok=True)
-    os.makedirs(pp_dir, exist_ok=True)
-    os.makedirs(features_dir, exist_ok=True)
-    
-    # Save NetworkX graph
-    with open(f"{nx_dir}/{graph_name}.pkl", "wb") as f:
-        pkl.dump(nx_graph, f)
-    
-    # Save Pandapower network
-    with open(f"{pp_dir}/{graph_name}.json", "w") as f:
-        f.write(pp.to_json(pp_network))
-    
-    # Save features
-    with open(f"{features_dir}/{graph_name}.pkl", "wb") as f:
+    features = {
+    "node_features": {node: clean_graph.nodes[node] for node in clean_graph.nodes()},
+    "edge_features": {(u, v): clean_graph.edges[u, v] for u, v in clean_graph.edges()},
+    "info": info
+    }
+
+    nx_file = os.path.join(nx_dir, f"{graph_name}.pkl")
+    with open(nx_file, "wb") as f:
+        pkl.dump(clean_graph, f)
+
+    pp_file = os.path.join(pp_dir, f"{graph_name}.json")
+    with open(pp_file, "w") as f:
+        json.dump(pp.to_json(pp_network), f)
+
+    feat_file = os.path.join(feat_dir, f"{graph_name}.pkl")
+    with open(feat_file, "wb") as f:
         pkl.dump(features, f)
+
+    print(f"Saved graph {graph_name} to {save_location}")
+
+
+#==================================================================================================
+#                               code for validation and test sets
+#==================================================================================================
+
+
+
+def has_switches(net):
+    return hasattr(net, 'switch') and not net.switch.empty and len(net.switch) > 0
+
+def load_network(network_id):
+    try:
+        if network_id.startswith('simbench_'):
+            code = network_id[9:]  
+            net = simbench.get_simbench_net(code)
+        elif network_id.startswith('pp_'):
+            case = network_id[3:]  #
+            if case == "caseIEEE30":
+                net = pn.case_IEEE30() if hasattr(pn, "case_IEEE30") else pn.case30()
+            else:
+                net = getattr(pn, case)()
+        else:
+            raise ValueError(f"Unknown network type: {network_id}")
+        return net
+    except Exception as e:
+        print(f"Error loading network {network_id}: {e}")
+        return None
+
+def check_network_suitability(network_id, bus_range=(25,50), require_switches=True):
+    net = load_network(network_id)
+    
+    if net is None:
+        return False, None
+
+    if not (bus_range[0] <= len(net.bus) <= bus_range[1]):
+        return False, None
+
+    if require_switches and not has_switches(net):
+        return False, None
+    
+    return True, net
+
+def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers=4):
+    """
+    Get all candidate networks that meet the specified criteria
+    """
+    start_time = time.time()
+    candidate_networks = {}
+    networks_without_switches = []
+    
+    # Get Simbench network codes
+    list_of_codes = simbench.collect_all_simbench_codes(mv_level="MV")
+    mv_codes = [code for code in list_of_codes if "MV" in code]
+    
+    # Filter Simbench codes if require_switches
+    if require_switches:
+        mv_sw_codes = [code for code in mv_codes if "no_sw" not in code]
+    else:
+        mv_sw_codes = mv_codes
+    
+    # Get PandaPower network names
+    standard_cases = [
+        "case4gs", "case5", "case6ww", "case9", "case14", "case30", 
+        "caseIEEE30", "case33bw", "case39", "case57", "case89pegase", 
+        "case118", "case145"
+    ]
+    
+    # Create network IDs for all potential candidates
+    simbench_ids = [f"simbench_{code}" for code in mv_sw_codes]
+    pp_ids = [f"pp_{case}" for case in standard_cases]
+    all_network_ids = simbench_ids + pp_ids
+    
+    print(f"Checking {len(all_network_ids)} potential networks...")
+    
+    # Use parallel processing to check network suitability
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_id = {
+            executor.submit(check_network_suitability, 
+                           network_id, 
+                           bus_range, 
+                           require_switches): network_id 
+            for network_id in all_network_ids
+        }
+        
+        for future in concurrent.futures.as_completed(future_to_id):
+            network_id = future_to_id[future]
+            try:
+                suitable, net = future.result()
+                if suitable and net is not None:
+                    bus_count = len(net.bus)
+                    switch_count = len(net.switch) if hasattr(net, 'switch') else 0
+                    candidate_networks[network_id] = net
+                    print(f"Added network {network_id} with {bus_count} buses and {switch_count} switches")
+                elif require_switches and net is not None and not has_switches(net):
+                    networks_without_switches.append(network_id)
+            except Exception as e:
+                print(f"Error processing {network_id}: {e}")
+    
+    print(f"\nFound {len(candidate_networks)} valid networks matching criteria in {time.time() - start_time:.2f}s")
+    if require_switches and networks_without_switches:
+        print(f"Skipped {len(networks_without_switches)} networks without switches")
+    
+    return candidate_networks
+
+def create_network_case(network_id, net, case_type, case_idx, load_variation_range=(0.5, 1.51)):
+    """Create a single network case with variations"""
+    try:
+        # Apply load variations (create a deep copy to avoid modifying the original)
+        net_case = copy.deepcopy(net)
+        
+        # Apply random load variations
+        for idx in net_case.load.index:
+            factor = np.random.uniform(load_variation_range[0], load_variation_range[1])
+            net_case.load.at[idx, "p_mw"] *= factor
+            net_case.load.at[idx, "q_mvar"] *= factor
+        
+        # Create case name
+        case_name = f"{network_id}_{case_type}_{case_idx}"
+        
+        # Create NetworkX graph respecting switches
+        nx_graph = top.create_nxgraph(net_case, respect_switches=True)
+        
+        switch_count = len(net_case.switch) if hasattr(net_case, 'switch') else 0
+        print(f"Added {case_type} case {case_name} with {switch_count} switches")
+        
+        return case_name, {"network": net_case, "nx_graph": nx_graph}
+    except Exception as e:
+        print(f"Failed to create case for {network_id}: {e}")
+        return None, None
+
+def generate_combined_dataset(bus_range=(25,50), test_total_cases=100, val_total_cases=50, 
+                              load_variation_range=(0.5,1.50), random_seed=1,
+                              require_switches=True, max_workers=4):    
+    if random_seed is not None:
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+    
+    print("Step 1: Finding suitable networks...")
+    candidate_networks = get_candidate_networks(
+        bus_range=bus_range, 
+        require_switches=require_switches,
+        max_workers=max_workers
+    )
+    
+    if len(candidate_networks) == 0:
+        raise ValueError("No networks found matching the criteria. Cannot generate dataset.")
+    
+    net_keys = list(candidate_networks.keys())
+    random.shuffle(net_keys)
+   
+    test_dataset = {}
+    val_dataset = {}
+    
+    print("\n Step 2: Generating test cases...")
+    test_count = 0
+    test_index = 0
+    
+    while test_count < test_total_cases and test_index < len(net_keys):
+        key = net_keys[test_index]
+        base_net = candidate_networks[key]
+        
+        # Calculate how many cases we need from this network
+        remaining_test_cases = test_total_cases - test_count
+        
+        for i in range(remaining_test_cases):
+            case_name, case_data = create_network_case(
+                key, base_net, "test", i, load_variation_range
+            )
+            
+            if case_name is not None and case_data is not None:
+                test_dataset[case_name] = case_data
+                test_count += 1
+        
+        test_index += 1
+    
+    if test_count < test_total_cases:
+        print(f"Warning: Could only generate {test_count}/{test_total_cases} test cases with original strategy.")
+        print("Applying additional load variations to existing networks...")
+        
+        existing_keys = list(set([name.split("_test_")[0] for name in test_dataset.keys()]))
+        
+        additional_cases_needed = test_total_cases - test_count
+        cases_per_net = math.ceil(additional_cases_needed / max(1, len(existing_keys)))
+        
+        for key in existing_keys:
+            if test_count >= test_total_cases:
+                break
+                
+            if key in candidate_networks:
+                base_net = candidate_networks[key]
+                
+                existing_variations = [int(name.split("_test_")[1]) for name in test_dataset.keys() 
+                                     if name.startswith(f"{key}_test_")]
+                start_idx = max(existing_variations) + 1 if existing_variations else 0
+                
+                for i in range(start_idx, start_idx + cases_per_net):
+                    if test_count >= test_total_cases:
+                        break
+                    
+                    # Use slightly different load variation range for diversity
+                    var_range = (
+                        load_variation_range[0] * 0.9,  # More extreme lower bound
+                        load_variation_range[1] * 1.1   # More extreme upper bound
+                    )
+                    
+                    case_name, case_data = create_network_case(
+                        key, base_net, "test", i, var_range
+                    )
+                    
+                    if case_name is not None and case_data is not None:
+                        test_dataset[case_name] = case_data
+                        test_count += 1
+    
+    print("\nStep 3: Generating validation cases...")
+    val_count = 0
+    val_index = 0
+    
+    # Exclude keys already used in test set to avoid overlap
+    val_candidate_keys = [key for key in net_keys if key not in 
+                         [name.split("_test_")[0] for name in test_dataset.keys()]]
+    
+    while val_count < val_total_cases and val_index < len(val_candidate_keys):
+        key = val_candidate_keys[val_index]
+        
+        # Skip if already used for test set
+        if any(case_name.startswith(key) for case_name in test_dataset.keys()):
+            val_index += 1
+            continue
+            
+        base_net = candidate_networks[key]
+        
+        # Calculate how many validation cases we need from this network
+        remaining_val_cases = val_total_cases - val_count
+        
+        for i in range(remaining_val_cases):
+            case_name, case_data = create_network_case(
+                key, base_net, "val", i, load_variation_range
+            )
+            
+            if case_name is not None and case_data is not None:
+                val_dataset[case_name] = case_data
+                val_count += 1
+        
+        val_index += 1
+    
+    if val_count < val_total_cases:
+        print(f"Warning: Could only generate {val_count}/{val_total_cases} validation cases with original strategy.")
+        
+        # Use whatever networks are left, or if necessary, reuse test networks with different variations
+        remaining_keys = [key for key in net_keys if key not in 
+                         [name.split("_val_")[0] for name in val_dataset.keys()]]
+        
+        if not remaining_keys:
+            # If no more unused networks, reuse some test networks with different variations
+            remaining_keys = list(set([name.split("_test_")[0] for name in test_dataset.keys()]))
+            print("Using test networks with different variations for validation...")
+        
+        additional_cases_needed = val_total_cases - val_count
+        cases_per_net = math.ceil(additional_cases_needed / max(1, len(remaining_keys)))
+        
+        for key in remaining_keys:
+            if val_count >= val_total_cases:
+                break
+                
+            base_net = candidate_networks[key]
+            
+            existing_variations = [int(name.split("_val_")[1]) for name in val_dataset.keys() 
+                                 if name.startswith(f"{key}_val_")]
+            start_idx = max(existing_variations) + 1 if existing_variations else 0
+            
+            for i in range(start_idx, start_idx + cases_per_net):
+                if val_count >= val_total_cases:
+                    break
+                
+                case_name, case_data = create_network_case(
+                    key, base_net, "val", i, load_variation_range
+                )
+                
+                if case_name is not None and case_data is not None:
+                    val_dataset[case_name] = case_data
+                    val_count += 1
+    
+    # check if sets meet targets
+    if len(test_dataset) < test_total_cases:
+        print(f"WARNING: Could only generate {len(test_dataset)} test cases out of {test_total_cases} requested.")
+    
+    if len(val_dataset) < val_total_cases:
+        print(f"WARNING: Could only generate {len(val_dataset)} validation cases out of {val_total_cases} requested.")
+    
+    # Print statistics on the generated datasets
+    print("\n--- Dataset Statistics ---")
+    test_networks = set([k.split("_test_")[0] for k in test_dataset.keys()])
+    val_networks = set([k.split("_val_")[0] for k in val_dataset.keys()])
+    
+    print(f"Test dataset: {len(test_dataset)} cases from {len(test_networks)} unique networks")
+    print(f"Validation dataset: {len(val_dataset)} cases from {len(val_networks)} unique networks")
+    
+    # Count switches in each dataset
+    test_switch_counts = [len(data["network"].switch) if hasattr(data["network"], "switch") else 0 
+                         for data in test_dataset.values()]
+    val_switch_counts = [len(data["network"].switch) if hasattr(data["network"], "switch") else 0 
+                        for data in val_dataset.values()]
+    
+    print(f"Test dataset switch statistics: Min={min(test_switch_counts) if test_switch_counts else 0}, "
+          f"Max={max(test_switch_counts) if test_switch_counts else 0}, "
+          f"Avg={sum(test_switch_counts)/len(test_switch_counts) if test_switch_counts else 0:.2f}")
+    print(f"Validation dataset switch statistics: Min={min(val_switch_counts) if val_switch_counts else 0}, "
+          f"Max={max(val_switch_counts) if val_switch_counts else 0}, "
+          f"Avg={sum(val_switch_counts)/len(val_switch_counts) if val_switch_counts else 0:.2f}")
+    
+    return test_dataset, val_dataset
+
+def save_combined_data(dataset, set_name, base_dir):
+    nx_dir = os.path.join(base_dir, set_name, "networkx_graphs")
+    pp_dir = os.path.join(base_dir, set_name, "pandapower_networks")
+    feat_dir = os.path.join(base_dir, set_name, "graph_features")
+    
+    for directory in [nx_dir, pp_dir, feat_dir]:
+        os.makedirs(directory, exist_ok=True)
+    
+    for case_name, data in dataset.items():
+        net = data["network"]
+        nx_graph = data["nx_graph"]
+
+        try:
+            pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
+                    initialization="dc", calculate_voltage_angles=True)
+        except Exception as e:
+            print(f"Power flow did not converge for {case_name}: {e}")
+            
+        node_feats = extract_node_features(net, nx_graph) 
+        edge_feats = extract_edge_features(net, nx_graph) 
+        features = {"node_features": node_feats, "edge_features": edge_feats}
+            
+        nx_file = os.path.join(nx_dir, f"{case_name}.pkl")
+        with open(nx_file, "wb") as f:
+            pkl.dump(nx_graph, f)
+            
+        pp_file = os.path.join(pp_dir, f"{case_name}.json")
+        with open(pp_file, "w") as f:
+            json.dump(pp.to_json(net), f)
+
+        feat_file = os.path.join(feat_dir, f"{case_name}.pkl")
+        with open(feat_file, "wb") as f:
+            pkl.dump(features, f)
+    
+    print(f"Saved {len(dataset)} {set_name} cases individually to {base_dir}")
+
+def save_dataset(test_dataset, val_dataset, base_path, bus_range, test_cases, val_cases):
+    now = datetime.now()
+    day = now.day
+    month = now.month
+    year = now.year
+
+    bus_range_str = f"{bus_range[0]}-{bus_range[1]}"
+    
+    base_name = f"test_val_real__range-{bus_range_str}_nTest-{test_cases}_nVal-{val_cases}_{day}{month}{year}"
+
+    search_pattern = f"{base_name}_*"
+
+    existing_dirs = glob.glob(os.path.join(base_path, search_pattern))
+ 
+    if not existing_dirs:
+        sequence_num = 1
+    else:
+        seq_nums = []
+        for dir_path in existing_dirs:
+            try:
+                seq_num = int(os.path.basename(dir_path).split('_')[-1])
+                seq_nums.append(seq_num)
+            except (ValueError, IndexError):
+                continue
+        
+        sequence_num = max(seq_nums) + 1 if seq_nums else 1
+    
+
+    dataset_dir = f"{base_name}_{sequence_num}"
+    save_location = os.path.join(base_path, dataset_dir)
+    
+    print(f"Creating dataset at: {save_location}")
+    print(f"Test set size: {len(test_dataset)}")
+    print(f"Validation set size: {len(val_dataset)}")
+    save_combined_data(test_dataset, "test", save_location)
+    save_combined_data(val_dataset, "validation", save_location)
+    
+    print(f"Dataset saved successfully at {save_location}")
+    return save_location
