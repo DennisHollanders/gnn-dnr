@@ -1,120 +1,188 @@
 import json
 import pandas as pd
 import pandapower as pp
-import matplotlib.pyplot as plt
-from PIL import Image
 import pickle as pkl
 import numpy as np
-import networkx as nx
-import plotly.graph_objects as go
 import os
 import sys 
-import time 
+import time
 from pathlib import Path
+import argparse
 
-src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "socp_lingkang","src"))
-if src_path not in sys.path:
-    sys.path.append(src_path)
+# Add necessary source paths
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+load_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model_search"))
+sys.path.extend([src_path, load_data_path])
 
-from SOCP_class import SOCP_class
+from SOCP_class_dnr import SOCP_class
+from MILP_class_dnr import MILP_class  
+from load_data import load_graph_data
 
-# Define the save location where original data is stored
-data_folder = os.environ.get("DATA_FOLDER", "test_data")
-SAVE_LOCATION = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))) / data_folder
+def apply_optimization_and_store_ground_truths(folder_path, method="SOCP"):
+    folder_path = Path(folder_path)
 
-def load_original_data(save_location):
-    """
-    Load stored NetworkX graphs, Pandapower networks, and node/edge features.
-    """
-    print("\n Loading stored data...")
+    # Directories for ground truth data
+    pp_gt_dir = folder_path / "pandapower_gt"
+    feat_gt_dir = folder_path / "features_gt"
+    pp_gt_dir.mkdir(parents=True, exist_ok=True)
+    feat_gt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load NetworkX graphs
-    with open(f"{save_location}/networkx_graphs.pkl", "rb") as f:
-        nx_graphs = pkl.load(f)
-    print(f" Loaded {len(nx_graphs)} NetworkX graphs.")
-    with open(f"{save_location}/pandapower_networks.json", "r") as f:
-        pp_networks = json.load(f)
-    pp_networks = {k: pp.from_json_string(v) for k, v in pp_networks.items()}
-    print(f" Loaded {len(pp_networks)} Pandapower networks.")
+    print(f"\nApplying {method.upper()} optimization on networks in {folder_path}...\n")
 
-    # Load node and edge features
-    with open(f"{save_location}/graph_features.pkl", "rb") as f:
-        features = pkl.load(f)
-    print(f" Loaded {len(features)} feature sets.")
+    # Load data
+    _, pp_networks, features = load_graph_data(folder_path)
 
-    return nx_graphs, pp_networks, features
+    metrics_data = []
 
-def check_bus_mapping(socp):
-    missing = []
-    for _, row in socp.net.line.iterrows():
-        if row["from_bus"] not in socp.bus_dict:
-            missing.append(row["from_bus"])
-    if missing:
-        print("Missing bus indices in bus_dict:", set(missing))
-    else:
-        print("All from_bus entries are present in bus_dict.")
+    if isinstance(pp_networks, str):
+        pp_networks = pp.from_json_string(pp_networks)
+        print("Loaded network data from JSON string")   
 
-def check_matrices(socp):
-    print("M_f shape:", socp.M_f.shape)
-    print(socp.M_f.head())
-    print("M_l shape:", socp.M_l.shape)
-    print(socp.M_l.head())
-    print("M_w shape:", socp.M_w.shape)
-    print(socp.M_w.head())
-
-
-def apply_socp_and_store_ground_truths(save_location, pp_networks, features):
-    print("\n Applying SOCP optimization on networks...\n")
-    optimized_networks = {}
-    updated_features = features.copy()
     for graph_id, net in pp_networks.items():
-        print("--" * 50, "\n",
-              "optimizing for net: {graph_id}     ->  ", net)
-        if net.bus.empty or net.load.empty or net.gen.empty or net.line.empty:
-            raise ValueError(f"⚠ Missing critical components in {graph_id}.")
-        socp = SOCP_class(net, graph_id, "static", net.load, net.gen, net.sgen)
-        print(f"SOCP object initialized for {graph_id}")
-        socp.initialize()
-        print("Initialized SOCP")
-        check_bus_mapping(socp)
-        socp.Pyomo_model_creation_from_pp(n_ts=[0])
-        print("Pyomo model created")
-        check_matrices(socp)
+        print(f"\n{'='*30} Processing {graph_id} {'='*30}")
+    
+        if isinstance(net, str):
+            net = pp.from_json_string(net)
+            print("in loop loaded network as string")
 
-         # Store original switch states before optimization
-        if hasattr(net, "switch") and not net.switch.empty:
-            original_switch_states = net.switch["closed"].copy()
+        original_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
+
+        # check if the network runs correctly! 
+        pp.runpp(net, enforce_q_lims=False)
+        if not net.converged:
+            print(f"Power flow did not converge for {graph_id}. Skipping optimization.")
+            continue
+
+        # Instantiate optimizer based on chosen method
+        if method.upper() == "MILP":
+            optimizer = MILP_class(net, graph_id)
         else:
-            original_switch_states = None
+            optimizer = SOCP_class(net, graph_id)
 
+        if hasattr(optimizer, 'initialize'):
+            optimizer.initialize()
+        model = optimizer.create_model()
+        
+        #debug_infeasibility(model)
+        #print_constraint_violations(model)
+        
         start_time = time.time()
-        socp.solving_SOCP_model()
+        results = optimizer.solve(model=model)
         optimization_time = time.time() - start_time
-        print(f"SOCP optimization solved in {optimization_time:.4f} seconds")
 
-        # Count number of switches that changed state during optimization
+        updated_net = optimizer.update_network()
+
+        # Calculate switch state changes
         num_switches_switched = 0
         if original_switch_states is not None:
-            # Assuming net.switch["closed"] is updated during optimization
-            num_switches_switched = int((original_switch_states != net.switch["closed"]).sum())
-            print(f"Number of switches switched: {num_switches_switched}")
-        else:
-            print("No switches found in network.")
-            
-        optimized_networks[graph_id] = pp.to_json(net)
-        print(f"Stored optimized network for {graph_id}")
-        for node in net.bus.index:
-            if node in updated_features[graph_id]["node_features"]:
-                updated_features[graph_id]["node_features"][node]["v_gt"] = net.res_bus.vm_pu.at[node]
-        updated_features[graph_id]["optimization_time"] = optimization_time
-        print(f"Optimization complete for {graph_id}.")
-    with open(f"{save_location}/pandapower_networks_ground_truths.json", "w") as f:
-        json.dump(optimized_networks, f, indent=4)
-    print("\n Saved optimized Pandapower networks as 'pandapower_networks_ground_truths.json'.")
-    with open(f"{save_location}/graph_features.pkl", "wb") as f:
-        pkl.dump(updated_features, f)
-    print(" Saved updated graph features with ground truths in 'graph_features.pkl'.")
+            num_switches_switched = int((original_switch_states != updated_net.switch["closed"]).sum())
+        print(f"Optimization solved in {optimization_time:.4f} seconds, Switches changed: {num_switches_switched}")
 
-graph_dict, pp_networks, features = load_original_data(SAVE_LOCATION)
-#print("graph_dict", pp_networks)
-apply_socp_and_store_ground_truths(SAVE_LOCATION, pp_networks, features)
+        metrics_data.append({
+            "graph_id": graph_id,
+            "optimization_time": optimization_time,
+            "switches_changed": num_switches_switched
+        })
+
+        # Update features with ground truths
+        features_gt = features.get(graph_id, {}).copy()
+        node_features = features_gt.get("node_features", {})
+        for node in updated_net.bus.index:
+            if node in node_features:
+                node_features[node]["v_gt"] = updated_net.res_bus.vm_pu.at[node]
+
+        features_gt.update({
+            "optimization_time": optimization_time,
+            "num_switches_switched": num_switches_switched
+        })
+
+        # Save optimized network and features
+        with open(pp_gt_dir / f"{graph_id}.json", "w") as f:
+            json.dump(pp.to_json(updated_net), f)
+
+        with open(feat_gt_dir / f"{graph_id}.pkl", "wb") as f:
+            pkl.dump(features_gt, f)
+
+        print(f"✓ Saved ground truth data for {graph_id}")
+
+    # Save optimization metrics
+    metrics_df = pd.DataFrame(metrics_data)
+    metrics_df.to_csv(folder_path / "optimization_metrics.csv", index=False)
+    print(f"\n✓ Saved optimization metrics to {folder_path / 'optimization_metrics.csv'}")
+
+    # Summary
+    print("\n" + "="*50)
+    print("OPTIMIZATION SUMMARY")
+    print("="*50)
+    print(f"Total graphs processed: {len(pp_networks)}")
+    print(f"Successful optimizations: {len(metrics_data)}")
+    print(f"Average optimization time: {metrics_df['optimization_time'].mean():.4f} seconds")
+    print(f"Total switches changed: {metrics_df['switches_changed'].sum()}")
+    print("="*50)
+
+from pyomo.util.infeasible import log_infeasible_constraints
+from pyomo.environ import value, Constraint, Var
+
+def debug_infeasibility(model, tol=1e-6):
+    """
+    Log infeasible constraints using Pyomo's logging facility.
+    """
+    print("=== Infeasible Constraints ===")
+    log_infeasible_constraints(model, log_expression=True, tol=tol)
+
+def print_constraint_violations(model, tol=1e-6):
+    """
+    Iterate through all active constraints and print those with violation above tol.
+    """
+    print("\n=== Constraint Violations ===")
+    for constr in model.component_data_objects(Constraint, active=True):
+        try:
+            lower = constr.lower if constr.lower is not None else -float('inf')
+            upper = constr.upper if constr.upper is not None else float('inf')
+            body_val = value(constr.body)
+            violation = max(lower - body_val, body_val - upper, 0)
+            if violation > tol:
+                print(f"{constr.name} (index: {constr.index() if hasattr(constr, 'index') else ''}) "
+                      f"violation: {violation:.4e}, body value: {body_val:.4e}, bounds: ({lower}, {upper})")
+        except Exception as e:
+            print(f"Could not evaluate constraint {constr.name}: {e}")
+
+def relax_binary_variables(model):
+    """
+    Change binary variables (here, switch_status) to continuous (0,1) to test relaxation.
+    """
+    print("\n=== Relaxing Binary Variables ===")
+    for var in model.component_data_objects(Var, descend_into=True):
+        if var.domain.__name__ == "Binary":
+            print(f"Relaxing variable {var.name}")
+            var.domain = model.Reals
+            var.setlb(0)
+            var.setub(1)
+
+def fix_binary_variables(model):
+    """
+    Fix binary variables (e.g., switch_status) to their current values.
+    """
+    print("\n=== Fixing Binary Variables to Current Values ===")
+    for var in model.component_data_objects(Var, descend_into=True):
+        if var.domain.__name__ == "Binary":
+            current_value = value(var)
+            print(f"Fixing {var.name} to {current_value}")
+            var.fix(current_value)
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
+    parser.add_argument('--folder_path', default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_24032025_1", type=str, help='Dataset folder path')
+    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', ''], default='', help='Dataset set to process; leave empty for no subfolder')
+    parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
+
+    args = parser.parse_args()
+
+    if args.set:
+        apply_optimization_and_store_ground_truths(Path(args.folder_path) / args.set, method=args.method)
+    else:
+        apply_optimization_and_store_ground_truths(args.folder_path, method=args.method)
+
+    print("\nGround truth generation complete!")
