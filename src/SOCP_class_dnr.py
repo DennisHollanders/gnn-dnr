@@ -326,7 +326,7 @@ class SOCP_class:
         # Radiality Constraints
         if toggles["include_radiality_constraints"]:
             model.substations = Set(initialize=list(self.substations))
-            model.flow = Var(model.lines, domain=NonNegativeReals)
+            model.flow = Var(model.lines, domain=NonNegativeReals, initialize=0)
         
             def line_status_rule(m, l):
                 if l in self.lines_with_switches:

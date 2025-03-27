@@ -146,14 +146,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path', default=r"data\test_val_real__range-30-150_nTest-5_nVal-5_2732025_1", type=str, help='Dataset folder path')
     parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='test', help='Dataset set to process; leave empty for no subfolder')
-    parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
+    parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='MILP', help='Choose optimization method: SOCP or MILP')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
 
     # SOCP toggles
     parser.add_argument('--include_voltage_drop_constraint', type=bool, default=True, help="Include voltage drop constraint SOCP")
     parser.add_argument('--include_voltage_bounds_constraint', type=bool, default=True, help="Include voltage bounds constraint SOCP")
     parser.add_argument('--include_power_balance_constraint', type=bool, default=True, help="Include power balance constraint SOCP")
-    parser.add_argument('--include_radiality_constraints', type=bool, default=False, help="Include radiality constraints SOCP")
+    parser.add_argument('--include_radiality_constraints', type=bool, default=True, help="Include radiality constraints SOCP")
     parser.add_argument('--use_spanning_tree_radiality', type=bool, default=False, help="Use spanning tree radiality SOCP")
     parser.add_argument('--include_switch_penalty', type=bool, default=False, help="Include switch penalty in objective SOCP")
 
@@ -177,8 +177,6 @@ if __name__ == "__main__":
         toggles = SOCP_toggles
     else:
         toggles = MILP_toggles  
-
-
 
     if args.set:
         apply_optimization_and_store_ground_truths(Path(args.folder_path) / args.set, method=args.method, toggles=toggles, debug=args.debug)
