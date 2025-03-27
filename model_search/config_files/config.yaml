@@ -1,8 +1,8 @@
 description: "Train Graph Autoencoder"
 
 # Data
-data_folder: "data\\transformed_subgraphs_08032025_2"
-real_data_folder: "data_combined_real_world"
+data_folder: "data\\transformed_subgraphs_24032025"
+real_data_folder: 
 
 # Model
 model_module: "GraphAutoencoder"
@@ -15,11 +15,19 @@ activation: "relu"
 dropout_rate: 0.0
 learning_rate: 0.001
 weight_decay: 0.00005
-batch_size: 1
+batch_size: 8
 epochs: 100
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
 job_name: "first run"
 criterion_name: MSELoss
-wandb: False
+wandb: false
+
+# Data Loading Configuration
+batching_type: "dynamic"
+max_nodes: 1000
+max_edges: 5000
+train_ratio: 0.8
+seed: 42
+num_workers: 0

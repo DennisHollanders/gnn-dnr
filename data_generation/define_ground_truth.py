@@ -18,7 +18,7 @@ from SOCP_class_dnr import SOCP_class
 from MILP_class_dnr import MILP_class  
 from load_data import load_graph_data
 
-def apply_optimization_and_store_ground_truths(folder_path, method="SOCP"):
+def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggles=None, debug =False):
     folder_path = Path(folder_path)
 
     # Directories for ground truth data
@@ -61,10 +61,11 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP"):
 
         if hasattr(optimizer, 'initialize'):
             optimizer.initialize()
-        model = optimizer.create_model()
-        
-        #debug_infeasibility(model)
-        #print_constraint_violations(model)
+        model = optimizer.create_model(toggles = toggles)
+
+        if debug:
+            debug_infeasibility(model)
+            print_constraint_violations(model)
         
         start_time = time.time()
         results = optimizer.solve(model=model)
@@ -103,7 +104,7 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP"):
         with open(feat_gt_dir / f"{graph_id}.pkl", "wb") as f:
             pkl.dump(features_gt, f)
 
-        print(f"✓ Saved ground truth data for {graph_id}")
+        print(f"Saved ground truth data for {graph_id}")
 
     # Save optimization metrics
     metrics_df = pd.DataFrame(metrics_data)
@@ -124,16 +125,10 @@ from pyomo.util.infeasible import log_infeasible_constraints
 from pyomo.environ import value, Constraint, Var
 
 def debug_infeasibility(model, tol=1e-6):
-    """
-    Log infeasible constraints using Pyomo's logging facility.
-    """
     print("=== Infeasible Constraints ===")
     log_infeasible_constraints(model, log_expression=True, tol=tol)
 
 def print_constraint_violations(model, tol=1e-6):
-    """
-    Iterate through all active constraints and print those with violation above tol.
-    """
     print("\n=== Constraint Violations ===")
     for constr in model.component_data_objects(Constraint, active=True):
         try:
@@ -147,42 +142,52 @@ def print_constraint_violations(model, tol=1e-6):
         except Exception as e:
             print(f"Could not evaluate constraint {constr.name}: {e}")
 
-def relax_binary_variables(model):
-    """
-    Change binary variables (here, switch_status) to continuous (0,1) to test relaxation.
-    """
-    print("\n=== Relaxing Binary Variables ===")
-    for var in model.component_data_objects(Var, descend_into=True):
-        if var.domain.__name__ == "Binary":
-            print(f"Relaxing variable {var.name}")
-            var.domain = model.Reals
-            var.setlb(0)
-            var.setub(1)
-
-def fix_binary_variables(model):
-    """
-    Fix binary variables (e.g., switch_status) to their current values.
-    """
-    print("\n=== Fixing Binary Variables to Current Values ===")
-    for var in model.component_data_objects(Var, descend_into=True):
-        if var.domain.__name__ == "Binary":
-            current_value = value(var)
-            print(f"Fixing {var.name} to {current_value}")
-            var.fix(current_value)
-
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
-    parser.add_argument('--folder_path', default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_24032025_1", type=str, help='Dataset folder path')
-    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', ''], default='', help='Dataset set to process; leave empty for no subfolder')
+    parser.add_argument('--folder_path', default=r"data\test_val_real__range-30-150_nTest-5_nVal-5_2732025_1", type=str, help='Dataset folder path')
+    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='test', help='Dataset set to process; leave empty for no subfolder')
     parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
+    parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
+
+    # SOCP toggles
+    parser.add_argument('--include_voltage_drop_constraint', type=bool, default=True, help="Include voltage drop constraint SOCP")
+    parser.add_argument('--include_voltage_bounds_constraint', type=bool, default=True, help="Include voltage bounds constraint SOCP")
+    parser.add_argument('--include_power_balance_constraint', type=bool, default=True, help="Include power balance constraint SOCP")
+    parser.add_argument('--include_radiality_constraints', type=bool, default=False, help="Include radiality constraints SOCP")
+    parser.add_argument('--use_spanning_tree_radiality', type=bool, default=False, help="Use spanning tree radiality SOCP")
+    parser.add_argument('--include_switch_penalty', type=bool, default=False, help="Include switch penalty in objective SOCP")
+
+    # MILP toggles
+
 
     args = parser.parse_args()
 
-    if args.set:
-        apply_optimization_and_store_ground_truths(Path(args.folder_path) / args.set, method=args.method)
+    SOCP_toggles = { 
+                "include_voltage_drop_constraint": args.include_voltage_drop_constraint, 
+                "include_voltage_bounds_constraint": args.include_voltage_bounds_constraint,   
+                "include_power_balance_constraint": args.include_power_balance_constraint,  
+                "include_radiality_constraints": args.include_radiality_constraints,
+                "use_spanning_tree_radiality": args.use_spanning_tree_radiality,  
+                "include_switch_penalty": args.include_switch_penalty,
+            }
+    
+    MILP_toggles = { 
+    } 
+    if args.method == "SOCP":
+        toggles = SOCP_toggles
     else:
-        apply_optimization_and_store_ground_truths(args.folder_path, method=args.method)
+        toggles = MILP_toggles  
 
-    print("\nGround truth generation complete!")
+
+
+    if args.set:
+        apply_optimization_and_store_ground_truths(Path(args.folder_path) / args.set, method=args.method, toggles=toggles, debug=args.debug)
+    elif args.set == "all": 
+        for set_name in Path(args.folder_path).iterdir():
+            if set_name.is_dir():
+                print("\nProcessing set:", set_name)
+                apply_optimization_and_store_ground_truths(Path(args.folder_path) / set_name, method=args.method, toggles=toggles, debug=args.debug)
+    else:
+        apply_optimization_and_store_ground_truths(args.folder_path, method=args.method, toggles=toggles, debug=args.debug)
+
+    print("\nGround truth generation complete!!!!")

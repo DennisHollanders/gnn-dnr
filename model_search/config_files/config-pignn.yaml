@@ -1,25 +1,33 @@
 description: "Train PIGNN"
 
 # Data
-data_folder: "data\\test_data"
-real_data_folder: "data_combined_real_world"
+data_folder: "data\\transformed_subgraphs_24032025"
+real_data_folder: 
 
 # Model
 model_module: "PIGNN"
 
 # Training
 input_dim: 4
-hidden_dims: [256, 128, 64, 32, 16]
+hidden_dims: [512,512, 256, 128, 64, 32]
 latent_dim: 8
 activation: "relu"
 dropout_rate: 0.0
 learning_rate: 0.001
 weight_decay: 0.00005
-batch_size: 1
-epochs: 100
+batch_size: 8
+epochs: 1000
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
 job_name: "first run"
 criterion_name: PIGNNCriterion
-wandb: false
+wandb: True
+
+# Data Loading Configuration
+batching_type: "dynamic"
+max_nodes: 1000
+max_edges: 5000
+train_ratio: 0.8
+seed: 42
+num_workers: 0

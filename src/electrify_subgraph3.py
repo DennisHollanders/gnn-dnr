@@ -28,7 +28,26 @@ import time
 import simbench
 import pandapower.networks as pn 
 import concurrent.futures
-
+import pandapower as pp
+import pandapower.networks as pn
+import pandapower.topology as top
+import simbench
+import networkx as nx
+import numpy as np
+import random
+import os
+import pickle as pkl
+import json
+import copy
+import math
+import concurrent.futures
+import time
+from functools import lru_cache
+from pathlib import Path
+from datetime import datetime, timedelta
+from datetime import datetime
+import glob
+import os
 
 from logger_setup import logger 
 print(f"opened logger:{logger}")
@@ -907,8 +926,9 @@ def transform_subgraphs(subgraphs: List[nx.Graph],
 
     return processing_stats
 
-def extract_node_features(net, nx_graph):
-    nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
+def extract_node_features(net, nx_graph, nx_to_pp_bus_map= None):
+    if nx_to_pp_bus_map is None:
+        nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
     node_features = {}
     for node in nx_graph.nodes:
         pp_bus_idx = nx_to_pp_bus_map[node]
@@ -921,8 +941,9 @@ def extract_node_features(net, nx_graph):
     #print(node_features)
     return node_features
 
-def extract_edge_features(net, nx_graph):
-    nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
+def extract_edge_features(net, nx_graph, nx_to_pp_bus_map=None):
+    if nx_to_pp_bus_map is None:
+        nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
     edge_features = {}
     for idx, (u, v) in enumerate(nx_graph.edges):
         pp_from_bus = nx_to_pp_bus_map[u]
@@ -1095,7 +1116,7 @@ def save_single_graph(graph_name, nx_graph, pp_network, info, save_location):
         pp.runpp(pp_network, max_iteration=100, v_debug=False, run_control=True, initialization="dc", calculate_voltage_angles=True)
     except Exception as e:
         print(f"Power flow did not converge for {graph_name}: {e}")
-
+    
     node_feats = extract_node_features(pp_network, nx_graph)
     edge_feats = extract_edge_features(pp_network, nx_graph)
 
@@ -1250,7 +1271,9 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
         
         # Create NetworkX graph respecting switches
         nx_graph = top.create_nxgraph(net_case, respect_switches=True)
-        
+
+        nx_graph.graph["nx_to_pp_bus_map"] = {bus_idx: bus_idx for bus_idx in net_case.bus.index}
+
         switch_count = len(net_case.switch) if hasattr(net_case, 'switch') else 0
         print(f"Added {case_type} case {case_name} with {switch_count} switches")
         
@@ -1266,7 +1289,6 @@ def generate_combined_dataset(bus_range=(25,50), test_total_cases=100, val_total
         random.seed(random_seed)
         np.random.seed(random_seed)
     
-    print("Step 1: Finding suitable networks...")
     candidate_networks = get_candidate_networks(
         bus_range=bus_range, 
         require_switches=require_switches,
@@ -1281,8 +1303,7 @@ def generate_combined_dataset(bus_range=(25,50), test_total_cases=100, val_total
    
     test_dataset = {}
     val_dataset = {}
-    
-    print("\n Step 2: Generating test cases...")
+
     test_count = 0
     test_index = 0
     
@@ -1458,9 +1479,9 @@ def save_combined_data(dataset, set_name, base_dir):
                     initialization="dc", calculate_voltage_angles=True)
         except Exception as e:
             print(f"Power flow did not converge for {case_name}: {e}")
-            
-        node_feats = extract_node_features(net, nx_graph) 
-        edge_feats = extract_edge_features(net, nx_graph) 
+        nx_to_pp_bus_map = net.get("nx_to_pp_bus_map", {node: idx for idx, node in enumerate(net.bus.index)})
+        node_feats = extract_node_features(net, nx_graph, nx_to_pp_bus_map) 
+        edge_feats = extract_edge_features(net, nx_graph,nx_to_pp_bus_map) 
         features = {"node_features": node_feats, "edge_features": edge_feats}
             
         nx_file = os.path.join(nx_dir, f"{case_name}.pkl")
@@ -1469,7 +1490,7 @@ def save_combined_data(dataset, set_name, base_dir):
             
         pp_file = os.path.join(pp_dir, f"{case_name}.json")
         with open(pp_file, "w") as f:
-            json.dump(pp.to_json(net), f)
+            f.write(pp.to_json(net)) 
 
         feat_file = os.path.join(feat_dir, f"{case_name}.pkl")
         with open(feat_file, "wb") as f:

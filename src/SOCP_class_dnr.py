@@ -35,7 +35,6 @@ class SOCP_class:
         self,
         net,
         net_name: str = "Network",
-        include_radiality_constraints: bool = True,
         switch_penalty: float = 0.01,
         ):
         self.net = net
@@ -76,13 +75,9 @@ class SOCP_class:
         self.switch_penalty = switch_penalty
         self.initial_switch_status = None
 
-        # Radiality constraints flag
-        self.include_radiality_constraints = include_radiality_constraints
-
         # Store optimization model
         self.model = None
        
-
         # Performance metrics and results
         self.optimization_time = None
         self.num_switches_changed = None
@@ -90,7 +85,7 @@ class SOCP_class:
         self.lines_with_switches = {}
 
     def initialize(self):
-        # Process bus data
+       
         bus_df = self.net.bus.copy()
         bus_dict = {index: name for index, name in zip(self.net.bus.index, self.net.bus.name)}
         # Exclude HV sides of transformers
@@ -101,12 +96,14 @@ class SOCP_class:
                 if any(condition):
                     idx = bus_df[condition].index[0]
                     bus_df.drop(idx, inplace=True)
-        # Here, the operating voltage is in kV. We convert it to volts:
+    
+        self.bus_dict = {row['name']: row['name'] for idx, row in bus_df.iterrows()}
         voltages_bus = bus_df[["name", "vn_kv"]].set_index("name")
+        self.voltages_bus = voltages_bus
         
         # Process line data with unit checking:
         line_df = self.net.line.copy()
-        # Compute resistance in ohm using Pint (r_ohm_per_km has units ohm/km, length_km has units km)
+        # Compute resistance in ohm 
         line_df["r_ohm"] = line_df.apply(
             lambda row: (row["r_ohm_per_km"] * (ureg.ohm/ureg.km) * row["length_km"] * ureg.km).to(ureg.ohm).magnitude,
             axis=1
@@ -124,7 +121,7 @@ class SOCP_class:
             return -1 / X if R == 0 else -X / (R**2 + X**2)
         line_df["B_transmission_s"] = line_df.apply(lambda row: susceptance_cal(row["r_ohm"], row["x_ohm"]), axis=1)
 
-        # Bus susceptance (not using Pint here, but you could add similar unit conversions)
+        # Bus susceptance 
         bus_susceptance = {bus: 0 for bus in self.net.bus.index}
         for idx, row in self.net.line.iterrows():
             B = row["c_nf_per_km"] * row["length_km"] * 2 * np.pi * frequency * 1e-9
@@ -149,8 +146,6 @@ class SOCP_class:
                     self.lines_with_switches[line_name] = []
                 self.lines_with_switches[line_name].append(s_idx)
 
-        # Build bus injection dictionary using bus names as keys.
-        # Here, we assume that p_mw values are in MW.
         self.bus_injection = {
             self.net.bus.loc[idx, "name"]:
                 (self.net.gen[self.net.gen.bus == idx]["p_mw"].sum() -
@@ -176,13 +171,14 @@ class SOCP_class:
                 "use_spanning_tree_radiality": True,  
                 "include_switch_penalty": False
             }
+
         model = ConcreteModel()
         # Basic sets
         model.buses = Set(initialize=list(self.voltages_bus.index), ordered=True)
         model.lines = Set(initialize=list(self.line_df["name"]), ordered=True)
         model.times = Set(initialize=[0], ordered=True)
         
-        # Voltage parameters (unchanged)
+        #Voltage parameters 
         model.V_overline = Param(
             model.buses,
             initialize=lambda m, b: ((self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * 1000 * 1.05)
@@ -206,27 +202,31 @@ class SOCP_class:
                                         .to(ureg.mohm).magnitude)
         )
         
-        # New: Parameter for radial demand (non-substation nodes require at least one unit)
         model.radial_demand = Param(model.buses, initialize=lambda m, b: 0 if b in self.substations else 1)
         
-        # New: Tunable Big-M parameter (can be modified as needed)
-        M_value = len(self.voltages_bus)  # or use a derived value based on network properties
+        expected_max_flow = sum(abs(val) for val in self.bus_injection.values())
+        print("Expected maximum flow (used for Big‑M):", expected_max_flow)
+        M_value = expected_max_flow * 1.1  # Safety factor
         model.big_M = Param(initialize=M_value)
         
-        # Variables (unchanged except for those below)
+        # Variables 
         model.V_m_sqr = Var(model.buses, model.times, within=NonNegativeReals, initialize=1.0)
         model.P_flow = Var(model.lines, model.times, initialize=0)
         model.Q_flow = Var(model.lines, model.times, initialize=0)
         model.l_squared = Var(model.lines, model.times, within=NonNegativeReals, initialize=1)
+
+        model.voltage_slack = Var(model.lines, model.times, within=NonNegativeReals, initialize=0)
+        model.voltage_slack_penalty = Param(initialize=1000, mutable=True)
         
-        # Line direction maps (unchanged)
-        line_starts = {row["name"]: self.bus_dict[row["from_bus"]] for _, row in self.net.line.iterrows()}
+        # Line direction maps 
+        line_starts = {row["name"]: self.bus_dict.get(self.net.line.at[idx, "from_bus"])
+               for idx, row in self.net.line.iterrows() if self.bus_dict.get(self.net.line.at[idx, "from_bus"]) is not None}
         line_ends = {row["name"]: self.bus_dict[row["to_bus"]] for _, row in self.net.line.iterrows()}
         model.line_start = Param(model.lines, initialize=line_starts)
         model.line_end = Param(model.lines, initialize=line_ends)
         model.line_status = Var(model.lines, domain=Binary, initialize=1)
         
-        # Switch definitions (unchanged)
+        # Switch definitions 
         line_switches = self.switch_df[self.switch_df['et'] == 'l']
         model.switches = Set(initialize=list(line_switches.index), ordered=True)
         model.switch_mask = Param(
@@ -245,45 +245,76 @@ class SOCP_class:
             initialize=lambda m, s: 1 if self.switch_df.at[s, 'closed'] else 0
         )
         
-        # Objective function (unchanged)
+        # Objective function 
+        # def objective_rule_socp(m):
+        #     loss_term = sum(m.rl_mOhm[l] * m.l_squared[l, t] for l in m.lines for t in m.times)
+        #     penalty_term = self.switch_penalty * sum(
+        #             (1 - m.switch_initial[s]) * m.switch_status[s] + m.switch_initial[s] * (1 - m.switch_status[s])
+        #             for s in m.switches
+        #     )
+        #     if toggles["include_switch_penalty"]:
+        #         return loss_term + penalty_term
+        #     else:
+        #         return loss_term
+
+        # add slack
         def objective_rule_socp(m):
             loss_term = sum(m.rl_mOhm[l] * m.l_squared[l, t] for l in m.lines for t in m.times)
+            slack_term = sum(m.voltage_slack_penalty * m.voltage_slack[l, t] for l in m.lines for t in m.times)
             penalty_term = self.switch_penalty * sum(
-                    (1 - m.switch_initial[s]) * m.switch_status[s] + m.switch_initial[s] * (1 - m.switch_status[s])
-                    for s in m.switches
+                (1 - m.switch_initial[s]) * m.switch_status[s] + m.switch_initial[s] * (1 - m.switch_status[s])
+                for s in m.switches
             )
             if toggles["include_switch_penalty"]:
-                return loss_term + penalty_term
+                return loss_term + slack_term + penalty_term
             else:
-                return loss_term
+                return loss_term + slack_term
         model.objective = Objective(rule=objective_rule_socp, sense=minimize)
         
-        # Power Balance Constraint (unchanged)
+        # Power Balance Constraint 
         def power_balance_rule(m, b, t):
-            net_injection = self.bus_injection[b]
             outflow = sum(m.P_flow[l, t] for l in m.lines if m.line_start[l] == b)
             inflow  = sum(m.P_flow[l, t] for l in m.lines if m.line_end[l] == b)
-            return outflow - inflow == net_injection
+            expr = outflow - inflow - self.bus_injection[b]
+            # If the expression is a number and is zero, skip the constraint
+            if isinstance(expr, (int, float)):
+                if expr == 0:
+                    return Constraint.Skip
+                else:
+                    return expr == 0
+            else:
+                # Otherwise, return the symbolic equality
+                return expr == 0
         if toggles["include_power_balance_constraint"]:
             model.PowerBalance = Constraint(model.buses, model.times, rule=power_balance_rule)
         
-        # SOCP Cone Constraint (unchanged)
+        # SOCP Cone Constraint 
         def socp_cone_rule(m, l, t):
             from_bus = m.line_start[l]
             return (m.P_flow[l, t]**2 + m.Q_flow[l, t]**2) <= m.V_m_sqr[from_bus, t] * m.l_squared[l, t]
         model.SOCP_Cone = Constraint(model.lines, model.times, rule=socp_cone_rule)
         
-        # Voltage Drop Constraint (unchanged)
+        # Voltage Drop Constraint 
+        # def voltage_drop_rule(m, l, t):
+        #     i = m.line_start[l]
+        #     j = m.line_end[l]
+        #     R = m.rl_mOhm[l] * 1e-3  # Convert mOhm to ohm
+        #     X = m.xl_mOhm[l] * 1e-3  # Convert mOhm to ohm
+        #     return m.V_m_sqr[j, t] == m.V_m_sqr[i, t] - 2 * (R * m.P_flow[l, t] + X * m.Q_flow[l, t]) + (R**2 + X**2) * m.l_squared[l, t]
+
+        #add slack
         def voltage_drop_rule(m, l, t):
             i = m.line_start[l]
             j = m.line_end[l]
-            R = m.rl_mOhm[l] * 1e-3  # Convert mOhm to ohm
-            X = m.xl_mOhm[l] * 1e-3  # Convert mOhm to ohm
-            return m.V_m_sqr[j, t] == m.V_m_sqr[i, t] - 2 * (R * m.P_flow[l, t] + X * m.Q_flow[l, t]) + (R**2 + X**2) * m.l_squared[l, t]
+            R = m.rl_mOhm[l] * 1e-3  # mOhm to ohm conversion
+            X = m.xl_mOhm[l] * 1e-3
+            return m.V_m_sqr[j, t] + m.voltage_slack[l, t] == m.V_m_sqr[i, t] - 2*(R * m.P_flow[l, t] + X * m.Q_flow[l, t]) \
+                   + (R**2 + X**2)* m.l_squared[l, t]
+
         if toggles["include_voltage_drop_constraint"]:
             model.VoltageDrop = Constraint(model.lines, model.times, rule=voltage_drop_rule)
         
-        # Voltage bounds (unchanged)
+        # Voltage bounds 
         def voltage_upper_bound(m, b, t):
             return m.V_m_sqr[b, t] <= m.V_overline[b] ** 2
         def voltage_lower_bound(m, b, t):
@@ -292,86 +323,49 @@ class SOCP_class:
             model.VoltageUpper = Constraint(model.buses, model.times, rule=voltage_upper_bound)
             model.VoltageLower = Constraint(model.buses, model.times, rule=voltage_lower_bound)
         
-        # --- Radiality Constraints ---
+        # Radiality Constraints
         if toggles["include_radiality_constraints"]:
             model.substations = Set(initialize=list(self.substations))
             model.flow = Var(model.lines, domain=NonNegativeReals)
         
-            # Decoupled line status constraints: enforce for each associated switch individually
-            model.LineStatusConstraint = ConstraintList()
-            # for l in model.lines:
-            #     if l in self.lines_with_switches:
-            #         for s in self.lines_with_switches[l]:
-            #                 model.LineStatusConstraint.add(model.line_status[l] <= model.switch_status[s])
             def line_status_rule(m, l):
                 if l in self.lines_with_switches:
-                    # Force line_status to equal switch_status (for single-switch lines)
                     return m.line_status[l] == sum(m.switch_status[s] for s in self.lines_with_switches[l])
                 else:
                     return Constraint.Skip
             model.LineStatusConstraint = Constraint(model.lines, rule=line_status_rule)
             
-            # Option: use a spanning tree formulation instead of flow-based radiality
+            # spanning tree fomrulation 
             if toggles["use_spanning_tree_radiality"]:
                 def spanning_tree_rule(m):
                     return sum(m.line_status[l] for l in m.lines) == len(m.buses) - 1
                 model.SpanningTree = Constraint(rule=spanning_tree_rule)
             else:
-                # Big-M flow activation using the tunable Big-M parameter
+                # Big-M flow activationr
                 def big_m_flow_rule(m, l, t):
                     return m.flow[l] <= m.big_M * m.line_status[l]
                 model.BigMFlow = Constraint(model.lines, model.times, rule=big_m_flow_rule)
             
-                # Modified flow balance: non-substation nodes must receive at least one unit
-                # def flow_balance_rule(m, b):
-                #     inflow = sum(m.flow[l] for l in m.lines if m.line_end[l] == b)
-                #     outflow = sum(m.flow[l] for l in m.lines if m.line_start[l] == b)
-                #     if b in m.substations:
-                #         total_demand = sum(m.radial_demand[i] for i in m.buses if i not in m.substations)
-                #         return outflow - inflow == total_demand
-                #     else:
-                #         return inflow - outflow >= m.radial_demand[b]
-                # model.RadialityFlowBalance = Constraint(model.buses, rule=flow_balance_rule)
-            
-                # def flow_activation_rule(m, l):
-                #     if l not in self.lines_with_switches:
-                #         return Constraint.Skip
-                #     switch_sum = sum(m.switch_status[s] for s in self.lines_with_switches.get(l, []))
-                #     return m.flow[l] <= (len(m.buses) - 1) * switch_sum
-                # model.RadialityFlowActivation = Constraint(model.lines, rule=flow_activation_rule)
-                toggles.setdefault("flow_direction", "forward")
+                # flow balance: non-substation nodes must receive at least one unit
                 def flow_balance_rule(m, b):
-                    # Calculate incoming and outgoing flows
                     inflow = sum(m.flow[l] for l in m.lines if m.line_end[l] == b)
                     outflow = sum(m.flow[l] for l in m.lines if m.line_start[l] == b)
-                    if toggles["flow_direction"] == "forward":
-                        if b in m.substations:
-                            # At a substation, the net outflow should equal the total demand from non-substation nodes.
-                            total_demand = sum(m.radial_demand[i] for i in m.buses if i not in m.substations)
-                            return outflow - inflow == total_demand
-                        else:
-                            # For non-substations, exactly one unit of flow should be delivered.
-                            return inflow - outflow == m.radial_demand[b]
-                    else:  # reverse flow formulation
-                        if b in m.substations:
-                            total_demand = sum(m.radial_demand[i] for i in m.buses if i not in m.substations)
-                            return inflow - outflow == total_demand
-                        else:
-                            return outflow - inflow == m.radial_demand[b]
+                    if b in m.substations:
+                        total_demand = sum(m.radial_demand[i] for i in m.buses if i not in m.substations)
+                        return outflow - inflow == total_demand
+                    else:
+                        return inflow - outflow >= m.radial_demand[b]
                 model.RadialityFlowBalance = Constraint(model.buses, rule=flow_balance_rule)
-                
+            
                 def flow_activation_rule(m, l):
                     if l not in self.lines_with_switches:
                         return Constraint.Skip
                     switch_sum = sum(m.switch_status[s] for s in self.lines_with_switches.get(l, []))
                     return m.flow[l] <= (len(m.buses) - 1) * switch_sum
                 model.RadialityFlowActivation = Constraint(model.lines, rule=flow_activation_rule)
-        
-        # Power Loss Expression (unchanged)
+                
+        # Power Loss Expression 
         model.P_loss = Expression(model.lines, model.times, rule=lambda m, l, t: m.rl_mOhm[l] * m.l_squared[l, t])
-
-
-        #assert value(model.line_status[l]) == 1 if switch is closed else 0
 
         return model
 
@@ -386,7 +380,6 @@ class SOCP_class:
         try:
             import gurobipy as gp
             print("Using Gurobi solver directly...")
-            # Use a consistent file name
             self.model.write("model.lp", io_options={"symbolic_solver_labels": True})
             gurobi_model = gp.read("model.lp")
             gurobi_model.setParam("MIPGap", 0.001)

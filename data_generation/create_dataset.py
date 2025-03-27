@@ -42,7 +42,7 @@ def parse_arguments():
     parser.add_argument('--iterate_all', action='store_true',default=True,
                         help='Iterate over all subgraphs')
     # if iterate_all == True:
-    parser.add_argument('--n_samples_per_graph', type=int, default=5,
+    parser.add_argument('--n_samples_per_graph', type=int, default=1,
                         help='Number of samples per subgraph')
     # if iteral_all == False:
     parser.add_argument('--num_subgraphs', type=int, default=3,
@@ -91,11 +91,13 @@ def parse_arguments():
                         help='Enable logging')
                         
     # Test and validation set options
-    parser.add_argument('--generate_test_val', default=False, action='store_true',
+    parser.add_argument('--generate_train_data', default=False, action='store_true',
+                        help='Generate training data')
+    parser.add_argument('--generate_test_val', default=True, action='store_true',
                         help='Generate test and validation sets')
-    parser.add_argument('--test_cases', type=int, default=5,
+    parser.add_argument('--test_cases', type=int, default=10,
                         help='Number of test cases to generate')
-    parser.add_argument('--val_cases', type=int, default=5,
+    parser.add_argument('--val_cases', type=int, default=10,
                         help='Number of validation cases to generate')
     parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.8, 1.2],
                         help='Range for load variation in test/val sets ')
@@ -124,26 +126,6 @@ def main():
         save_location = data_dir / f"transformed_subgraphs_{date_str}_{counter}"
         counter += 1
     
-    # Load subgraphs
-    path_to_graphs = data_dir / args.subgraph_file
-    with open(path_to_graphs, 'rb') as f:
-        subgraphs = pkl.load(f)
-    
-    print(f"Number of subgraphs loaded: {len(subgraphs)}")
-    
-    # Load datasets
-    cbs_pc6_gpkg = data_dir / "cbs_pc6_2023.gpkg"
-    buurt_to_postcodes_csv = data_dir / 'buurt_to_postcodes.csv'
-    consumption_df_path = data_dir / "aggregated_kleinverbruik_with_opwek.csv"
-    standard_consumption_df_path = data_dir / "cleaned_energ_standard_energy_data.csv"
-    
-    cbs_pc6_gdf = gpd.read_file(cbs_pc6_gpkg.resolve())
-    buurt_to_postcodes = pd.read_csv(buurt_to_postcodes_csv.resolve())
-    consumption_df = pd.read_csv(consumption_df_path.resolve()) 
-    standard_consumption_df = pd.read_csv(standard_consumption_df_path.resolve())
-    
-    cbs_pc6_gdf = cbs_pc6_gdf[["geometry", "postcode6"]]
-    dataframes = [consumption_df, cbs_pc6_gdf, buurt_to_postcodes, standard_consumption_df]
     
     # Define distributions
     distributions = {
@@ -187,16 +169,38 @@ def main():
         "logging": args.logging,
         "show_pandapower_report": args.show_pandapower_report,
     }
+
+    if args.generate_train_data:
+         # Load subgraphs
+        path_to_graphs = data_dir / args.subgraph_file
+        with open(path_to_graphs, 'rb') as f:
+            subgraphs = pkl.load(f)
+        
+        print(f"Number of subgraphs loaded: {len(subgraphs)}")
+        
+        # Load datasets
+        cbs_pc6_gpkg = data_dir / "cbs_pc6_2023.gpkg"
+        buurt_to_postcodes_csv = data_dir / 'buurt_to_postcodes.csv'
+        consumption_df_path = data_dir / "aggregated_kleinverbruik_with_opwek.csv"
+        standard_consumption_df_path = data_dir / "cleaned_energ_standard_energy_data.csv"
+        
+        cbs_pc6_gdf = gpd.read_file(cbs_pc6_gpkg.resolve())
+        buurt_to_postcodes = pd.read_csv(buurt_to_postcodes_csv.resolve())
+        consumption_df = pd.read_csv(consumption_df_path.resolve()) 
+        standard_consumption_df = pd.read_csv(standard_consumption_df_path.resolve())
+        
+        cbs_pc6_gdf = cbs_pc6_gdf[["geometry", "postcode6"]]
+        dataframes = [consumption_df, cbs_pc6_gdf, buurt_to_postcodes, standard_consumption_df]
     
-    # Log configuration
-    total_graphs = len(subgraphs) * config['n_samples_per_graph'] * config['n_loadcase_time_intervals']
-    print(f"Total graphs to be generated: {total_graphs}")
-    logger.info(f"Total graphs to be generated: {total_graphs}")
-    
-    # Start transformation
-    print("Starting transformation")
-    transform_stats = transform_subgraphs(subgraphs, distributions, dataframes, config, logger)
-    
+        # Log configuration
+        total_graphs = len(subgraphs) * config['n_samples_per_graph'] * config['n_loadcase_time_intervals']
+        print(f"Total graphs to be generated: {total_graphs}")
+        logger.info(f"Total graphs to be generated: {total_graphs}")
+        
+        # Start transformation
+        print("Starting transformation")
+        transform_stats = transform_subgraphs(subgraphs, distributions, dataframes, config, logger)
+        
     # Generate test and validation sets if requested
     if args.generate_test_val:
 
@@ -216,7 +220,7 @@ def main():
         # Format bus range as a string
         bus_range_str = f"{args.bus_range_test_val[0]}-{args.bus_range_test_val[1]}"
         
-        day, month, year = date_str.day, date_str.month, date_str.year
+        day, month, year = current_date.day, current_date.month, current_date.year
         base_name = f"test_val_real__range-{bus_range_str}_nTest-{args.test_cases}_nVal-{args.val_cases}_{day}{month}{year}"
         
         # Find existing datasets with the same pattern to determine sequence number
@@ -251,7 +255,7 @@ def main():
         
         print(f"Test and validation datasets saved successfully at {test_val_save_location}")
     
-    return transform_stats
+    #return transform_stats
 
 
 if __name__ == "__main__":
