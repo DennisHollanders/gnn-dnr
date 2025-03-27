@@ -22,8 +22,6 @@ def calculate_conductance_matrix(graph):
         indices.append([v, u])
         values.extend([conductance, conductance])
         
-        # Add self-loops with negative sum of conductances for each node
-        # We'll handle this after processing all edges
     
     if not indices:  # If no edges were processed
         return torch.sparse_coo_tensor(
@@ -41,34 +39,19 @@ def calculate_conductance_matrix(graph):
         indices_tensor, values_tensor, (num_nodes, num_nodes)
     )
     
-    # Calculate diagonal entries (negative sum of off-diagonal entries in each row)
-    # For each node, sum up all outgoing conductances and negate
-    diagonal_values = []
     diagonal_indices = []
-    
+    diagonal_values = []
     for node in range(num_nodes):
-        # Get all values where this node is the source
         mask = indices_tensor[0] == node
         outgoing_sum = values_tensor[mask].sum().item()
-        
-        # Add diagonal entry
         diagonal_indices.append([node, node])
         diagonal_values.append(-outgoing_sum)
     
-    # Add diagonal entries to sparse matrix
-    if diagonal_indices:
-        diag_indices_tensor = torch.tensor(diagonal_indices, dtype=torch.long).t()
-        diag_values_tensor = torch.tensor(diagonal_values, dtype=torch.float)
-        
-        # Create sparse tensor for diagonal
-        diag_matrix = torch.sparse_coo_tensor(
-            diag_indices_tensor, diag_values_tensor, (num_nodes, num_nodes)
-        )
-        
-        # Add to the conductance matrix
-        conductance_matrix = conductance_matrix + diag_matrix
+    diag_indices_tensor = torch.tensor(diagonal_indices, dtype=torch.long).t()
+    diag_values_tensor = torch.tensor(diagonal_values, dtype=torch.float)
+    diag_matrix = torch.sparse_coo_tensor(diag_indices_tensor, diag_values_tensor, (num_nodes, num_nodes))
     
-    return conductance_matrix
+    return conductance_matrix + diag_matrix
 
 
 def calculate_laplacian_matrix(graph):
