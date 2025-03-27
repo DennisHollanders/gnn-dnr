@@ -3,61 +3,64 @@ import json
 import pickle as pkl
 from enum import Enum
 import torch
-import torch_geometric
-from torch_geometric.loader import DataLoader, NeighborLoader
 from torch_geometric.utils import from_networkx
 from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
 import networkx as nx
 import numpy as np
 import pandapower as pp
-from preprocess_data import * 
+from preprocess_data import *
+from pandapower import from_json, from_json_dict
+ 
 
 class DataloaderType(Enum):
     DEFAULT = "default"
     GRAPHYR = "graphyr"
     PINN = "pinn"
 
-
 class DNRDataset(Data):
-    """
-    Custom PyG dataset for DNR data that handles advanced batching
-    by custom increment and cat functions
-    """ 
     def __init__(self, **kwargs):
         super(DNRDataset, self).__init__(**kwargs)
 
     def __inc__(self, key, value, *args, **kwargs):
-        """Custom incremental counting for correct batching."""
         if key == 'edge_index':
             return self.num_nodes
         elif key in ["conductance_matrix_index", "adjacency_matrix_index", 
-                    "switch_matrix_index", "laplacian_matrix_index", 
-                    "admittance_matrix_index"]:
+                     "switch_matrix_index", "laplacian_matrix_index", 
+                     "admittance_matrix_index"]:
             return self.num_nodes
         else:
             return 0
-        
+
     def __cat_dim__(self, key, value, *args, **kwargs):
-        """Return the dimension for which `value` will get concatenated for proper batching """
-        # Edge indices are concatenated along the last dimension  
         if key in ["edge_index", "conductance_matrix_index", "adjacency_matrix_index", 
-                  "switch_matrix_index", "laplacian_matrix_index", "admittance_matrix_index"]:
+                   "switch_matrix_index", "laplacian_matrix_index", "admittance_matrix_index"]:
             return 1
-        
-        # Edge and Node attributes are concatenated along the first dimension
         elif key in [
             'x', 'edge_attr', 'conductance_matrix_values', 'adjacency_matrix_values',
             'switch_matrix_values', 'laplacian_matrix_values', 'admittance_matrix_values'
         ]:
             return 0
-        
-        # Scalar or graph-level features are concatenated along the batch dimension
         elif key in ['SBase', 'VBase', 'ZBase', 'YBase', 'IBase', 'vLow', 'vUpp']:
             return None
         else:
             return 0
 
-
+    @property
+    def conductance_matrix(self):
+        """
+        Reconstructs and returns the full conductance matrix as a dense tensor.
+        """
+        if hasattr(self, "conductance_matrix_index") and hasattr(self, "conductance_matrix_values"):
+            import torch
+            sparse_G = torch.sparse_coo_tensor(
+                self.conductance_matrix_index,
+                self.conductance_matrix_values,
+                (self.num_nodes, self.num_nodes)
+            )
+            return sparse_G.to_dense()
+        else:
+            raise AttributeError("Conductance matrix is not set for this data instance.")
 
 def load_graph_data(base_directory):
     print("\nLoading stored data...")
@@ -116,482 +119,92 @@ def load_graph_data(base_directory):
     
     return nx_graphs, pp_networks, features
 
-
-def merge_features_into_nx(nx_graph, node_feats, edge_feats):
-    if node_feats is None or edge_feats is None:
-        raise ValueError("Missing node or edge features")
-    
-    # Add node features
-    for node, feats in node_feats.items():
-        if node not in nx_graph.nodes():
-            continue
-        for feat_key, feat_value in feats.items():
-            nx_graph.nodes[node][feat_key] = feat_value
-    
-    # Add edge features
-    for (u, v), e_feats in edge_feats.items():
-        if not nx_graph.has_edge(u, v):
-            continue
-        for feat_key, feat_value in e_feats.items():
-            nx_graph[u][v][feat_key] = feat_value
-
-def check_missing_edge_features(nx_graph, edge_feats, print_results=True, default_values=None):
-    """
-    Check for missing edge features in a NetworkX graph and provide detailed statistics.
-    
-    Parameters:
-    -----------
-    nx_graph : NetworkX graph
-        The graph to check for missing edge features
-    edge_feats : dict
-        Dictionary of edge features with keys as edge tuples (u, v) and values as dictionaries of features
-    print_results : bool, optional
-        Whether to print the results (default: True)
-    default_values : dict, optional
-        Dictionary of default values to use for missing features (default: None)
-        
-    Returns:
-    --------
-    dict
-        Dictionary with detailed statistics about missing edge features
-    """
-    # Get all unique attribute names from the edge features
-    all_edge_attrs = set()
-    for feats in edge_feats.values():
-        all_edge_attrs.update(feats.keys())
-    
-    if not all_edge_attrs:
-        if print_results:
-            print("No edge attributes found in the feature dictionary.")
-        return {"error": "No edge attributes found"}
-    
-    # Set up default values if not provided
-    if default_values is None:
-        default_values = {
-            "R": 0.01,
-            "X": 0.01,
-            "switch_state": 0.0
-        }
-    
-    # Initialize counters
-    total_edges = nx_graph.number_of_edges()
-    if total_edges == 0:
-        if print_results:
-            print("Graph has no edges.")
-        return {"error": "Graph has no edges"}
-    
-    # For each attribute, track:
-    # - How many edges are missing this attribute
-    # - Which specific edges are missing this attribute
-    stats = {
-        attr: {
-            "missing_count": 0,
-            "missing_edges": [],
-            "default_value": default_values.get(attr, 0.0)
-        } for attr in all_edge_attrs
-    }
-    
-    # Check each edge
-    is_directed = nx_graph.is_directed()
-    for u, v in nx_graph.edges():
-        edge = (u, v)
-        
-        # For undirected graphs, check both edge directions in the feature dictionary
-        if not is_directed:
-            reverse_edge = (v, u)
-            feats = edge_feats.get(edge, edge_feats.get(reverse_edge, {}))
-        else:
-            feats = edge_feats.get(edge, {})
-        
-        # Check for missing attributes
-        for attr in all_edge_attrs:
-            if attr not in feats:
-                stats[attr]["missing_count"] += 1
-                stats[attr]["missing_edges"].append(edge)
-    
-    # Calculate percentages and prepare results
-    results = {}
-    for attr in all_edge_attrs:
-        missing_count = stats[attr]["missing_count"]
-        missing_percentage = (missing_count / total_edges) * 100
-        
-        results[attr] = {
-            "missing_count": missing_count,
-            "total_edges": total_edges,
-            "missing_percentage": missing_percentage,
-            "default_value": stats[attr]["default_value"],
-            # Limit the number of edges in the output to avoid overwhelming output
-            "example_missing_edges": stats[attr]["missing_edges"][:5] if stats[attr]["missing_edges"] else []
-        }
-    
-    # Print results if requested
-    if print_results:
-        graph_name = nx_graph.name if hasattr(nx_graph, "name") and nx_graph.name else "Unnamed"
-        print(f"\nEdge Attribute Analysis for Graph: {graph_name}")
-        print(f"Total Edges: {total_edges}")
-        print(f"Graph Type: {'Directed' if is_directed else 'Undirected'}")
-        print("\nMissing Edge Attributes:")
-        
-        # Sort attributes by missing percentage (highest first)
-        sorted_attrs = sorted(all_edge_attrs, key=lambda attr: results[attr]["missing_percentage"], reverse=True)
-        
-        for attr in sorted_attrs:
-            res = results[attr]
-            print(f"- {attr}:")
-            print(f"  * Missing: {res['missing_count']}/{res['total_edges']} edges ({res['missing_percentage']:.2f}%)")
-            print(f"  * Default value used: {res['default_value']}")
-            
-            if res["example_missing_edges"]:
-                print(f"  * Example missing edges: {res['example_missing_edges'][:3]}...")
-            print()
-    
-    # Add overall summary
-    results["summary"] = {
-        "total_edges": total_edges,
-        "is_directed": is_directed,
-        "attributes_analyzed": len(all_edge_attrs),
-        "completely_missing_attributes": [
-            attr for attr in all_edge_attrs 
-            if results[attr]["missing_count"] == total_edges
-        ]
-    }
-    
-    return results
-def check_and_fix_edge_attributes(nx_graph, print_details=True):
-    """
-    Checks for edge attribute inconsistencies and fixes them by ensuring all edges
-    have exactly the same set of attributes with consistent types.
-    
-    Parameters:
-    -----------
-    nx_graph : NetworkX graph
-        The graph to check and fix
-    print_details : bool
-        Whether to print detailed diagnostic information
-        
-    Returns:
-    --------
-    bool
-        True if the graph was modified, False otherwise
-    """
-    if nx_graph.number_of_edges() == 0:
-        if print_details:
-            print("Graph has no edges.")
-        return False
-    
-    # Collect all unique attributes from all edges
-    all_attributes = set()
-    attr_types = {}
-    edge_attrs = {}
-    
-    # First pass: collect all attributes and their types
-    for u, v, data in nx_graph.edges(data=True):
-        edge = (u, v)
-        edge_attrs[edge] = set(data.keys())
-        all_attributes.update(data.keys())
-        
-        # Track attribute types
-        for attr, value in data.items():
-            if attr not in attr_types:
-                attr_types[attr] = type(value)
-            elif attr_types[attr] != type(value):
-                attr_types[attr] = str  # Default to string for mixed types
-    
-    # Check if all edges have the same set of attributes
-    is_consistent = True
-    for edge, attrs in edge_attrs.items():
-        if attrs != all_attributes:
-            is_consistent = False
-            break
-    
-    if print_details:
-        print(f"\nEdge Attribute Consistency Check for Graph: {nx_graph.name if hasattr(nx_graph, 'name') else 'Unnamed'}")
-        print(f"Total Edges: {nx_graph.number_of_edges()}")
-        print(f"Total Unique Attributes: {len(all_attributes)}")
-        print(f"All edges have identical attributes: {'Yes' if is_consistent else 'No'}")
-        
-        if not is_consistent:
-            print("\nAttribute Distribution:")
-            attr_counts = {attr: 0 for attr in all_attributes}
-            for attrs in edge_attrs.values():
-                for attr in attrs:
-                    attr_counts[attr] += 1
-            
-            for attr, count in attr_counts.items():
-                percentage = (count / nx_graph.number_of_edges()) * 100
-                print(f"- {attr}: present in {count}/{nx_graph.number_of_edges()} edges ({percentage:.2f}%)")
-            
-            print("\nExample edges with different attribute sets:")
-            attr_to_edge = {}
-            for edge, attrs in edge_attrs.items():
-                attr_key = frozenset(attrs)
-                if attr_key not in attr_to_edge:
-                    attr_to_edge[attr_key] = []
-                if len(attr_to_edge[attr_key]) < 2:  # Keep just 2 examples
-                    attr_to_edge[attr_key].append(edge)
-            
-            for i, (attr_set, edges) in enumerate(attr_to_edge.items(), 1):
-                if i > 3:  # Limit to 3 different attribute sets
-                    print("... more attribute sets exist ...")
-                    break
-                print(f"  Set {i}: {sorted(attr_set)}")
-                for edge in edges:
-                    print(f"    - Edge {edge}: {dict(nx_graph.edges[edge])}")
-    
-    # Fix the graph if inconsistent
-    if not is_consistent:
-        if print_details:
-            print("\nFIXING: Adding missing attributes to ensure consistency...")
-        
-        modified = False
-        # Define default values for common attributes
-        default_values = {
-            'R': 0.01,
-            'X': 0.01,
-            'switch_state': 0.0,
-            'edge_idx': 0.0,
-            'line_idx': 0.0
-        }
-        
-        # Add missing attributes to all edges
-        for u, v, data in nx_graph.edges(data=True):
-            for attr in all_attributes:
-                if attr not in data:
-                    # Use default value if available, otherwise use a type-appropriate default
-                    if attr in default_values:
-                        data[attr] = default_values[attr]
-                    else:
-                        attr_type = attr_types.get(attr, float)
-                        if attr_type == int:
-                            data[attr] = 0
-                        elif attr_type == float:
-                            data[attr] = 0.0
-                        elif attr_type == bool:
-                            data[attr] = False
-                        else:
-                            data[attr] = ""
-                    modified = True
-        
-        # Verify fix
-        all_consistent = True
-        for u, v, data in nx_graph.edges(data=True):
-            if set(data.keys()) != all_attributes:
-                all_consistent = False
-                break
-        
-        if print_details:
-            if all_consistent:
-                print("FIX SUCCESSFUL: All edges now have the same attributes.")
-            else:
-                print("FIX FAILED: Edges still have inconsistent attributes.")
-        
-        return modified
-    
-    return False
-
-def build_clean_graph(nx_graph, node_feats, edge_feats, print_details=False):
-    """
-    Builds a new clean graph with consistent attributes by only including
-    the essential attributes needed for PyG conversion.
-    
-    Parameters:
-    -----------
-    nx_graph : NetworkX graph
-        The original graph structure
-    node_feats : dict
-        Dictionary of node features
-    edge_feats : dict
-        Dictionary of edge features
-    print_details : bool
-        Whether to print diagnostic information
-        
-    Returns:
-    --------
-    NetworkX graph
-        A new graph with consistent attributes
-    """
-    import networkx as nx
-    
-    # Define the essential attributes we need
-    essential_node_attrs = ["p", "q", "v", "theta"]
-    essential_edge_attrs = ["R", "X", "switch_state"]
-    
-    # Create a new graph of the same type as the original
-    if nx_graph.is_directed():
-        clean_graph = nx.DiGraph()
-    else:
-        clean_graph = nx.Graph()
-    
-    # Copy graph name if it exists
-    if hasattr(nx_graph, "name"):
-        clean_graph.name = nx_graph.name
-    
-    # Create a mapping from original node IDs to consecutive integers starting from 0
-    node_mapping = {node: i for i, node in enumerate(nx_graph.nodes())}
-    
-    # Add all nodes with only the essential attributes
+def create_pyg_data_from_nx(nx_graph, pp_network, loader_type=DataloaderType.DEFAULT,
+                            use_fallback_features=False, fallback_features=None):
+    # Validate that the graph has all required node attributes
     for node in nx_graph.nodes():
-        # Map to new consecutive integer ID
-        new_node_id = node_mapping[node]
-        
-        # Initialize with default values
-        node_attrs = {
-            "p": 0.0,
-            "q": 0.0,
-            "v": 1.0,
-            "theta": 0.0
-        }
-        
-        # Update from original graph attributes if available
-        for attr in essential_node_attrs:
-            if attr in nx_graph.nodes[node]:
-                node_attrs[attr] = nx_graph.nodes[node][attr]
-        
-        # Update from node_feats if available
-        if node_feats and node in node_feats:
-            for attr in essential_node_attrs:
-                if attr in node_feats[node]:
-                    node_attrs[attr] = node_feats[node][attr]
-        
-        # Add node to clean graph with new ID
-        clean_graph.add_node(new_node_id, **node_attrs)
-    
-    # Add all edges with only the essential attributes
+        for attr in ["p", "q", "v", "theta"]:
+            if attr not in nx_graph.nodes[node]:
+                if use_fallback_features and fallback_features and "node_features" in fallback_features:
+                    node_feats = fallback_features["node_features"]
+                    if node in node_feats and attr in node_feats[node]:
+                        nx_graph.nodes[node][attr] = node_feats[node][attr]
+                    else:
+                        raise ValueError(f"Node {node} missing attribute '{attr}' and not found in fallback features")
+                else:
+                    raise ValueError(f"Node {node} missing required attribute '{attr}'")
+
+    # Validate that the graph has all required edge attributes
     for u, v in nx_graph.edges():
-        # Map to new consecutive integer IDs
-        new_u = node_mapping[u]
-        new_v = node_mapping[v]
-        
-        # Initialize with default values
-        edge_attrs = {
-            "R": 0.01,
-            "X": 0.01,
-            "switch_state": 0.0
-        }
-        
-        # Update from original graph attributes if available
-        for attr in essential_edge_attrs:
-            if attr in nx_graph[u][v]:
-                edge_attrs[attr] = nx_graph[u][v][attr]
-        
-        # Update from edge_feats if available
-        if edge_feats:
-            # Try both (u, v) and (v, u) for undirected graphs
-            edge = (u, v)
-            reverse_edge = (v, u)
-            
-            if edge in edge_feats:
-                for attr in essential_edge_attrs:
-                    if attr in edge_feats[edge]:
-                        edge_attrs[attr] = edge_feats[edge][attr]
-            elif reverse_edge in edge_feats:
-                for attr in essential_edge_attrs:
-                    if attr in edge_feats[reverse_edge]:
-                        edge_attrs[attr] = edge_feats[reverse_edge][attr]
-        
-        # Add edge to clean graph with new IDs
-        clean_graph.add_edge(new_u, new_v, **edge_attrs)
-    
-    if print_details:
-        print(f"\nClean Graph Builder:")
-        print(f"Original graph: {nx_graph.number_of_nodes()} nodes, {nx_graph.number_of_edges()} edges")
-        print(f"Clean graph: {clean_graph.number_of_nodes()} nodes, {clean_graph.number_of_edges()} edges")
-        print(f"Node attributes: {essential_node_attrs}")
-        print(f"Edge attributes: {essential_edge_attrs}")
-        print(f"Node IDs remapped to consecutive integers: 0-{clean_graph.number_of_nodes()-1}")
-        
-        # Verify attribute consistency
-        is_consistent = True
-        for u, v, data in clean_graph.edges(data=True):
-            if set(data.keys()) != set(essential_edge_attrs):
-                is_consistent = False
-                break
-                
-        print(f"Edge attribute consistency: {'Yes' if is_consistent else 'No'}")
-        
-        # Print the first few edges to verify the structure
-        print("\nSample edges from clean graph:")
-        for i, (u, v, data) in enumerate(clean_graph.edges(data=True)):
-            if i >= 3:  # Print only first 3 edges
-                break
-            print(f"  Edge ({u}, {v}): {data}")
-    
-    return clean_graph
+        for attr in ["R", "X", "switch_state"]:
+            if attr not in nx_graph[u][v]:
+                if use_fallback_features and fallback_features and "edge_features" in fallback_features:
+                    edge_feats = fallback_features["edge_features"]
+                    if (u, v) in edge_feats and attr in edge_feats[(u, v)]:
+                        nx_graph[u][v][attr] = edge_feats[(u, v)][attr]
+                    elif (v, u) in edge_feats and attr in edge_feats[(v, u)]:
+                        nx_graph[u][v][attr] = edge_feats[(v, u)][attr]
+                    else:
+                        raise ValueError(f"Edge {u}-{v} missing attribute '{attr}' and not found in fallback features")
+                else:
+                    raise ValueError(f"Edge {u}-{v} missing required attribute '{attr}'")
 
+            if attr in ["R", "X"] and nx_graph[u][v][attr] == 0:
+                raise ValueError(f"Edge {u}-{v} has zero {attr} value which will cause division by zero")
 
-def create_pyg_data_from_nx(nx_graph, features, loader_type=DataloaderType.DEFAULT):
-    """
-    Create a PyTorch Geometric Data object from a NetworkX graph.
-    
-    Parameters:
-    -----------
-    nx_graph : NetworkX graph
-    features : dict
-        Dictionary of features for this graph
-    loader_type : DataloaderType
-        Type of dataloader to create
-        
-    Returns:
-    --------
-    torch_geometric.data.Data
-        PyG Data object or None if conversion failed
-    """
-    import torch
-    from torch_geometric.utils import from_networkx
-    
-    # Extract node and edge features
-    node_feats = features.get("node_features", {})
-    edge_feats = features.get("edge_features", {})
-    
-    # Build a clean graph with only essential attributes and consecutive integer node IDs
-    clean_graph = build_clean_graph(nx_graph, node_feats, edge_feats)
-    
-    # DIAGNOSTIC: Check if the clean graph is properly structured
-    print(f"Checking graph before conversion:")
-    print(f"- Graph type: {type(clean_graph)}")
-    print(f"- Number of nodes: {clean_graph.number_of_nodes()}")
-    print(f"- Number of edges: {clean_graph.number_of_edges()}")
-    
-    # Create the edge_index tensor directly from the clean graph
-    edges = list(clean_graph.edges())
+    # Create the edge_index tensor
+    edges = list(nx_graph.edges())
+    if not edges:
+        raise ValueError("Graph has no edges")
     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
-    print(f"- Manually created edge_index shape: {edge_index.shape}")
-    
-    # Get edge attributes for all edges in the same order
+
+    # Extract edge attributes
     edge_attrs = []
     for u, v in edges:
         edge_attrs.append([
-            clean_graph[u][v].get("R", 0.01),
-            clean_graph[u][v].get("X", 0.01),
-            clean_graph[u][v].get("switch_state", 0.0)
+            nx_graph[u][v]["R"],
+            nx_graph[u][v]["X"],
+            nx_graph[u][v]["switch_state"]
         ])
     edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
-    print(f"- Manually created edge_attr shape: {edge_attr.shape}")
-    
-    # Gather node features
-    num_nodes = clean_graph.number_of_nodes()
+
+    # print("before loading:", pp_network[:100])
+    # print(type(pp_network))
+    # # Ensure pp_network is a dictionary before calling from_json_dict
+    # if isinstance(pp_network, str):
+    #     pp_network = json.loads(pp_network)
+    # pp_network_loaded = from_json_dict(pp_network)
+    # print("after loading:", str(pp_network_loaded)[:100])
+    # print(pp_network_loaded.line.iloc[0])
+
+    # line_currents = torch.tensor(pp_network_loaded.res_line.loading_percent.values, dtype=torch.float)
+    # edge_attr = torch.cat([edge_attr, line_currents.unsqueeze(1)], dim=1)
+
+    # Extract node features
+    num_nodes = nx_graph.number_of_nodes()
     node_features = []
-    for node_idx in range(num_nodes):  # Iterate over nodes in order
-        node_data = clean_graph.nodes[node_idx]
+    nodes = list(nx_graph.nodes())
+    if set(nodes) != set(range(len(nodes))):
+        raise ValueError("Graph nodes must be consecutive integers starting from 0")
+    for node_idx in range(num_nodes):
+        node_data = nx_graph.nodes[node_idx]
         node_features.append([
-            node_data.get("p", 0.0),
-            node_data.get("q", 0.0),
-            node_data.get("v", 1.0),
-            node_data.get("theta", 0.0)
+            node_data["p"],
+            node_data["q"],
+            node_data["v"],
+            node_data["theta"]
         ])
     x = torch.tensor(node_features, dtype=torch.float)
-    print(x)
-    print(f"- Manually created node features shape: {x.shape}")
-    
-    from torch_geometric.data import Data
+
+    # Create the PyG Data object
     data = Data(
         x=x,
         edge_index=edge_index,
         edge_attr=edge_attr,
         num_nodes=num_nodes
     )
-    print(f"Created PyG Data object: {data}")
-    # Create our custom DNRDataset with the manual data
+
+    # Create our custom DNRDataset with the data
     custom_data = DNRDataset(
         x=data.x, 
         edge_index=data.edge_index,
@@ -599,46 +212,38 @@ def create_pyg_data_from_nx(nx_graph, features, loader_type=DataloaderType.DEFAU
         num_nodes=data.num_nodes
     )
 
-    # Add switch_mask and edge_y
-    edge_count = edge_index.size(1)
-    switch_state_column = 2  
-    if edge_attr.size(0) > 0:
-        custom_data.edge_y = edge_attr[:, switch_state_column].float()
-    else:
-        custom_data.edge_y = torch.zeros(edge_count, dtype=torch.float)
-    
+    # Add edge_y (switch state is the 3rd column - index 2)
+    switch_state_column = 2
+    custom_data.edge_y = edge_attr[:, switch_state_column].float()
+
     # Add matrices based on loader type
     if loader_type != DataloaderType.DEFAULT:
-        conductance_matrix = calculate_conductance_matrix(clean_graph)
-        custom_data.conductance_matrix_index = conductance_matrix.coalesce().indices()
-        custom_data.conductance_matrix_values = conductance_matrix.coalesce().values()
-        
-        # Add adjacency matrix
-        adjacency_matrix = calculate_adjacency_matrix(clean_graph)
+        conductance_matrix = calculate_conductance_matrix(nx_graph)
+        coalesced = conductance_matrix.coalesce()
+        custom_data.conductance_matrix_index = coalesced.indices()
+        custom_data.conductance_matrix_values = coalesced.values()
+
+        adjacency_matrix = calculate_adjacency_matrix(nx_graph)
         custom_data.adjacency_matrix_index = adjacency_matrix.coalesce().indices()
         custom_data.adjacency_matrix_values = adjacency_matrix.coalesce().values()
-        
-        # Add switch matrix
-        switch_matrix = calculate_switch_matrix(clean_graph)
+
+        switch_matrix = calculate_switch_matrix(nx_graph)
         custom_data.switch_matrix_index = switch_matrix.coalesce().indices()
         custom_data.switch_matrix_values = switch_matrix.coalesce().values()
-    
+
     # Add PINN-specific matrices
     if loader_type == DataloaderType.PINN:
-        # Add Laplacian matrix
-        laplacian_matrix = calculate_laplacian_matrix(clean_graph)
+        laplacian_matrix = calculate_laplacian_matrix(nx_graph)
         custom_data.laplacian_matrix_index = laplacian_matrix.coalesce().indices()
         custom_data.laplacian_matrix_values = laplacian_matrix.coalesce().values()
-        
-        # Add admittance matrix
-        admittance_matrix = calculate_admittance_matrix(clean_graph)
+
+        admittance_matrix = calculate_admittance_matrix(nx_graph)
         custom_data.admittance_matrix_index = admittance_matrix.coalesce().indices()
         custom_data.admittance_matrix_values = admittance_matrix.coalesce().values()
-    
-    return custom_data
 
+    return custom_data
     
-def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT):
+def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
     nx_graphs, pp_networks, features = load_graph_data(base_directory)
     
     data_list = []
@@ -646,28 +251,32 @@ def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT):
     failed_conversions = 0
     
     for graph_name in nx_graphs.keys():
-        if graph_name not in features:
-            print(f"Skipping {graph_name} - missing features")
-            continue
-        
         print(f"\n--- Processing graph: {graph_name} ---")
         nx_graph = nx_graphs[graph_name]
-        feature_dict = features[graph_name]
+        
+        # Get features as fallback only if requested
+        fallback_features = features.get(graph_name, None) if use_fallback_features else None
         
         try:
-            data = create_pyg_data_from_nx(nx_graph, feature_dict, loader_type)
-            if data is not None:
-                data_list.append(data)
-                successful_conversions += 1
-                print(f"Successfully converted graph: {graph_name}")
-            else:
-                failed_conversions += 1
-                print(f"Failed to convert graph: {graph_name} - returned None")
+            # Create PyG data directly from the NetworkX graph, let errors propagate
+            data = create_pyg_data_from_nx(
+                nx_graph, 
+                pp_networks[graph_name],
+                loader_type, 
+                use_fallback_features=use_fallback_features,
+                fallback_features=fallback_features
+            )
+            
+            data_list.append(data)
+            successful_conversions += 1
+            print(f"Successfully converted graph: {graph_name}")
+                
         except Exception as e:
             failed_conversions += 1
-            import traceback
             print(f"Error creating PyG data for {graph_name}: {e}")
-            print(traceback.format_exc())
+            # Let the exception propagate if this is a critical error
+            if "missing required attribute" in str(e) or "zero" in str(e):
+                raise  # Re-raise important errors
     
     print(f"\nCreated {len(data_list)} PyG data objects")
     print(f"Successful conversions: {successful_conversions}")
@@ -797,8 +406,9 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
-    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set", help="Base directory containing the train/validation folders")
-    parser.add_argument("--secondary_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",help="Secondary directory containing the test/validation folders")
+    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_24032025", help="Base directory containing the train/validation folders")
+    parser.add_argument("--secondary_dir", type=str, #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",
+                        help="Secondary directory containing the test/validation folders")
     parser.add_argument("--loader_type", type=str, default="pinn", 
                         choices=["default", "graphyr", "pinn",],
                         help="Type of dataloader to create")
@@ -865,7 +475,7 @@ if __name__ == "__main__":
                 print(f"Laplacian matrix indices shape: {batch.laplacian_matrix_index.shape}")
             if hasattr(batch, 'admittance_matrix_index'):
                 print(f"Admittance matrix indices shape: {batch.admittance_matrix_index.shape}")
-                
-        print("test_batch:", batch_test) 
-        print(f"Test Batch size: {len(batch_test)}")
+        if args.secondary_dir:         
+            print("test_batch:", batch_test) 
+            print(f"Test Batch size: {len(batch_test)}")
         
