@@ -1,11 +1,11 @@
-import logging
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pint import UnitRegistry
+from pyomo.opt import TerminationCondition
 ureg = UnitRegistry()
-
+import logging
 from pyomo.environ import (
     ConcreteModel,
     Set,
@@ -20,8 +20,10 @@ from pyomo.environ import (
     Expression,
     minimize,
     SolverFactory,
-    value
+    Any,
+    Suffix,
 )
+from pyomo.environ import value as pyo_value
 from pyomo.util.infeasible import log_infeasible_constraints
 
 
@@ -34,17 +36,22 @@ class SOCP_class:
     def __init__(
         self,
         net,
-        net_name: str = "Network",
+        graph_id: str = "",
         switch_penalty: float = 0.01,
+        logger=None,
+        toggles= None,
         ):
         self.net = net
-        self.net_name = net_name
+        #self.net_name = net_name
+        self.logger = logger or logging.getLogger(__name__)
+        self.graph_id = graph_id
         if hasattr(self.net, 'res_line') and hasattr(self.net.res_line, 'pl_mw'):
             active_power_loss = self.net.res_line.pl_mw
             self.total_active_power_loss = sum(active_power_loss)
         else:
             self.total_active_power_loss = None
         self.bus_injection = None
+        self.toggles = toggles
 
         # Initialize dataframes to None
         self.line_df = None
@@ -54,7 +61,6 @@ class SOCP_class:
         self.B_df = None
         self.switch_df = None
         
-
         # Determine substations from slack generators, external grids, and transformer LV buses.
         slack_buses = set()
         if hasattr(self.net, 'gen') and not self.net.gen.empty:
@@ -113,25 +119,6 @@ class SOCP_class:
             lambda row: (row["x_ohm_per_km"] * (ureg.ohm/ureg.km) * row["length_km"] * ureg.km).to(ureg.ohm).magnitude,
             axis=1
         )
-        frequency = 50  # Hz
-        line_df["B_Siemens_shunt"] = line_df.apply(
-            lambda row: row["c_nf_per_km"] * row["length_km"] * 2 * np.pi * frequency / 10**9, axis=1
-        )
-        def susceptance_cal(R, X):
-            return -1 / X if R == 0 else -X / (R**2 + X**2)
-        line_df["B_transmission_s"] = line_df.apply(lambda row: susceptance_cal(row["r_ohm"], row["x_ohm"]), axis=1)
-
-        # Bus susceptance 
-        bus_susceptance = {bus: 0 for bus in self.net.bus.index}
-        for idx, row in self.net.line.iterrows():
-            B = row["c_nf_per_km"] * row["length_km"] * 2 * np.pi * frequency * 1e-9
-            bus_susceptance[row["from_bus"]] += B
-            bus_susceptance[row["to_bus"]] += B
-        B_df = pd.DataFrame({
-            "bus_n": list(bus_susceptance.keys()),
-            "bus_B_s": list(bus_susceptance.values()),
-            "bus_name": [bus_dict[i] for i in bus_susceptance.keys()]
-        })
 
         self.switch_df = self.net.switch.copy()
         self.initial_switch_status = self.switch_df['closed'].copy()
@@ -152,16 +139,47 @@ class SOCP_class:
                 self.net.load[self.net.load.bus == idx]["p_mw"].sum())
             for idx in self.net.bus.index
         }
+        self.reactive_bus_injection = {}
+        for idx in self.net.bus.index:
+            bus_name = self.net.bus.loc[idx, "name"]
+            if bus_name not in self.bus_dict.values(): # Skip buses filtered out earlier (e.g., HV side)
+                continue
+
+            # Sum reactive power sources (generators, static gens, shunts)
+            q_gen = self.net.gen[self.net.gen.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'gen') and not self.net.gen.empty else 0
+            q_sgen = self.net.sgen[self.net.sgen.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'sgen') and not self.net.sgen.empty else 0
+            q_shunt = self.net.shunt[self.net.shunt.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'shunt') and not self.net.shunt.empty else 0
+
+            # Sum reactive power loads
+            q_load = self.net.load[self.net.load.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'load') and not self.net.load.empty else 0
+
+            # Net Injection = Sources - Loads (Ensure units are consistent, e.g., MVAR)
+            # Check if your Q_flow variables implicitly handle units or if conversion is needed.
+            # Assuming Q_flow and injections will be in compatible units (e.g., MVAR or pu)
+            self.reactive_bus_injection[bus_name] = q_gen + q_sgen + q_shunt - q_load
+            # Optional: Log injections for checking
+            if abs(self.reactive_bus_injection[bus_name]) > 1e-6:
+                 self.logger.debug(f"Bus {bus_name}: Reactive Injection = {self.reactive_bus_injection[bus_name]:.4f}")
 
         # Save processed data as attributes
         self.line_df = line_df
         self.bus_df = bus_df
         self.bus_dict = bus_dict
         self.voltages_bus = voltages_bus
-        self.B_df = B_df
-
 
     def create_model(self, toggles=None):
+        """
+        Creates a SOCP (Second Order Cone Programming) model for distribution network reconfiguration
+        based on the formulation provided in the PDF.
+        
+        The model follows the SOCP formulation from pages 3-4 of the PDF, with equations (25)-(36).
+        
+        Args:
+            toggles: Dictionary of boolean flags to control which constraints are included
+
+        Returns:
+            model: A Pyomo ConcreteModel instance with the SOCP formulation
+        """
         if toggles is None:
             toggles = {
                 "include_voltage_drop_constraint": True, 
@@ -173,28 +191,39 @@ class SOCP_class:
             }
 
         model = ConcreteModel()
+        
         # Basic sets
+        # Ωb: Set of all buses/nodes
         model.buses = Set(initialize=list(self.voltages_bus.index), ordered=True)
+        # Ωl: Set of all lines/branches
         model.lines = Set(initialize=list(self.line_df["name"]), ordered=True)
         model.times = Set(initialize=[0], ordered=True)
+        # Ωbp: Set of partitioned buses (non-substation buses) as in equations (10) and (33)
+        model.partitioned_buses = Set(initialize=[b for b in model.buses if b not in self.substations], ordered=True)
         
-        #Voltage parameters 
+        # Voltage parameters
+        # V̄: Upper voltage limit in equation (30)
+        v_upper_factor = 1.10  # Example: 1.10 pu
+        v_lower_factor = 0.90  # Example: 0.90 pu
+
+        # Ensure you are squaring the pu value for V_m_sqr bounds
         model.V_overline = Param(
             model.buses,
-            initialize=lambda m, b: ((self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * 1000 * 1.05)
-                                        .to(ureg.volt).magnitude)
+            initialize=lambda m, b: ( (self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * v_upper_factor).to(ureg.volt).magnitude )**2 
         )
         model.V_underline = Param(
             model.buses,
-            initialize=lambda m, b: ((self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * 1000 * 0.95)
-                                        .to(ureg.volt).magnitude)
+            initialize=lambda m, b: ( (self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * v_lower_factor).to(ureg.volt).magnitude )**2
         )
+        
+        # xᵢⱼ: Line reactance in equation (26)
         model.xl_mOhm = Param(
             model.lines,
             within=NonNegativeReals,
             initialize=lambda m, l: ((self.line_df.set_index("name").at[l, "x_ohm"] * ureg.ohm)
                                         .to(ureg.mohm).magnitude)
         )
+        # rᵢⱼ: Line resistance in equations (25) and (26)
         model.rl_mOhm = Param(
             model.lines,
             within=NonNegativeReals,
@@ -202,31 +231,47 @@ class SOCP_class:
                                         .to(ureg.mohm).magnitude)
         )
         
+        # Demand parameter for radiality constraint - used in flow balance for radiality
         model.radial_demand = Param(model.buses, initialize=lambda m, b: 0 if b in self.substations else 1)
         
+        # Big M for flow constraints
         expected_max_flow = sum(abs(val) for val in self.bus_injection.values())
         print("Expected maximum flow (used for Big‑M):", expected_max_flow)
         M_value = expected_max_flow * 1.1  # Safety factor
         model.big_M = Param(initialize=M_value)
         
-        # Variables 
+        # Variables as defined in the PDF formulation
+        
+        # vᵢ: Squared voltage magnitude at bus i in equations (26), (29), (30)
         model.V_m_sqr = Var(model.buses, model.times, within=NonNegativeReals, initialize=1.0)
+        
+        # Pᵢⱼ: Active power flow on line (i,j) in equations (27), (29)
         model.P_flow = Var(model.lines, model.times, initialize=0)
+        
+        # Qᵢⱼ: Reactive power flow on line (i,j) in equations (28), (29)
         model.Q_flow = Var(model.lines, model.times, initialize=0)
+        
+        # ℓᵢⱼ: Squared current magnitude on line (i,j) in equations (25), (26), (29)
         model.l_squared = Var(model.lines, model.times, within=NonNegativeReals, initialize=1)
+        
+        # yⱼ: Binary variable indicating if bus j is energized (equation 33)
+        model.y = Var(model.partitioned_buses, within=Binary, initialize=1)
 
+        # Slack variable for feasibility (not in the theoretical formulation, but needed for practical implementation)
         model.voltage_slack = Var(model.lines, model.times, within=NonNegativeReals, initialize=0)
         model.voltage_slack_penalty = Param(initialize=1000, mutable=True)
         
-        # Line direction maps 
+        # Line direction maps
         line_starts = {row["name"]: self.bus_dict.get(self.net.line.at[idx, "from_bus"])
-               for idx, row in self.net.line.iterrows() if self.bus_dict.get(self.net.line.at[idx, "from_bus"]) is not None}
+            for idx, row in self.net.line.iterrows() if self.bus_dict.get(self.net.line.at[idx, "from_bus"]) is not None}
         line_ends = {row["name"]: self.bus_dict[row["to_bus"]] for _, row in self.net.line.iterrows()}
-        model.line_start = Param(model.lines, initialize=line_starts)
-        model.line_end = Param(model.lines, initialize=line_ends)
+        model.line_start = Param(model.lines,within =Any, initialize=line_starts)
+        model.line_end = Param(model.lines,within=Any, initialize=line_ends)
+        
+        # xᵢⱼ: Binary variable for line status in equations (6), (32)
         model.line_status = Var(model.lines, domain=Binary, initialize=1)
         
-        # Switch definitions 
+        # Switch definitions
         line_switches = self.switch_df[self.switch_df['et'] == 'l']
         model.switches = Set(initialize=list(line_switches.index), ordered=True)
         model.switch_mask = Param(
@@ -243,110 +288,220 @@ class SOCP_class:
         model.switch_initial = Param(
             model.switches,
             initialize=lambda m, s: 1 if self.switch_df.at[s, 'closed'] else 0
-        )
-        
-        # Objective function 
-        # def objective_rule_socp(m):
-        #     loss_term = sum(m.rl_mOhm[l] * m.l_squared[l, t] for l in m.lines for t in m.times)
-        #     penalty_term = self.switch_penalty * sum(
-        #             (1 - m.switch_initial[s]) * m.switch_status[s] + m.switch_initial[s] * (1 - m.switch_status[s])
-        #             for s in m.switches
-        #     )
-        #     if toggles["include_switch_penalty"]:
-        #         return loss_term + penalty_term
-        #     else:
-        #         return loss_term
+        )  
 
-        # add slack
+        model.active_slack_penalty = Param(initialize=1000, mutable=True)
+        model.reactive_slack_penalty = Param(initialize=1000, mutable=True) 
+        
+        # Active and Reactive power balance slack
+        model.p_slack = Var(model.buses, model.times, domain=Reals, initialize=0)
+        model.q_slack = Var(model.buses, model.times, domain=Reals, initialize=0)   
+                
+        # Objective function  
+        # min Σ(i,j)∈Ωl rij * ℓij (equation 25)
         def objective_rule_socp(m):
-            loss_term = sum(m.rl_mOhm[l] * m.l_squared[l, t] for l in m.lines for t in m.times)
-            slack_term = sum(m.voltage_slack_penalty * m.voltage_slack[l, t] for l in m.lines for t in m.times)
-            penalty_term = self.switch_penalty * sum(
-                (1 - m.switch_initial[s]) * m.switch_status[s] + m.switch_initial[s] * (1 - m.switch_status[s])
-                for s in m.switches
-            )
-            if toggles["include_switch_penalty"]:
-                return loss_term + slack_term + penalty_term
-            else:
-                return loss_term + slack_term
+            # Loss term from resistive losses
+            loss_term = sum(m.rl_mOhm[l] * m.l_squared[l, t] * 1e-3 for l in m.lines for t in m.times)
+
+            # Voltage slack term (already in your formulation)
+            voltage_slack_term = sum(m.voltage_slack_penalty * m.voltage_slack[l, t] for l in m.lines for t in m.times)
+
+            # Penalties for slack in power balances (using squared slack for smoother penalization)
+            reactive_slack_term = sum(m.reactive_slack_penalty * (m.q_slack[b, t] ** 2) for b in m.buses for t in m.times)
+            active_slack_term = sum(m.active_slack_penalty * (m.p_slack[b, t] ** 2) for b in m.buses for t in m.times)
+            # Optional switch penalty term if toggled on
+            switch_penalty_term = 0
+            if self.toggles["include_switch_penalty"]:
+                switch_penalty_term = self.switch_penalty * sum(
+                    (1 - m.switch_initial[s]) * m.switch_status[s] + m.switch_initial[s] * (1 - m.switch_status[s])
+                    for s in m.switches
+                )
+            return loss_term + voltage_slack_term + reactive_slack_term + active_slack_term + switch_penalty_term
+
         model.objective = Objective(rule=objective_rule_socp, sense=minimize)
-        
-        # Power Balance Constraint 
-        def power_balance_rule(m, b, t):
-            outflow = sum(m.P_flow[l, t] for l in m.lines if m.line_start[l] == b)
-            inflow  = sum(m.P_flow[l, t] for l in m.lines if m.line_end[l] == b)
-            expr = outflow - inflow - self.bus_injection[b]
-            # If the expression is a number and is zero, skip the constraint
-            if isinstance(expr, (int, float)):
-                if expr == 0:
-                    return Constraint.Skip
-                else:
-                    return expr == 0
+
+        # Active power balance: Σj∈Ωbi Pij - Σj∈Ωbi Pji = PSi - PDi ∀i ∈ Ωb (equation 27)
+        def active_power_balance_rule(m, b, t):
+            if b in self.substations:
+                return Constraint.Skip
             else:
-                # Otherwise, return the symbolic equality
-                return expr == 0
+                outflow = sum(m.P_flow[l, t] for l in m.lines if m.line_start[l] == b)
+                inflow = sum(m.P_flow[l, t] for l in m.lines if m.line_end[l] == b)
+                # Allow slack in active power balance
+                return outflow - inflow - self.bus_injection[b] == m.p_slack[b, t]
+
+        # Reactive power balance: Σj∈Ωbi Qij - Σj∈Ωbi Qji = QSi - QDi ∀i ∈ Ωb (equation 28)
+        def reactive_power_balance_rule(m, b, t): 
+            if b in self.substations:
+                return Constraint.Skip
+            else:
+                outflow_q = sum(m.Q_flow[l, t] for l in m.lines if m.line_start[l] == b) 
+                inflow_q = sum(m.Q_flow[l, t] for l in m.lines if m.line_end[l] == b) 
+                q_injection = self.reactive_bus_injection.get(b, 0) 
+                # Allow a slack term on the right-hand side 
+                return outflow_q - inflow_q - q_injection == m.q_slack[b, t]
+
         if toggles["include_power_balance_constraint"]:
-            model.PowerBalance = Constraint(model.buses, model.times, rule=power_balance_rule)
+            model.ActivePowerBalance = Constraint(model.buses, model.times, rule=active_power_balance_rule)
+            model.ReactivePowerBalance = Constraint(model.buses, model.times, rule=reactive_power_balance_rule)
         
-        # SOCP Cone Constraint 
+        # SOCP Cone Constraint
+        # ||(2Pij, 2Qij, vi - ℓij)||2 ≤ vi + ℓij ∀(ij) ∈ Ωl (equation 29)
         def socp_cone_rule(m, l, t):
             from_bus = m.line_start[l]
-            return (m.P_flow[l, t]**2 + m.Q_flow[l, t]**2) <= m.V_m_sqr[from_bus, t] * m.l_squared[l, t]
+            # This implements the rotated cone constraint from equation (29)
+            # This is equivalent to P_ij^2 + Q_ij^2 <= v_i * l_ij but in proper SOCP form
+            return (4*m.P_flow[l, t]**2 + 4*m.Q_flow[l, t]**2 + 
+                    (m.V_m_sqr[from_bus, t] - m.l_squared[l, t])**2) <= (m.V_m_sqr[from_bus, t] + m.l_squared[l, t])**2
+        
         model.SOCP_Cone = Constraint(model.lines, model.times, rule=socp_cone_rule)
         
-        # Voltage Drop Constraint 
-        # def voltage_drop_rule(m, l, t):
-        #     i = m.line_start[l]
-        #     j = m.line_end[l]
-        #     R = m.rl_mOhm[l] * 1e-3  # Convert mOhm to ohm
-        #     X = m.xl_mOhm[l] * 1e-3  # Convert mOhm to ohm
-        #     return m.V_m_sqr[j, t] == m.V_m_sqr[i, t] - 2 * (R * m.P_flow[l, t] + X * m.Q_flow[l, t]) + (R**2 + X**2) * m.l_squared[l, t]
-
-        #add slack
+        # Voltage Drop Constraint
+        # vj = vi - 2(rijPij + xᵢⱼQij) + (r²ij + x²ij)ℓij ∀(ij) ∈ Ωl (equation 26)
         def voltage_drop_rule(m, l, t):
             i = m.line_start[l]
             j = m.line_end[l]
             R = m.rl_mOhm[l] * 1e-3  # mOhm to ohm conversion
             X = m.xl_mOhm[l] * 1e-3
-            return m.V_m_sqr[j, t] + m.voltage_slack[l, t] == m.V_m_sqr[i, t] - 2*(R * m.P_flow[l, t] + X * m.Q_flow[l, t]) \
-                   + (R**2 + X**2)* m.l_squared[l, t]
+            return (m.V_m_sqr[j, t] + m.voltage_slack[l, t] == 
+                    m.V_m_sqr[i, t] - 2*(R * m.P_flow[l, t] + X * m.Q_flow[l, t]) + (R**2 + X**2) * m.l_squared[l, t])
 
         if toggles["include_voltage_drop_constraint"]:
             model.VoltageDrop = Constraint(model.lines, model.times, rule=voltage_drop_rule)
         
-        # Voltage bounds 
+        # Voltage bounds
+        # v ≤ vi ≤ v̄ ∀i ∈ Ωb (equation 30)
+        # def voltage_upper_bound(m, b, t):
+        #     return m.V_m_sqr[b, t] <= m.V_overline[b] ** 2
+        
+        # def voltage_lower_bound(m, b, t):
+        #     return m.V_m_sqr[b, t] >= m.V_underline[b] ** 2
         def voltage_upper_bound(m, b, t):
-            return m.V_m_sqr[b, t] <= m.V_overline[b] ** 2
+            if b in m.partitioned_buses:
+                # When bus is off (y[b]==0), allow the upper bound to relax.
+                return m.V_m_sqr[b, t] <= m.V_overline[b] ** 2 + (1 - m.y[b]) * m.big_M
+            else:
+                return m.V_m_sqr[b, t] <= m.V_overline[b] ** 2
+
         def voltage_lower_bound(m, b, t):
-            return m.V_m_sqr[b, t] >= m.V_underline[b] ** 2
+            if b in m.partitioned_buses:
+                # When bus is off, the lower bound is relaxed.
+                return m.V_m_sqr[b, t] >= m.V_underline[b] ** 2 - (1 - m.y[b]) * m.big_M
+            else:
+                return m.V_m_sqr[b, t] >= m.V_underline[b] ** 2
         if toggles["include_voltage_bounds_constraint"]:
             model.VoltageUpper = Constraint(model.buses, model.times, rule=voltage_upper_bound)
             model.VoltageLower = Constraint(model.buses, model.times, rule=voltage_lower_bound)
         
+        # def fix_line_status(m, l):
+        #     if l not in self.lines_with_switches:
+        #         return m.line_status[l] == 1
+        #     else:
+        #         return Constraint.Skip
+        def fix_line_status(m, l):
+            # Option: Only fix ON if the line is NOT switchable AND was initially in service 
+            # (Requires knowing initial state, e.g., from self.net.line['in_service'])
+            # Example assuming line_df has 'name' and 'in_service' from original data:
+            line_data = self.line_df[self.line_df['name'] == l].iloc[0] 
+            is_initially_in_service = line_data.get('in_service', True) # Default to True if column missing
+
+            if l not in self.lines_with_switches:
+                if is_initially_in_service:
+                    return m.line_status[l] == 1 # Fix ON only if initially ON and no switch
+                else:
+                    #return m.line_status[l] == 0 # Fix OFF if initially OFF and no switch
+                    return Constraint.Skip # Or let it be decided by optimization if initially OFF
+            else: # Line has a switch, status is variable
+                return Constraint.Skip
+
+        model.FixLineStatus = Constraint(model.lines, rule=fix_line_status)
+        
+        def slack_link_rule(m, l, t):
+            # Only apply to buses in the partitioned set where y is defined.
+            if m.line_end[l] in m.partitioned_buses:
+                # If bus is energized (y==1) then slack must be near zero.
+                return m.voltage_slack[l, t] <= m.big_M * (1 - m.y[m.line_end[l]])
+            else:
+                return Constraint.Skip
+
+        model.SlackLink = Constraint(model.lines, model.times, rule=slack_link_rule)
+        
+        
         # Radiality Constraints
         if toggles["include_radiality_constraints"]:
             model.substations = Set(initialize=list(self.substations))
+            
+            # Additional variable for flow-based radiality verification
             model.flow = Var(model.lines, domain=NonNegativeReals, initialize=0)
         
+            # Line status constraints based on switch status - maps to equation (32)
             def line_status_rule(m, l):
                 if l in self.lines_with_switches:
                     return m.line_status[l] == sum(m.switch_status[s] for s in self.lines_with_switches[l])
                 else:
                     return Constraint.Skip
+            
             model.LineStatusConstraint = Constraint(model.lines, rule=line_status_rule)
             
-            # spanning tree fomrulation 
+            # Bus-line connection constraints
+            # xij ≤ yj, xji ≤ yj ∀(ij) ∈ Ωl, ∀j ∈ Ωbp (equation 34)
+            def line_bus_connection_rule1(m, l, b):
+                if m.line_start[l] == b and b in m.partitioned_buses:
+                    return m.line_status[l] <= m.y[b]
+                else:
+                    return Constraint.Skip
+            
+            model.LineBusConnection1 = Constraint(model.lines, model.partitioned_buses, rule=line_bus_connection_rule1)
+            
+            def line_bus_connection_rule2(m, l, b):
+                if m.line_end[l] == b and b in m.partitioned_buses:
+                    return m.line_status[l] <= m.y[b]
+                else:
+                    return Constraint.Skip
+            
+            model.LineBusConnection2 = Constraint(model.lines, model.partitioned_buses, rule=line_bus_connection_rule2)
+            
+            # Bus connectivity constraint
+            # Σ(ij)∈Ωl xij + Σ(ji)∈Ωl xji ≥ 2yj ∀k ∈ Ωbp (equation 35)
+            # def bus_connectivity_rule(m, b):
+            #     if b in m.partitioned_buses:
+            #         # Collect all incident lines (both where b is start or end)
+            #         incident_lines = [l for l in m.lines if m.line_start[l] == b or m.line_end[l] == b]
+            #         degree = len(incident_lines)
+            #         # For degree 1, require the single incident line be active;
+            #         # For degree >=2, require at least 2 active connections.
+            #         required = m.y[b] if degree == 1 else 2 * m.y[b]
+            #         return sum(m.line_status[l] for l in incident_lines) >= required
+            #     else:
+            #         return Constraint.Skip
+            def bus_connectivity_rule(m, b): 
+                if b in m.partitioned_buses: 
+                    # Gather all incident lines (both originating from and ending at bus b) 
+                    incident_lines = [l for l in m.lines if m.line_start[l] == b or m.line_end[l] == b] 
+                    # Relax the requirement: if the bus is energized (y[b]==1), require at least one connection. 
+                    return sum(m.line_status[l] for l in incident_lines) >= m.y[b] 
+                else: 
+                    return Constraint.Skip
+            
+            model.BusConnectivityConstraint = Constraint(model.partitioned_buses, rule=bus_connectivity_rule)
+            
+            # Spanning tree or radiality constraint
+            # Σ(ij)∈Ωl xij = nb - 1 - Σj∈Ωbp(1 - yj) (equation 36)
             if toggles["use_spanning_tree_radiality"]:
                 def spanning_tree_rule(m):
-                    return sum(m.line_status[l] for l in m.lines) == len(m.buses) - 1
+                    inactive_buses = sum(1 - m.y[b] for b in m.partitioned_buses)
+                    return sum(m.line_status[l] for l in m.lines) == len(m.buses) - 1 - inactive_buses
+                
                 model.SpanningTree = Constraint(rule=spanning_tree_rule)
             else:
-                # Big-M flow activationr
+                # Alternative flow-based radiality formulation
+                # Big-M flow activation
                 def big_m_flow_rule(m, l, t):
                     return m.flow[l] <= m.big_M * m.line_status[l]
+                
                 model.BigMFlow = Constraint(model.lines, model.times, rule=big_m_flow_rule)
             
-                # flow balance: non-substation nodes must receive at least one unit
+                # Flow balance constraints for radiality verification
                 def flow_balance_rule(m, b):
                     inflow = sum(m.flow[l] for l in m.lines if m.line_end[l] == b)
                     outflow = sum(m.flow[l] for l in m.lines if m.line_start[l] == b)
@@ -355,6 +510,7 @@ class SOCP_class:
                         return outflow - inflow == total_demand
                     else:
                         return inflow - outflow >= m.radial_demand[b]
+                
                 model.RadialityFlowBalance = Constraint(model.buses, rule=flow_balance_rule)
             
                 def flow_activation_rule(m, l):
@@ -362,79 +518,198 @@ class SOCP_class:
                         return Constraint.Skip
                     switch_sum = sum(m.switch_status[s] for s in self.lines_with_switches.get(l, []))
                     return m.flow[l] <= (len(m.buses) - 1) * switch_sum
-                model.RadialityFlowActivation = Constraint(model.lines, rule=flow_activation_rule)
                 
-        # Power Loss Expression 
-        model.P_loss = Expression(model.lines, model.times, rule=lambda m, l, t: m.rl_mOhm[l] * m.l_squared[l, t])
+                model.RadialityFlowActivation = Constraint(model.lines, rule=flow_activation_rule)
+                    
+        # Power Loss Expression - rij * ℓij from equation (25)
+        model.P_loss = Expression(model.lines, model.times, rule=lambda m, l, t: m.rl_mOhm[l] * m.l_squared[l, t] * 1e-3)
 
         return model
-
-
-    def solve(self, model=None):
+    def solve(self, solver='gurobi', verbose=True, model=None, **solver_options):
+        """
+        Solves the optimization model for distribution network reconfiguration.
+        
+        Args:
+            solver (str): Name of the solver to use (default 'gurobi').
+            verbose (bool): If True, prints detailed solver output.
+            model: Optional pre-created Pyomo model. If provided, uses this model.
+                If None and self.model is None, a new model is created.
+            **solver_options: Additional options passed to the solver interface.
+        
+        Returns:
+            Optimization results dictionary, or None if solving fails.
+        """
+        # Use provided model or create one if necessary
         if model is not None:
             self.model = model
+        if self.model is None:
+            self.logger.info(f"Creating optimization model for {getattr(self, 'net_name', 'default')}...")
+            try:
+                self.model = self.create_model()
+            except Exception as create_e:
+                self.logger.error(f"Failed to create model: {create_e}", exc_info=True)
+                return None
 
-        print(f"Starting optimization for {self.net_name}...")
+        self.logger.info(f"Starting optimization for {getattr(self, 'net_name', 'default')}...")
         start_time = time.time()
 
         try:
-            import gurobipy as gp
-            print("Using Gurobi solver directly...")
-            self.model.write("model.lp", io_options={"symbolic_solver_labels": True})
-            gurobi_model = gp.read("model.lp")
-            gurobi_model.setParam("MIPGap", 0.001)
-            gurobi_model.setParam("TimeLimit", 300)
-            gurobi_model.setParam("MIPFocus", 3)
-            gurobi_model.setParam("Threads", 8)
-            gurobi_model.setParam("OptimalityTol", 1e-5)
-            gurobi_model.setParam("FeasibilityTol", 1e-5)
-            gurobi_model.setParam("NonConvex", 2)
-            gurobi_model.setParam("NumericFocus", 3)
-            gurobi_model.optimize()
-            if gurobi_model.Status == gp.GRB.OPTIMAL:
-                print(f"Optimal solution found with objective: {gurobi_model.ObjVal}")
-            elif gurobi_model.Status in [gp.GRB.INFEASIBLE, gp.GRB.INF_OR_UNBD]:
-                print("Model is infeasible or unbounded. Computing IIS...")
-                gurobi_model.computeIIS()
-                gurobi_model.write("model.ilp")
-                with open("model.ilp", "r") as iis_file:
-                    iis = iis_file.read()
-                print("IIS:\n", iis)
+            if solver.lower() == 'gurobi':
+                try:
+                    import gurobipy as gp
+                    self.logger.info("Using Gurobi solver directly via gurobipy...")
+                    lp_filename = f"model_{getattr(self, 'graph_id', 'default')}.lp"
+                    self.model.write(lp_filename, io_options={"symbolic_solver_labels": True})
+                    self.logger.info(f"Wrote model to {lp_filename}")
+                    gurobi_model = gp.read(lp_filename)
+                    defaults = {
+                        "MIPGap": 0.001,
+                        "TimeLimit": 300,
+                        "MIPFocus": 3,
+                        "Threads": 8,
+                        "OptimalityTol": 1e-5,
+                        "FeasibilityTol": 1e-5,
+                        "NonConvex": 2,
+                        "NumericFocus": 3
+                    }
+                    for key, default_value in defaults.items():
+                        param_value = solver_options.get(key, default_value)
+                        gurobi_model.setParam(key, param_value)
+                        self.logger.info(f"Setting Gurobi parameter: {key} = {param_value}")
+                    gurobi_model.optimize()
+
+                    if gurobi_model.Status == gp.GRB.OPTIMAL:
+                        self.logger.info(f"Optimal solution found with objective: {gurobi_model.ObjVal}")
+                    elif gurobi_model.Status in [gp.GRB.INFEASIBLE, gp.GRB.INF_OR_UNBD]:
+                        self.logger.warning("Model is infeasible or unbounded. Attempting IIS computation...")
+                        gurobi_model.computeIIS()
+                        iis_filename = f"SOCP_ISS_{self.graph_id}.ilp"
+                        gurobi_model.write(iis_filename)
+                        self.logger.info(f"Wrote IIS information to {iis_filename}")
+                        try:
+                            with open(iis_filename, "r") as iis_file:
+                                iis_details = iis_file.read()
+                            self.logger.info(f"IIS details:\n{iis_details}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to read IIS file: {e}")
+                    else:
+                        self.logger.info(f"Gurobi solver status: {gurobi_model.Status}")
+                    # You might choose to extract results from gurobipy here.
+                except ImportError:
+                    self.logger.warning("Gurobipy not available. Falling back to SolverFactory...")
+                    opt = SolverFactory(solver)
             else:
-                print(f"Solver status: {gurobi_model.Status}")
-        except ImportError:
-            print("Gurobi not available. Using SolverFactory...")
-            solver_name = "gurobi"
-            try:
-                opt = SolverFactory(solver_name)
-                opt.options["mipgap"] = 0.001
-                opt.options["TimeLimit"] = 300
-                opt.options["MIPFocus"] = 3
-                opt.options["Nonconvex"] = 2
-                opt.options["Threads"] = 8
-                opt.options["OptimalityTol"] = 1e-6
-                opt.options["FeasibilityTol"] = 1e-6
-                opt.options["IntFeasTol"] = 1e-6
-                results = opt.solve(self.model, tee=True)
-                if results.solver.termination_condition == "infeasible":
-                    print("The model is infeasible. Logging infeasible constraints...")
-                    log_infeasible_constraints(self.model, log_expression=True, log_variables=True)
+                opt = SolverFactory(solver)
+
+            if solver.lower() != 'gurobi':
+                # Use SolverFactory branch. Set default options and update with any solver_options.
+                current_options = solver_options.copy()
+                if solver.lower() == 'gurobi':
+                    defaults = {
+                        "mipgap": 0.001,
+                        "TimeLimit": 300,
+                        "MIPFocus": 3,
+                        "Nonconvex": 2,
+                        "Threads": 8,
+                        "OptimalityTol": 1e-6,
+                        "FeasibilityTol": 1e-6,
+                        "IntFeasTol": 1e-6
+                    }
+                    for key, value in defaults.items():
+                        current_options.setdefault(key, value)
+                if current_options:
+                    self.logger.info("Applying solver options:")
+                    for key, value in current_options.items():
+                        opt.options[key] = value
+                        self.logger.info(f"  Setting solver option: {key} = {value}")
+
+                self.solver_results = opt.solve(self.model, tee=verbose)
+                self.logger.info("Solver finished.")
+
+                # --- Check Solver Results and Debug Infeasibility ---
+                if (self.solver_results is not None and 
+                    hasattr(self.solver_results, 'solver') and 
+                    self.solver_results.solver is not None):
+                    term_cond = self.solver_results.solver.termination_condition
+                    if term_cond in [TerminationCondition.infeasible, TerminationCondition.infeasibleOrUnbounded]:
+                        self.logger.warning("Model reported as infeasible or unbounded. Attempting IIS computation...")
+                        lp_filename = f"infeasible_model_{getattr(self, 'graph_id', 'default')}.lp"
+                        try:
+                            self.model.write(lp_filename, io_options={'symbolic_solver_labels': True})
+                            self.logger.info(f"Wrote potentially infeasible model to {lp_filename}")
+                        except Exception as write_e:
+                            self.logger.error(f"Failed to write model file: {write_e}")
+                        if solver.lower() == 'gurobi':
+                            # In the SolverFactory branch, we may not have direct access to computeIIS.
+                            self.logger.warning("To compute IIS with Gurobi, run:")
+                            self.logger.warning(f"  gurobi_cl ResultFile={lp_filename}.ilp {lp_filename}")
+                            self.logger.warning("(Requires Gurobi command line tools installed and in PATH)")
+                        else:
+                            self.logger.warning(f"IIS computation not automatically triggered for solver '{solver}'. Check solver documentation.")
+
+                    self.logger.info(f"  Status: {self.solver_results.solver.status}")
+                    self.logger.info(f"  Termination Condition: {term_cond}")
+
+                    if (self.solver_results.solver.status == pyo.SolverStatus.ok and 
+                        term_cond in [TerminationCondition.optimal, TerminationCondition.feasible, TerminationCondition.maxTimeLimit]):
+                        obj_val = pyo_value(self.model.objective)
+                        self.logger.info(f"Objective value (p.u. loss sum): {obj_val:.6f}")
+                        if term_cond == TerminationCondition.maxTimeLimit:
+                            self.logger.warning("Solver reached time limit, solution may be suboptimal.")
+                        elif term_cond != TerminationCondition.optimal:
+                            self.logger.warning(f"Solver found a feasible but non-optimal solution ({term_cond}).")
+                    elif term_cond == TerminationCondition.infeasible:
+                        self.logger.warning("Problem declared infeasible by the solver.")
+                    else:
+                        self.logger.error(f"Solver failed or reported non-optimal status: {term_cond}")
                 else:
-                    print(f"Objective value: {value(self.model.objective)}")
-            except Exception as e:
-                print(f"Error using {solver_name}: {e}. Trying with ipopt...")
-                opt = SolverFactory("ipopt")
-                results = opt.solve(self.model, tee=True)
-                print(f"Ipopt solver status: {results.solver.termination_condition}")
+                    self.logger.error("No valid solver results were obtained.")
+
+        except Exception as e:
+            self.logger.error(f"An error occurred during solving with {solver}: {e}", exc_info=True)
+            self.solver_results = None
 
         self.optimization_time = time.time() - start_time
-        print(f"Optimization completed in {self.optimization_time:.2f} seconds")
-        if self.include_switches:
+        self.logger.info(f"Optimization completed in {self.optimization_time:.2f} seconds")
+        if getattr(self, 'include_switches', False):
             self.num_switches_changed = self._count_changed_switches()
-            print(f"Number of switches changed: {self.num_switches_changed}")
+            self.logger.info(f"Number of switches changed: {self.num_switches_changed}")
+        
+
+        self.model.dual = Suffix(direction=Suffix.IMPORT)
+
+        # Define a small tolerance
+        tolerance = 1e-6
+
+        # Log nonzero slack values for active and reactive power balance
+        for b in self.model.buses:
+            for t in self.model.times:
+                p_slack_val = pyo_value(self.model.p_slack[b, t])
+                q_slack_val = pyo_value(self.model.q_slack[b, t])
+                if abs(p_slack_val) > tolerance or abs(q_slack_val) > tolerance:
+                    self.logger.debug(f"Bus {b}, time {t}: p_slack = {p_slack_val:.4f}, q_slack = {q_slack_val:.4f}")
+
+        # Log dual variables for power balance constraints
+        # Active power balance (only log for buses not in substations)
+        for b in self.model.buses:
+            for t in self.model.times:
+                if b not in self.substations:
+                    active_con = self.model.ActivePowerBalance[b, t]
+                    active_dual = self.model.dual.get(active_con, None)
+                    self.logger.debug(f"Bus {b}, time {t}: Dual of ActivePowerBalance = {active_dual}")
+
+        # Reactive power balance duals
+        for b in self.model.buses:
+            for t in self.model.times:
+                reactive_con = self.model.ReactivePowerBalance[b, t]
+                reactive_dual = self.model.dual.get(reactive_con, None)
+                self.logger.debug(f"Bus {b}, time {t}: Dual of ReactivePowerBalance = {reactive_dual}")
         self._extract_results()
+
+        
         return self.optimized_results
 
+    
     def _count_changed_switches(self):
         changes = 0
         if not self.include_switches or self.model is None:
@@ -442,7 +717,7 @@ class SOCP_class:
         for s in self.model.switches:
             try:
                 initial = bool(self.initial_switch_status.at[s])
-                optimized = bool(round(value(self.model.switch_status[s])))
+                optimized = bool(round(pyo_value(self.model.switch_status[s])))
                 if initial != optimized:
                     changes += 1
             except:
@@ -459,15 +734,15 @@ class SOCP_class:
             "optimization_time": self.optimization_time,
             "num_switches": len(self.model.switches) if self.include_switches else 0,
             "num_switches_changed": self.num_switches_changed if self.include_switches else 0,
-            "objective_value": value(self.model.objective),
-            "power_loss": sum(value(self.model.P_loss[l, 0]) for l in self.model.lines),
+            "objective_value": pyo_value(self.model.objective),
+            "power_loss": sum(pyo_value(self.model.P_loss[l, 0]) for l in self.model.lines),
         }
         if self.include_switches:
             switch_results = {}
             for s in self.model.switches:
                 try:
                     initial = bool(self.initial_switch_status.at[s])
-                    optimized = bool(round(value(self.model.switch_status[s])))
+                    optimized = bool(round(pyo_value(self.model.switch_status[s])))
                     switch_results[s] = {
                         "initial": initial,
                         "optimized": optimized,
@@ -479,7 +754,7 @@ class SOCP_class:
         voltage_profiles = {}
         for b in self.model.buses:
             try:
-                voltage_profiles[b] = np.sqrt(value(self.model.V_m_sqr[b, 0]))
+                voltage_profiles[b] = np.sqrt(pyo_value(self.model.V_m_sqr[b, 0]))
             except:
                 pass
         results["voltage_profiles"] = voltage_profiles
@@ -493,7 +768,7 @@ class SOCP_class:
         optimized_statuses = {}
         for s in self.model.switches:
             try:
-                switch_status = value(self.model.switch_status[s])
+                switch_status = pyo_value(self.model.switch_status[s])
                 optimized_statuses[s] = bool(round(switch_status))
             except:
                 print(f"Could not get value for switch {s}")
