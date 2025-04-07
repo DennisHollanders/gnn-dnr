@@ -489,7 +489,7 @@ if __name__ == "__main__":
     parser.add_argument('--folder_path', default=r"data\transformed_subgraphs_27032025_4"
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_3"
                         , type=str, help='Dataset folder path')
-    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='test', help='Dataset set to process; leave empty for no subfolder')
+    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='', help='Dataset set to process; leave empty for no subfolder')
     parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
 
