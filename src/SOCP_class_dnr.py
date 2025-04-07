@@ -142,22 +142,30 @@ class SOCP_class:
             for idx in self.net.bus.index
         }
         self.reactive_bus_injection = {}
+        assumed_pf = 0.9  # Adjust as needed
         for idx in self.net.bus.index:
             bus_name = self.net.bus.loc[idx, "name"]
-            if bus_name not in self.bus_dict.values(): # Skip buses filtered out earlier (e.g., HV side)
-                continue
-
-            # Sum reactive power sources (generators, static gens, shunts)
-            q_gen = self.net.gen[self.net.gen.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'gen') and not self.net.gen.empty else 0
-            q_sgen = self.net.sgen[self.net.sgen.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'sgen') and not self.net.sgen.empty else 0
-            q_shunt = self.net.shunt[self.net.shunt.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'shunt') and not self.net.shunt.empty else 0
-
-            # Sum reactive power loads
-            q_load = self.net.load[self.net.load.bus == idx]["q_mvar"].sum() if hasattr(self.net, 'load') and not self.net.load.empty else 0
-
-            # Net Injection = Sources - Loads (Ensure units are consistent, e.g., MVAR)
-            # Check if your Q_flow variables implicitly handle units or if conversion is needed.
-            # Assuming Q_flow and injections will be in compatible units (e.g., MVAR or pu)
+            q_gen = (
+                get_reactive_injection(self.net.gen, idx, assumed_pf)
+                if hasattr(self.net, 'gen') and not self.net.gen.empty
+                else 0
+            )
+            q_sgen = (
+                get_reactive_injection(self.net.sgen, idx, assumed_pf)
+                if hasattr(self.net, 'sgen') and not self.net.sgen.empty
+                else 0
+            )
+            q_shunt = (
+                get_reactive_injection(self.net.shunt, idx, assumed_pf)
+                if hasattr(self.net, 'shunt') and not self.net.shunt.empty
+                else 0
+            )
+            q_load = (
+                get_reactive_injection(self.net.load, idx, assumed_pf)
+                if hasattr(self.net, 'load') and not self.net.load.empty
+                else 0
+            )
+            # Note: For loads, ensure that your sign convention is correct.
             self.reactive_bus_injection[bus_name] = q_gen + q_sgen + q_shunt - q_load
             # Optional: Log injections for checking
             if abs(self.reactive_bus_injection[bus_name]) > 1e-6:
@@ -468,14 +476,23 @@ class SOCP_class:
         
         # Voltage Drop Constraint
         # vj = vi - 2(rijPij + xᵢⱼQij) + (r²ij + x²ij)ℓij ∀(ij) ∈ Ωl (equation 26)
+        # def voltage_drop_rule(m, l, t):
+        #     i = m.line_start[l]
+        #     j = m.line_end[l]
+        #     R = m.rl_mOhm[l] * 1e-3  # mOhm to ohm conversion
+        #     X = m.xl_mOhm[l] * 1e-3
+        #     return (m.V_m_sqr[j, t] + m.voltage_slack[l, t] == 
+        #             m.V_m_sqr[i, t] - 2*(R * m.P_flow[l, t] + X * m.Q_flow[l, t]) + (R**2 + X**2) * m.l_squared[l, t])
         def voltage_drop_rule(m, l, t):
             i = m.line_start[l]
             j = m.line_end[l]
+            # Skip this constraint if either bus is undefined
+            if i is None or j is None:
+                return Constraint.Skip
             R = m.rl_mOhm[l] * 1e-3  # mOhm to ohm conversion
             X = m.xl_mOhm[l] * 1e-3
-            return (m.V_m_sqr[j, t] + m.voltage_slack[l, t] == 
+            return (m.V_m_sqr[j, t] + m.voltage_slack[l, t] ==
                     m.V_m_sqr[i, t] - 2*(R * m.P_flow[l, t] + X * m.Q_flow[l, t]) + (R**2 + X**2) * m.l_squared[l, t])
-
         if toggles["include_voltage_drop_constraint"]:
             model.VoltageDrop = Constraint(model.lines, model.times, rule=voltage_drop_rule)
         
@@ -745,7 +762,7 @@ class SOCP_class:
                     term_cond = self.solver_results.solver.termination_condition
                     if term_cond in [TerminationCondition.infeasible, TerminationCondition.infeasibleOrUnbounded]:
                         self.logger.warning("Model reported as infeasible or unbounded. Attempting IIS computation...")
-                        lp_filename = f"infeasible_model_{getattr(self, 'graph_id', 'default')}.lp"
+                        lp_filename = f"data_generation/logs/infeasible_model_{getattr(self, 'graph_id', 'default')}.lp"
                         try:
                             self.model.write(lp_filename, io_options={'symbolic_solver_labels': True})
                             self.logger.info(f"Wrote potentially infeasible model to {lp_filename}")
@@ -978,3 +995,32 @@ class SOCP_class:
         plt.grid(False)
         plt.tight_layout()
         plt.show()
+
+def get_reactive_injection(df, bus, assumed_pf=0.9):
+    """
+    Computes the reactive power injection for entries in df associated with a given bus.
+    If the "q_mvar" column exists and at least 50% of the entries for that bus are non-null,
+    it uses those values (filling missing ones with a derived estimate). Otherwise, it derives
+    the reactive power from p_mw and the assumed power factor.
+    """
+    # Filter entries for this bus
+    sub = df.loc[df.bus == bus]
+    if sub.empty:
+        return 0
+
+    if "q_mvar" in df.columns:
+        non_null = sub["q_mvar"].count()
+        total = len(sub)
+        # If most entries have a q_mvar value, use them (fill missing with derived estimate)
+        if non_null >= total * 0.5:
+            # Compute derived reactive power for each row (used to fill missing values)
+            derived = sub["p_mw"] * np.tan(np.arccos(assumed_pf))
+            # Fill NaN values with the derived reactive power
+            q_values = sub["q_mvar"].fillna(derived)
+            return q_values.sum()
+        else:
+            # Not enough q_mvar values, so derive for all rows
+            return (sub["p_mw"] * np.tan(np.arccos(assumed_pf))).sum()
+    else:
+        # q_mvar column does not exist; derive reactive power from p_mw
+        return (sub["p_mw"] * np.tan(np.arccos(assumed_pf))).sum()
