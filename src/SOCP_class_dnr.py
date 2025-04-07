@@ -4,6 +4,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pint import UnitRegistry
 from pyomo.opt import TerminationCondition
+import networkx as nx
+
 ureg = UnitRegistry()
 import logging
 from pyomo.environ import (
@@ -166,6 +168,86 @@ class SOCP_class:
         self.bus_df = bus_df
         self.bus_dict = bus_dict
         self.voltages_bus = voltages_bus
+    def initialize_with_alternative_mst(self, penalty=1.0):
+        """
+        Builds an alternative radial configuration by computing a Minimum Spanning Tree (MST)
+        on a graph where edges currently active receive an added penalty.
+        Updates switch_df and counts how many switches change.
+        """
+        # Build a set of current active edges using line names and mapped bus names.
+        current_active_edges = set()
+        for row in self.line_df.itertuples():
+            line_name = row.name
+            # Get the from and to bus (using your bus_dict)
+            from_bus = self.bus_dict.get(row.from_bus)
+            to_bus = self.bus_dict.get(row.to_bus)
+            if from_bus is None or to_bus is None:
+                continue
+            # Determine if this line is active: if it has a switch and at least one is closed.
+            is_active = False
+            if line_name in self.lines_with_switches:
+                for s in self.lines_with_switches[line_name]:
+                    if self.initial_switch_status.at[s]:
+                        is_active = True
+                        break
+            if is_active:
+                # Store edge as a tuple (from, to) using bus names
+                current_active_edges.add((from_bus, to_bus))
+        
+        # Create a NetworkX graph with all buses as nodes.
+        G = nx.Graph()
+        for bus in self.voltages_bus.index:
+            G.add_node(bus)
+        
+        # Add each line as an edge with a weight.
+        # Use the line resistance as the base weight.
+        for row in self.line_df.itertuples():
+            line_name = row.name
+            from_bus = self.bus_dict.get(row.from_bus)
+            to_bus = self.bus_dict.get(row.to_bus)
+            if from_bus is None or to_bus is None:
+                continue
+            base_weight = row.r_ohm  # you might choose another base cost (or combine r and x)
+            # If the current configuration uses this edge, add the penalty.
+            if (from_bus, to_bus) in current_active_edges or (to_bus, from_bus) in current_active_edges:
+                weight = base_weight + penalty
+            else:
+                weight = base_weight
+            G.add_edge(from_bus, to_bus, weight=weight, line_name=line_name)
+        
+        # Compute the alternative MST
+        alt_mst = nx.minimum_spanning_tree(G)
+        
+        # Create a set of edges (as frozensets to account for undirected order) that are in the alternative MST
+        alt_edges = {frozenset((u, v)) for u, v in alt_mst.edges()}
+        
+        # Now update switch statuses:
+        # For each line that has switches, if its endpoints (mapped via bus_dict) are in the alternative MST, set it to closed (True);
+        # otherwise, open (False)
+        switches_changed = 0
+        for line_name, switch_list in self.lines_with_switches.items():
+            # Retrieve endpoints from the line_df (assume unique line names)
+            try:
+                line_row = self.line_df.set_index("name").loc[line_name]
+            except KeyError:
+                continue
+            from_bus = self.bus_dict.get(line_row["from_bus"])
+            to_bus = self.bus_dict.get(line_row["to_bus"])
+            if from_bus is None or to_bus is None:
+                continue
+            edge_key = frozenset((from_bus, to_bus))
+            # Decide the new status: closed if the edge is in alt_edges, else open.
+            new_status = edge_key in alt_edges
+            # Update every switch associated with this line.
+            for s in switch_list:
+                old_status = self.initial_switch_status.at[s]
+                if old_status != new_status:
+                    switches_changed += 1
+                # Update the switch status in your DataFrame (or store in a new attribute)
+                self.switch_df.at[s, 'closed'] = new_status
+        self.num_switches_changed = switches_changed
+        self.logger.info(f"Alternative MST computed. {switches_changed} switches changed from the initial configuration.")
+
 
     def create_model(self, toggles=None):
         """
@@ -263,10 +345,23 @@ class SOCP_class:
         
         # Line direction maps
         line_starts = {row["name"]: self.bus_dict.get(self.net.line.at[idx, "from_bus"])
-            for idx, row in self.net.line.iterrows() if self.bus_dict.get(self.net.line.at[idx, "from_bus"]) is not None}
-        line_ends = {row["name"]: self.bus_dict[row["to_bus"]] for _, row in self.net.line.iterrows()}
-        model.line_start = Param(model.lines,within =Any, initialize=line_starts)
-        model.line_end = Param(model.lines,within=Any, initialize=line_ends)
+                for idx, row in self.net.line.iterrows()
+                if ( self.bus_dict.get(self.net.line.at[idx, "from_bus"]) is not None and 
+                    self.bus_dict.get(self.net.line.at[idx, "from_bus"]) in self.voltages_bus.index ) }
+        line_ends = { row["name"]: self.bus_dict.get(row["to_bus"])
+                    for idx, row in self.net.line.iterrows()
+                    if self.bus_dict.get(row["to_bus"]) is not None and self.bus_dict.get(row["to_bus"]) in self.voltages_bus.index
+                }
+        model.line_start = Param(
+            model.lines,
+            within=Any,
+            initialize=lambda m, l: line_starts.get(l, None)
+        )
+        model.line_end = Param(
+            model.lines,
+            within=Any,
+            initialize=lambda m, l: line_ends.get(l, None)
+        )
         
         # xᵢⱼ: Binary variable for line status in equations (6), (32)
         model.line_status = Var(model.lines, domain=Binary, initialize=1)
@@ -317,8 +412,22 @@ class SOCP_class:
                     for s in m.switches
                 )
             return loss_term + voltage_slack_term + reactive_slack_term + active_slack_term + switch_penalty_term
-
         model.objective = Objective(rule=objective_rule_socp, sense=minimize)
+        # def objective_rule_socp_with_switch_penalty(m):
+        #     loss_term = sum(m.rl_mOhm[l] * m.l_squared[l, t] * 1e-3 for l in m.lines for t in m.times)
+        #     voltage_slack_term = sum(m.voltage_slack_penalty * m.voltage_slack[l, t] for l in m.lines for t in m.times)
+        #     reactive_slack_term = sum(m.reactive_slack_penalty * (m.q_slack[b, t] ** 2) for b in m.buses for t in m.times)
+        #     active_slack_term = sum(m.active_slack_penalty * (m.p_slack[b, t] ** 2) for b in m.buses for t in m.times)
+            
+        #     # Switching cost: add a small cost for any change in switch status.
+        #     switch_penalty_term = self.switch_penalty * sum(
+        #         abs(m.switch_status[s] - m.switch_initial[s]) for s in m.switches
+        #     )
+            
+        #     return loss_term + voltage_slack_term + reactive_slack_term + active_slack_term + switch_penalty_term
+
+        # model.objective = Objective(rule=objective_rule_socp_with_switch_penalty, sense=minimize)
+ 
 
         # Active power balance: Σj∈Ωbi Pij - Σj∈Ωbi Pji = PSi - PDi ∀i ∈ Ωb (equation 27)
         def active_power_balance_rule(m, b, t):
@@ -349,9 +458,10 @@ class SOCP_class:
         # ||(2Pij, 2Qij, vi - ℓij)||2 ≤ vi + ℓij ∀(ij) ∈ Ωl (equation 29)
         def socp_cone_rule(m, l, t):
             from_bus = m.line_start[l]
-            # This implements the rotated cone constraint from equation (29)
-            # This is equivalent to P_ij^2 + Q_ij^2 <= v_i * l_ij but in proper SOCP form
-            return (4*m.P_flow[l, t]**2 + 4*m.Q_flow[l, t]**2 + 
+            if from_bus is None:
+                # Skip the constraint if the starting bus is undefined
+                return Constraint.Skip
+            return (4*m.P_flow[l, t]**2 + 4*m.Q_flow[l, t]**2 +
                     (m.V_m_sqr[from_bus, t] - m.l_squared[l, t])**2) <= (m.V_m_sqr[from_bus, t] + m.l_squared[l, t])**2
         
         model.SOCP_Cone = Constraint(model.lines, model.times, rule=socp_cone_rule)
@@ -564,13 +674,15 @@ class SOCP_class:
                     gurobi_model = gp.read(lp_filename)
                     defaults = {
                         "MIPGap": 0.001,
-                        "TimeLimit": 300,
+                        "TimeLimit": 3000,
                         "MIPFocus": 3,
                         "Threads": 8,
-                        "OptimalityTol": 1e-5,
-                        "FeasibilityTol": 1e-5,
+                        "OptimalityTol": 1e-3,
+                        "FeasibilityTol": 1e-3,
                         "NonConvex": 2,
-                        "NumericFocus": 3
+                        "NumericFocus": 3,
+                        "BarHomogeneous": 1,
+
                     }
                     for key, default_value in defaults.items():
                         param_value = solver_options.get(key, default_value)
