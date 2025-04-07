@@ -486,8 +486,8 @@ def init_logging(method):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
-    parser.add_argument('--folder_path', #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_26032025_4"
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_3"
+    parser.add_argument('--folder_path', default=r"data\transformed_subgraphs_27032025_4"
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_3"
                         , type=str, help='Dataset folder path')
     parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='test', help='Dataset set to process; leave empty for no subfolder')
     parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
