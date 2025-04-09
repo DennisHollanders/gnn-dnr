@@ -1156,104 +1156,6 @@ def save_single_graph(graph_name, nx_graph, pp_network, info, save_location):
 #==================================================================================================
 
 
-
-def has_switches(net):
-    return hasattr(net, 'switch') and not net.switch.empty and len(net.switch) > 0
-
-def load_network(network_id):
-    try:
-        if network_id.startswith('simbench_'):
-            code = network_id[9:]  
-            net = simbench.get_simbench_net(code)
-        elif network_id.startswith('pp_'):
-            case = network_id[3:]  #
-            if case == "caseIEEE30":
-                net = pn.case_IEEE30() if hasattr(pn, "case_IEEE30") else pn.case30()
-            else:
-                net = getattr(pn, case)()
-        else:
-            raise ValueError(f"Unknown network type: {network_id}")
-        return net
-    except Exception as e:
-        print(f"Error loading network {network_id}: {e}")
-        return None
-
-def check_network_suitability(network_id, bus_range=(25,50), require_switches=True):
-    net = load_network(network_id)
-    
-    if net is None:
-        return False, None
-
-    if not (bus_range[0] <= len(net.bus) <= bus_range[1]):
-        return False, None
-
-    if require_switches and not has_switches(net):
-        return False, None
-    
-    return True, net
-
-def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers=4):
-    """
-    Get all candidate networks that meet the specified criteria
-    """
-    start_time = time.time()
-    candidate_networks = {}
-    networks_without_switches = []
-    
-    # Get Simbench network codes
-    list_of_codes = simbench.collect_all_simbench_codes(mv_level="MV")
-    mv_codes = [code for code in list_of_codes if "MV" in code]
-    
-    # Filter Simbench codes if require_switches
-    if require_switches:
-        mv_sw_codes = [code for code in mv_codes if "no_sw" not in code]
-    else:
-        mv_sw_codes = mv_codes
-    
-    # Get PandaPower network names
-    standard_cases = [
-        "case4gs", "case5", "case6ww", "case9", "case14", "case30", 
-        "caseIEEE30", "case33bw", "case39", "case57", "case89pegase", 
-        "case118", "case145"
-    ]
-    
-    # Create network IDs for all potential candidates
-    simbench_ids = [f"simbench_{code}" for code in mv_sw_codes]
-    pp_ids = [f"pp_{case}" for case in standard_cases]
-    all_network_ids = simbench_ids + pp_ids
-    
-    print(f"Checking {len(all_network_ids)} potential networks...")
-    
-    # Use parallel processing to check network suitability
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_id = {
-            executor.submit(check_network_suitability, 
-                           network_id, 
-                           bus_range, 
-                           require_switches): network_id 
-            for network_id in all_network_ids
-        }
-        
-        for future in concurrent.futures.as_completed(future_to_id):
-            network_id = future_to_id[future]
-            try:
-                suitable, net = future.result()
-                if suitable and net is not None:
-                    bus_count = len(net.bus)
-                    switch_count = len(net.switch) if hasattr(net, 'switch') else 0
-                    candidate_networks[network_id] = net
-                    print(f"Added network {network_id} with {bus_count} buses and {switch_count} switches")
-                elif require_switches and net is not None and not has_switches(net):
-                    networks_without_switches.append(network_id)
-            except Exception as e:
-                print(f"Error processing {network_id}: {e}")
-    
-    print(f"\nFound {len(candidate_networks)} valid networks matching criteria in {time.time() - start_time:.2f}s")
-    if require_switches and networks_without_switches:
-        print(f"Skipped {len(networks_without_switches)} networks without switches")
-    
-    return candidate_networks
-
 def create_network_case(network_id, net, case_type, case_idx, load_variation_range=(0.5, 1.51)):
     """Create a single network case with variations"""
     try:
@@ -1462,7 +1364,563 @@ def generate_combined_dataset(bus_range=(25,50), test_total_cases=100, val_total
     
     return test_dataset, val_dataset
 
+
+
+from pathlib import Path
+
+# Create a cache directory if it doesn't exist
+CACHE_DIR = Path("network_cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
+
+def has_switches(net):
+    return hasattr(net, 'switch') and not net.switch.empty and len(net.switch) > 0
+
+def load_and_cache_network(network_id, cache_dir=CACHE_DIR):
+    # Create cache file path
+    cache_file = cache_dir / f"{network_id}.pkl"
+    
+    # Check if network is in cache
+    if cache_file.exists():
+        try:
+            start_time = time.time()
+            with open(cache_file, 'rb') as f:
+                net = pkl.load(f)
+            print(f"Loaded {network_id} from cache in {time.time() - start_time:.2f}s")
+            return net
+        except Exception as e:
+            print(f"Error loading cached network {network_id}: {e}")
+            # Continue to load from source if cache loading fails
+    
+    # Load from source
+    try:
+        start_time = time.time()
+        if network_id.startswith('simbench_'):
+            code = network_id[9:]  # Remove 'simbench_' prefix
+            net = simbench.get_simbench_net(code)
+        elif network_id.startswith('pp_'):
+            case = network_id[3:]  # Remove 'pp_' prefix
+            if case == "caseIEEE30":
+                net = pn.case_IEEE30() if hasattr(pn, "case_IEEE30") else pn.case30()
+            else:
+                net = getattr(pn, case)()
+        else:
+            raise ValueError(f"Unknown network type: {network_id}")
+            
+        # Cache the network for future use
+        with open(cache_file, 'wb') as f:
+            pkl.dump(net, f)
+        
+        print(f"Loaded and cached {network_id} in {time.time() - start_time:.2f}s")
+        return net
+    except Exception as e:
+        print(f"Error loading network {network_id}: {e}")
+        return None
+
+def check_network_suitability(network_id, bus_range=(25,50), require_switches=True):
+    net = load_and_cache_network(network_id)
+    
+    if net is None:
+        return False, None
+    
+    # Check bus count
+    if not (bus_range[0] <= len(net.bus) <= bus_range[1]):
+        return False, None
+    
+    # Check for switches if required
+    if require_switches and not has_switches(net):
+        return False, None
+    
+    return True, net
+
+def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers=4):
+    start_time = time.time()
+    candidate_networks = {}
+    networks_without_switches = []
+    
+    # Get Simbench network codes
+    list_of_codes = simbench.collect_all_simbench_codes(mv_level="MV")
+    mv_codes = [code for code in list_of_codes if "MV" in code]
+    
+    # Filter Simbench codes if require_switches
+    if require_switches:
+        mv_sw_codes = [code for code in mv_codes if "no_sw" not in code]
+    else:
+        mv_sw_codes = mv_codes
+    
+    # Get PandaPower network names
+    standard_cases = [
+        "case4gs", "case5", "case6ww", "case9", "case14", "case30", 
+        "caseIEEE30", "case33bw", "case39", "case57", "case89pegase", 
+        "case118", "case145"
+    ]
+    
+    # Create network IDs for all potential candidates
+    simbench_ids = [f"simbench_{code}" for code in mv_sw_codes]
+    pp_ids = [f"pp_{case}" for case in standard_cases]
+    all_network_ids = simbench_ids + pp_ids
+    
+    print(f"Checking {len(all_network_ids)} potential networks...")
+    
+    # Use parallel processing to check network suitability
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Create a dictionary of futures mapped to network IDs
+        future_to_id = {
+            executor.submit(check_network_suitability, 
+                           network_id, 
+                           bus_range, 
+                           require_switches): network_id 
+            for network_id in all_network_ids
+        }
+        
+        for future in concurrent.futures.as_completed(future_to_id):
+            network_id = future_to_id[future]
+            try:
+                suitable, net = future.result()
+                if suitable and net is not None:
+                    bus_count = len(net.bus)
+                    switch_count = len(net.switch) if hasattr(net, 'switch') else 0
+                    candidate_networks[network_id] = net
+                    print(f"Added network {network_id} with {bus_count} buses and {switch_count} switches")
+                elif require_switches and net is not None and not has_switches(net):
+                    networks_without_switches.append(network_id)
+            except Exception as e:
+                print(f"Error processing {network_id}: {e}")
+    
+    print(f"\nFound {len(candidate_networks)} valid networks matching criteria in {time.time() - start_time:.2f}s")
+    if require_switches and networks_without_switches:
+        print(f"Skipped {len(networks_without_switches)} networks without switches")
+    
+    return candidate_networks
+
+def apply_random_load_variations(net, load_variation_range=(0.5, 1.51)):
+    """Apply random load variations to a network"""
+    # Create a deep copy to avoid modifying the original
+    net_case = copy.deepcopy(net)
+    
+    # Apply random load variations
+    for idx in net_case.load.index:
+        factor = np.random.uniform(load_variation_range[0], load_variation_range[1])
+        net_case.load.at[idx, "p_mw"] *= factor
+        net_case.load.at[idx, "q_mvar"] *= factor
+    
+    return net_case
+
+network_timepoints = {}
+
+def apply_profile_timepoint(net, profiles, time_step):
+    for elm_param in profiles.keys():
+        if profiles[elm_param].shape[1]:  # Check if there's any data
+            elm = elm_param[0]  # Element type (e.g., 'load', 'sgen')
+            param = elm_param[1]  # Parameter name (e.g., 'p_mw', 'q_mvar')
+            net[elm].loc[:, param] = profiles[elm_param].loc[time_step]
+    return net
+
+def create_network_case(network_id, net, case_type, case_idx, load_variation_range=(0.5, 1.51)):
+    """Create a single network case using SimBench profiles when available"""
+    global network_timepoints
+    
+    try:
+        # Create a deep copy to avoid modifying the original
+        net_case = copy.deepcopy(net)
+        used_profile = False
+        selected_timepoint = None
+        
+        # Check if this is a SimBench network that might have profiles
+        if network_id.startswith('simbench_'):
+            try:
+                import simbench as sb
+                
+                # Try to get profiles from the network - this is the correct approach based on the notebook
+                try:
+                    # Get all available profiles for the network
+                    profiles = sb.get_absolute_values(net_case, profiles_instead_of_study_cases=True)
+                    
+                    # Check if we've initialized timepoints for this network
+                    if network_id not in network_timepoints:
+                        # Determine available timepoints - these are the indices of the profiles
+                        available_timesteps = list(range(len(profiles[list(profiles.keys())[0]])))
+                        network_timepoints[network_id] = {
+                            'timepoints': available_timesteps,
+                            'used': set()
+                        }
+                        print(f"Found {len(available_timesteps)} timepoints for {network_id}")
+                    
+                    # Get unused timepoints
+                    available = [tp for tp in network_timepoints[network_id]['timepoints'] 
+                                if tp not in network_timepoints[network_id]['used']]
+                    
+                    if available:
+                        # Select a random unused timepoint
+                        selected_timepoint = random.choice(available)
+                        network_timepoints[network_id]['used'].add(selected_timepoint)
+                        
+                        # Apply the timepoint to the network - this is the correct way
+                        apply_profile_timepoint(net_case, profiles, selected_timepoint)
+                        
+                        print(f"Successfully applied SimBench profile timepoint {selected_timepoint} to {network_id}")
+                        used_profile = True
+                    else:
+                        print(f"All timepoints used for {network_id}, resetting timepoint tracking")
+                        # Reset used timepoints to allow reuse
+                        network_timepoints[network_id]['used'] = set()
+                        
+                        # Try again with a timepoint
+                        selected_timepoint = random.choice(network_timepoints[network_id]['timepoints'])
+                        network_timepoints[network_id]['used'].add(selected_timepoint)
+                        
+                        apply_profile_timepoint(net_case, profiles, selected_timepoint)
+                        print(f"Applied reused timepoint {selected_timepoint} to {network_id}")
+                        used_profile = True
+                        
+                except Exception as e:
+                    print(f"Error accessing SimBench profiles: {e}")
+                    # Fall back to random variations if profiles don't work
+                    net_case = apply_random_load_variations(net_case, load_variation_range)
+            except Exception as e:
+                print(f"Error in SimBench processing: {e}")
+                net_case = apply_random_load_variations(net_case, load_variation_range)
+        else:
+            # For non-SimBench networks, always use random variations
+            net_case = apply_random_load_variations(net_case, load_variation_range)
+        
+        # Create case name - include timepoint in name if one was used
+        if selected_timepoint is not None and used_profile:
+            case_name = f"{network_id}_{case_type}_{case_idx}_ts{selected_timepoint}"
+        else:
+            case_name = f"{network_id}_{case_type}_{case_idx}"
+        
+        # Create NetworkX graph respecting switches
+        nx_graph = top.create_nxgraph(net_case, respect_switches=True)
+        
+        switch_count = len(net_case.switch) if hasattr(net_case, 'switch') else 0
+        print(f"Added {case_type} case {case_name} with {switch_count} switches")
+        
+        return case_name, {"network": net_case, "nx_graph": nx_graph}
+    except Exception as e:
+        print(f"Failed to create case for {network_id}: {e}")
+        return None, None
+
+def reset_timepoints():
+    """Reset the global registry of timepoints"""
+    global network_timepoints
+    network_timepoints = {}
+    
+def generate_combined_dataset(bus_range=(25,50), test_total_cases=100, val_total_cases=50, 
+                              load_variation_range=(0.5,1.51), random_seed=1,
+                              require_switches=True, max_workers=4, max_cases_per_network=None):
+
+    total_start_time = time.time()
+    
+    # Reset timepoints for a fresh start
+    reset_timepoints()
+    
+    if random_seed is not None:
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+    
+    # Step 1: Get candidate networks (with parallel loading and caching)
+    print("Step 1: Finding suitable networks...")
+    candidate_networks = get_candidate_networks(
+        bus_range=bus_range, 
+        require_switches=require_switches,
+        max_workers=max_workers
+    )
+    
+    if len(candidate_networks) == 0:
+        raise ValueError("No networks found matching the criteria. Cannot generate dataset.")
+    
+    # Calculate maximum cases per network
+    if max_cases_per_network is None:
+        # Distribute cases evenly with some extra capacity for variance
+        max_cases_per_network = math.ceil((test_total_cases + val_total_cases) / len(candidate_networks) * 1.5)
+        # Cap at reasonable limits
+        max_cases_per_network = min(max_cases_per_network, 10)
+    print(f"Using maximum of {max_cases_per_network} cases per network to ensure diversity")
+    
+    # Shuffle network keys
+    net_keys = list(candidate_networks.keys())
+    random.shuffle(net_keys)
+    
+    # Create a priority queue of networks - start with all networks having zero cases
+    network_counts = {key: 0 for key in net_keys}
+    
+    # Initialize empty datasets
+    test_dataset = {}
+    val_dataset = {}
+    
+    # Step 2: Generate test cases with improved distribution
+    print("\nStep 2: Generating test cases...")
+    test_count = 0
+    required_test_cases = test_total_cases
+    
+    # First pass: Try to distribute evenly across all networks
+    while test_count < required_test_cases:
+        # Find available networks (under the max cases limit)
+        available_networks = [key for key in net_keys 
+                            if network_counts[key] < max_cases_per_network]
+        
+        # If no networks available, break (we'll handle this below)
+        if not available_networks:
+            break
+            
+        # Prioritize networks with fewer cases
+        available_networks.sort(key=lambda k: network_counts[k])
+        
+        # Determine how many more networks we'll use
+        networks_to_use = min(len(available_networks), required_test_cases - test_count)
+        
+        # Generate one case from each network until we reach the required count
+        for i in range(networks_to_use):
+            network_key = available_networks[i]
+            base_net = candidate_networks[network_key]
+            case_name, case_data = create_network_case(
+                network_key, 
+                base_net, 
+                "test", 
+                network_counts[network_key],  # Use count as case index
+                load_variation_range
+            )
+            
+            if case_name is not None and case_data is not None:
+                test_dataset[case_name] = case_data
+                network_counts[network_key] += 1
+                test_count += 1
+                
+                # If we've reached the target, break
+                if test_count >= required_test_cases:
+                    break
+    
+    # Check if we need a second pass with adjusted limits
+    if test_count < required_test_cases:
+        print(f"Warning: Could only generate {test_count}/{required_test_cases} test cases with even distribution.")
+        print("Allowing more cases per network to reach target count...")
+        
+        # Increase max_cases_per_network for second pass
+        second_pass_limit = max_cases_per_network + 5
+        
+        while test_count < required_test_cases:
+            # Find networks that can accept more cases
+            available_networks = [key for key in net_keys 
+                                if network_counts[key] < second_pass_limit]
+            
+            if not available_networks:
+                # If still no networks available, we've hit a hard limit
+                print(f"Warning: Cannot generate more test cases. Limited to {test_count}.")
+                break
+                
+            # Prioritize networks with fewer cases again
+            available_networks.sort(key=lambda k: network_counts[k])
+            
+            # Use the network with the least cases
+            network_key = available_networks[0]
+            base_net = candidate_networks[network_key]
+            
+            case_name, case_data = create_network_case(
+                network_key, 
+                base_net, 
+                "test", 
+                network_counts[network_key],  # Use count as case index
+                load_variation_range
+            )
+            
+            if case_name is not None and case_data is not None:
+                test_dataset[case_name] = case_data
+                network_counts[network_key] += 1
+                test_count += 1
+    
+    # Step 3: Generate validation cases similarly to test cases
+    print("\nStep 3: Generating validation cases...")
+    val_count = 0
+    required_val_cases = val_total_cases
+    
+    # Reset network counts for validation set - we want a fresh distribution
+    # but we'll penalize networks already used heavily in the test set
+    val_network_counts = {key: 0 for key in net_keys}
+    
+    # First pass for validation set: distribute across networks
+    while val_count < required_val_cases:
+        # Calculate effective counts (actual val count + penalty from test set)
+        effective_counts = {
+            key: val_network_counts[key] + max(0, network_counts[key] - 3) 
+            for key in net_keys
+        }
+        
+        # Find available networks (under the max cases limit)
+        available_networks = [key for key in net_keys 
+                            if effective_counts[key] < max_cases_per_network]
+        
+        # If no networks available, break
+        if not available_networks:
+            break
+            
+        # Prioritize networks with fewer effective cases
+        available_networks.sort(key=lambda k: effective_counts[k])
+        
+        # Determine how many more networks we'll use
+        networks_to_use = min(len(available_networks), required_val_cases - val_count)
+        
+        # Generate one case from each network until we reach the required count
+        for i in range(networks_to_use):
+            network_key = available_networks[i]
+            base_net = candidate_networks[network_key]
+            case_name, case_data = create_network_case(
+                network_key, 
+                base_net, 
+                "val", 
+                val_network_counts[network_key],  # Use count as case index
+                load_variation_range
+            )
+            
+            if case_name is not None and case_data is not None:
+                val_dataset[case_name] = case_data
+                val_network_counts[network_key] += 1
+                val_count += 1
+                
+                # If we've reached the target, break
+                if val_count >= required_val_cases:
+                    break
+    
+    # Second pass for validation if needed
+    if val_count < required_val_cases:
+        print(f"Warning: Could only generate {val_count}/{required_val_cases} validation cases with even distribution.")
+        print("Allowing more cases per network to reach target count...")
+        
+        # Increase limit for second pass
+        second_pass_limit = max_cases_per_network + 5
+        
+        while val_count < required_val_cases:
+            # Calculate effective counts again
+            effective_counts = {
+                key: val_network_counts[key] + max(0, network_counts[key] - 3) 
+                for key in net_keys
+            }
+            
+            # Find networks that can accept more cases
+            available_networks = [key for key in net_keys 
+                                if effective_counts[key] < second_pass_limit]
+            
+            if not available_networks:
+                # If still no networks available, we've hit a hard limit
+                print(f"Warning: Cannot generate more validation cases. Limited to {val_count}.")
+                break
+                
+            # Prioritize networks with fewer effective cases again
+            available_networks.sort(key=lambda k: effective_counts[k])
+            
+            # Use the network with the least cases
+            network_key = available_networks[0]
+            base_net = candidate_networks[network_key]
+            
+            case_name, case_data = create_network_case(
+                network_key, 
+                base_net, 
+                "val", 
+                val_network_counts[network_key],  # Use count as case index
+                load_variation_range
+            )
+            
+            if case_name is not None and case_data is not None:
+                val_dataset[case_name] = case_data
+                val_network_counts[network_key] += 1
+                val_count += 1
+    
+    # Final check and warning if targets weren't met
+    if len(test_dataset) < test_total_cases:
+        print(f"WARNING: Could only generate {len(test_dataset)} test cases out of {test_total_cases} requested.")
+    
+    if len(val_dataset) < val_total_cases:
+        print(f"WARNING: Could only generate {len(val_dataset)} validation cases out of {val_total_cases} requested.")
+    
+    # Print statistics on the generated datasets
+    print("\n--- Dataset Statistics ---")
+    test_networks = set([k.split("_test_")[0] for k in test_dataset.keys()])
+    val_networks = set([k.split("_val_")[0] for k in val_dataset.keys()])
+    
+    print(f"Test dataset: {len(test_dataset)} cases from {len(test_networks)} unique networks")
+    print(f"Validation dataset: {len(val_dataset)} cases from {len(val_networks)} unique networks")
+    
+    # Count network usage
+    test_network_usage = {}
+    for k in test_dataset.keys():
+        network = k.split("_test_")[0]
+        test_network_usage[network] = test_network_usage.get(network, 0) + 1
+    
+    val_network_usage = {}
+    for k in val_dataset.keys():
+        network = k.split("_val_")[0]
+        val_network_usage[network] = val_network_usage.get(network, 0) + 1
+    
+    print("\nTest dataset network usage:")
+    for network, count in sorted(test_network_usage.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {network}: {count} cases")
+    
+    print("\nValidation dataset network usage:")
+    for network, count in sorted(val_network_usage.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {network}: {count} cases")
+    
+    # Count switches in each dataset
+    test_switch_counts = [len(data["network"].switch) if hasattr(data["network"], "switch") else 0 
+                         for data in test_dataset.values()]
+    val_switch_counts = [len(data["network"].switch) if hasattr(data["network"], "switch") else 0 
+                        for data in val_dataset.values()]
+    
+    if test_switch_counts:
+        print(f"\nTest dataset switch statistics: Min={min(test_switch_counts)}, "
+              f"Max={max(test_switch_counts)}, "
+              f"Avg={sum(test_switch_counts)/len(test_switch_counts):.2f}")
+    
+    if val_switch_counts:
+        print(f"Validation dataset switch statistics: Min={min(val_switch_counts)}, "
+              f"Max={max(val_switch_counts)}, "
+              f"Avg={sum(val_switch_counts)/len(val_switch_counts):.2f}")
+    
+    print(f"\nTotal execution time: {time.time() - total_start_time:.2f} seconds")
+    
+    return test_dataset, val_dataset
+
+
+def extract_node_features2(net, nx_graph):
+    """Extract node features from the power grid network."""
+    nx_to_pp_bus_map = net.get("nx_to_pp_bus_map", {node: idx for idx, node in enumerate(net.bus.index)})
+    node_features = {}
+    for node in nx_graph.nodes:
+        pp_bus_idx = nx_to_pp_bus_map.get(node, node)
+        node_features[node] = {
+            "p": net.res_bus.p_mw.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None,
+            "q": net.res_bus.q_mvar.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None,
+            "v": net.res_bus.vm_pu.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None,
+            "theta": net.res_bus.va_degree.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None
+        }
+    return node_features
+
+def extract_edge_features2(net, nx_graph):
+    """Extract edge features from the power grid network."""
+    nx_to_pp_bus_map = net.get("nx_to_pp_bus_map", {node: idx for idx, node in enumerate(net.bus.index)})
+    edge_features = {}
+    for idx, edge in enumerate(nx_graph.edges):
+        u, v = edge[:2]
+        pp_from_bus = nx_to_pp_bus_map.get(u, u)
+        pp_to_bus = nx_to_pp_bus_map.get(v, v)
+        matching_lines = net.line[(net.line.from_bus == pp_from_bus) & (net.line.to_bus == pp_to_bus)]
+        if matching_lines.empty:
+            continue
+        line_idx = matching_lines.index[0]
+        R = matching_lines.r_ohm_per_km.iloc[0]
+        X = matching_lines.x_ohm_per_km.iloc[0]
+        switch_status = int(net.switch[(net.switch.bus == pp_from_bus) & (net.switch.element == pp_to_bus)].closed.any())
+        edge_features[(u, v)] = {
+            "edge_idx": idx,
+            "line_idx": line_idx,
+            "R": R,
+            "X": X,
+            "switch_state": switch_status,
+        }
+    return edge_features
+
 def save_combined_data(dataset, set_name, base_dir):
+    """Save combined dataset to disk."""
+    # Create all required directories
     nx_dir = os.path.join(base_dir, set_name, "networkx_graphs")
     pp_dir = os.path.join(base_dir, set_name, "pandapower_networks")
     feat_dir = os.path.join(base_dir, set_name, "graph_features")
@@ -1470,28 +1928,35 @@ def save_combined_data(dataset, set_name, base_dir):
     for directory in [nx_dir, pp_dir, feat_dir]:
         os.makedirs(directory, exist_ok=True)
     
+    # Process each case separately
     for case_name, data in dataset.items():
         net = data["network"]
         nx_graph = data["nx_graph"]
 
+        # Run power flow analysis
         try:
             pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
                     initialization="dc", calculate_voltage_angles=True)
         except Exception as e:
             print(f"Power flow did not converge for {case_name}: {e}")
-        nx_to_pp_bus_map = net.get("nx_to_pp_bus_map", {node: idx for idx, node in enumerate(net.bus.index)})
-        node_feats = extract_node_features(net, nx_graph, nx_to_pp_bus_map) 
-        edge_feats = extract_edge_features(net, nx_graph,nx_to_pp_bus_map) 
+            
+        # Extract features
+        node_feats = extract_node_features2(net, nx_graph) if nx_graph is not None else None
+        edge_feats = extract_edge_features2(net, nx_graph) if nx_graph is not None else None
         features = {"node_features": node_feats, "edge_features": edge_feats}
             
+        # Save each graph separately
+        # 1. NetworkX graph
         nx_file = os.path.join(nx_dir, f"{case_name}.pkl")
         with open(nx_file, "wb") as f:
             pkl.dump(nx_graph, f)
             
+        # 2. PandaPower network
         pp_file = os.path.join(pp_dir, f"{case_name}.json")
         with open(pp_file, "w") as f:
-            f.write(pp.to_json(net)) 
-
+            json.dump(pp.to_json(net), f)
+            
+        # 3. Features
         feat_file = os.path.join(feat_dir, f"{case_name}.pkl")
         with open(feat_file, "wb") as f:
             pkl.dump(features, f)
@@ -1499,22 +1964,31 @@ def save_combined_data(dataset, set_name, base_dir):
     print(f"Saved {len(dataset)} {set_name} cases individually to {base_dir}")
 
 def save_dataset(test_dataset, val_dataset, base_path, bus_range, test_cases, val_cases):
+    """
+    Save datasets with proper directory naming and versioning
+    """
     now = datetime.now()
     day = now.day
     month = now.month
     year = now.year
-
+    
+    # Format bus range as a string without parentheses and commas
     bus_range_str = f"{bus_range[0]}-{bus_range[1]}"
     
+    # Base name pattern for the directory (without wildcards)
     base_name = f"test_val_real__range-{bus_range_str}_nTest-{test_cases}_nVal-{val_cases}_{day}{month}{year}"
-
+    
+    # Pattern for glob searching (with wildcard)
     search_pattern = f"{base_name}_*"
-
+    
+    # Find existing datasets with the same pattern
     existing_dirs = glob.glob(os.path.join(base_path, search_pattern))
- 
+    
+    # Determine sequence number (the x'th dataset of the day)
     if not existing_dirs:
         sequence_num = 1
     else:
+        # Extract sequence numbers from existing directories
         seq_nums = []
         for dir_path in existing_dirs:
             try:
@@ -1525,13 +1999,23 @@ def save_dataset(test_dataset, val_dataset, base_path, bus_range, test_cases, va
         
         sequence_num = max(seq_nums) + 1 if seq_nums else 1
     
-
+    # Create the actual directory name with sequence number
     dataset_dir = f"{base_name}_{sequence_num}"
     save_location = os.path.join(base_path, dataset_dir)
     
     print(f"Creating dataset at: {save_location}")
     print(f"Test set size: {len(test_dataset)}")
     print(f"Validation set size: {len(val_dataset)}")
+    
+    # Create metadata file
+    os.makedirs(save_location, exist_ok=True)
+    with open(os.path.join(save_location, "metadata.txt"), "w") as f:
+        f.write(f"Dataset created: {now.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Bus range: {bus_range}\n")
+        f.write(f"Test cases: {test_cases} (actual: {len(test_dataset)})\n")
+        f.write(f"Validation cases: {val_cases} (actual: {len(val_dataset)})\n")
+    
+    # Save datasets to their respective directories
     save_combined_data(test_dataset, "test", save_location)
     save_combined_data(val_dataset, "validation", save_location)
     
