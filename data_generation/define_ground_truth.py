@@ -42,80 +42,84 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
         print("Loaded network data from JSON string")   
 
     for graph_id, net in pp_networks.items():
-        print(f"\n{'='*30} Processing {graph_id} {'='*30}")
+        try: 
+            print(f"\n{'='*30} Processing {graph_id} {'='*30}")
     
-        if isinstance(net, str):
-            net = pp.from_json_string(net)
-            print("in loop loaded network as string")
+            if isinstance(net, str):
+                net = pp.from_json_string(net)
+                print("in loop loaded network as string")
 
-        # Run a power flow to check convergence.
-        pp.runpp(net, enforce_q_lims=False)
-        if not net.converged:
-            print(f"Power flow did not converge for {graph_id}. Skipping optimization.")
+            # Run a power flow to check convergence.
+            pp.runpp(net, enforce_q_lims=False)
+            if not net.converged:
+                print(f"Power flow did not converge for {graph_id}. Skipping optimization.")
+                continue
+
+            original_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
+            original_vm_pu = net.res_bus.vm_pu.copy()
+
+            # Instantiate optimizer based on chosen method.
+            if method.upper() == "MILP":
+                optimizer = MILP_class(net, graph_id, logger=logger, toggles=toggles)
+            else:
+                optimizer = SOCP_class(net, graph_id, logger=logger, toggles=toggles)
+
+            if hasattr(optimizer, 'initialize'):
+                optimizer.initialize()
+            
+            # Call initialize_with_alternative_mst which may alter switch states.
+            try:
+                optimizer.initialize_with_alternative_mst(penalty=1.0)
+            except Exception as e:
+                print(f"Error during initialize_with_alternative_mst for {graph_id}: {e}")
+            # Build and solve the optimization model.
+            model = optimizer.create_model()  
+            start_time = time.time()
+            solver_results = optimizer.solve()
+            optimization_time = time.time() - start_time
+
+            num_switches_changed = (
+                optimizer.num_switches_changed if hasattr(optimizer, 'num_switches_changed') else 0
+            )
+
+            # Extract the optimization results.
+            opt_results = optimizer.extract_results()
+
+            print(f"Optimization solved in {optimization_time:.4f} seconds, Switches changed: {num_switches_changed}")
+
+            # Prepare ground truth features with optimization metadata and predicted voltages.
+            features_gt = features.get(graph_id, {}).copy()
+            features_gt.update({
+                "optimization_time": optimization_time,
+                "switches_changed": num_switches_changed,
+                "predicted_voltages": opt_results.get("voltage_profiles", {})
+            })
+
+            # After optimization, retrieve the final switch configuration.
+            final_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
+
+            # If the optimized configuration equals the original configuration, compute the average % voltage difference.
+            if original_switch_states is not None and final_switch_states is not None:
+                if original_switch_states.equals(final_switch_states):
+                    diff_list = []
+                    predicted_voltages = opt_results.get("voltage_profiles", {})
+                    for bus in original_vm_pu.index:
+                        if bus in predicted_voltages:
+                            orig_v = original_vm_pu.at[bus]
+                            pred_v = predicted_voltages[bus]
+                            if orig_v != 0:
+                                diff_list.append(abs(orig_v - pred_v) / orig_v * 100)
+                    avg_diff_pct = sum(diff_list) / len(diff_list) if diff_list else None
+                    features_gt["voltage_avg_pct_diff"] = avg_diff_pct
+
+            # Save the updated ground truth features.
+            with open(feat_gt_dir / f"{graph_id}.pkl", "wb") as f:
+                pkl.dump(features_gt, f)
+
+            print(f"Saved ground truth data for {graph_id}")
+        except: 
+            print(f"Error processing {graph_id}: {sys.exc_info()[1]}")
             continue
-
-        original_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
-        original_vm_pu = net.res_bus.vm_pu.copy()
-
-        # Instantiate optimizer based on chosen method.
-        if method.upper() == "MILP":
-            optimizer = MILP_class(net, graph_id, logger=logger, toggles=toggles)
-        else:
-            optimizer = SOCP_class(net, graph_id, logger=logger, toggles=toggles)
-
-        if hasattr(optimizer, 'initialize'):
-            optimizer.initialize()
-        
-        # Call initialize_with_alternative_mst which may alter switch states.
-        try:
-            optimizer.initialize_with_alternative_mst(penalty=1.0)
-        except Exception as e:
-            print(f"Error during initialize_with_alternative_mst for {graph_id}: {e}")
-        # Build and solve the optimization model.
-        model = optimizer.create_model()  
-        start_time = time.time()
-        solver_results = optimizer.solve()
-        optimization_time = time.time() - start_time
-
-        num_switches_changed = (
-            optimizer.num_switches_changed if hasattr(optimizer, 'num_switches_changed') else 0
-        )
-
-        # Extract the optimization results.
-        opt_results = optimizer.extract_results()
-
-        print(f"Optimization solved in {optimization_time:.4f} seconds, Switches changed: {num_switches_changed}")
-
-        # Prepare ground truth features with optimization metadata and predicted voltages.
-        features_gt = features.get(graph_id, {}).copy()
-        features_gt.update({
-            "optimization_time": optimization_time,
-            "switches_changed": num_switches_changed,
-            "predicted_voltages": opt_results.get("voltage_profiles", {})
-        })
-
-        # After optimization, retrieve the final switch configuration.
-        final_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
-
-        # If the optimized configuration equals the original configuration, compute the average % voltage difference.
-        if original_switch_states is not None and final_switch_states is not None:
-            if original_switch_states.equals(final_switch_states):
-                diff_list = []
-                predicted_voltages = opt_results.get("voltage_profiles", {})
-                for bus in original_vm_pu.index:
-                    if bus in predicted_voltages:
-                        orig_v = original_vm_pu.at[bus]
-                        pred_v = predicted_voltages[bus]
-                        if orig_v != 0:
-                            diff_list.append(abs(orig_v - pred_v) / orig_v * 100)
-                avg_diff_pct = sum(diff_list) / len(diff_list) if diff_list else None
-                features_gt["voltage_avg_pct_diff"] = avg_diff_pct
-
-        # Save the updated ground truth features.
-        with open(feat_gt_dir / f"{graph_id}.pkl", "wb") as f:
-            pkl.dump(features_gt, f)
-
-        print(f"Saved ground truth data for {graph_id}")
 
     # Save optimization metrics
     metrics_df = pd.DataFrame(metrics_data)
