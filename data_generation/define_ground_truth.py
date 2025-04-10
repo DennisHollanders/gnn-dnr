@@ -18,7 +18,7 @@ load_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "
 sys.path.extend([src_path, load_data_path])
 
 from SOCP_class_dnr import SOCP_class
-from MILP_class_dnr import MILP_class  
+#from MILP_class_dnr import MILP_class  
 from load_data import load_graph_data
 
 def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggles=None, debug=False, logger=None):
@@ -59,10 +59,10 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
             original_vm_pu = net.res_bus.vm_pu.copy()
 
             # Instantiate optimizer based on chosen method.
-            if method.upper() == "MILP":
-                optimizer = MILP_class(net, graph_id, logger=logger, toggles=toggles)
-            else:
-                optimizer = SOCP_class(net, graph_id, logger=logger, toggles=toggles)
+            #if method.upper() == "MILP":
+            #    optimizer = MILP_class(net, graph_id, logger=logger, toggles=toggles)
+            #else:
+            optimizer = SOCP_class(net, graph_id, logger=logger, toggles=toggles)
 
             if hasattr(optimizer, 'initialize'):
                 optimizer.initialize()
