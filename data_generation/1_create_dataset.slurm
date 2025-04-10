@@ -22,7 +22,7 @@ module load CUDA/11.7.0
 module load poetry/1.5.1-GCCcore-12.3.0
 
 # Activate the Poetry environment
-source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-_o2-hQZ5-py3.11/bin/activate
+source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-ADMT4Fb3-py3.11/bin/python
 
 # Verify Python version
 python --version 

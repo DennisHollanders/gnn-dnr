@@ -81,12 +81,14 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
             num_switches_changed = (
                 optimizer.num_switches_changed if hasattr(optimizer, 'num_switches_changed') else 0
             )
+            
 
             # Extract the optimization results.
             opt_results = optimizer.extract_results()
-
-            print(f"Optimization solved in {optimization_time:.4f} seconds, Switches changed: {num_switches_changed}")
-
+            try:
+                print(f"Optimization solved in {optimization_time:.4f} seconds, Switches changed: {num_switches_changed}")
+            except AttributeError:
+                print("Optimization results not available. Likely assigned wrong ")
             # Prepare ground truth features with optimization metadata and predicted voltages.
             features_gt = features.get(graph_id, {}).copy()
             features_gt.update({
@@ -99,18 +101,18 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
             final_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
 
             # If the optimized configuration equals the original configuration, compute the average % voltage difference.
-            if original_switch_states is not None and final_switch_states is not None:
-                if original_switch_states.equals(final_switch_states):
-                    diff_list = []
-                    predicted_voltages = opt_results.get("voltage_profiles", {})
-                    for bus in original_vm_pu.index:
-                        if bus in predicted_voltages:
-                            orig_v = original_vm_pu.at[bus]
-                            pred_v = predicted_voltages[bus]
-                            if orig_v != 0:
-                                diff_list.append(abs(orig_v - pred_v) / orig_v * 100)
-                    avg_diff_pct = sum(diff_list) / len(diff_list) if diff_list else None
-                    features_gt["voltage_avg_pct_diff"] = avg_diff_pct
+            # if original_switch_states is not None and final_switch_states is not None:
+            #     if original_switch_states.equals(final_switch_states):
+            #         diff_list = []
+            #         predicted_voltages = opt_results.get("voltage_profiles", {})
+            #         for bus in original_vm_pu.index:
+            #             if bus in predicted_voltages:
+            #                 orig_v = original_vm_pu.at[bus]
+            #                 pred_v = predicted_voltages[bus]
+            #                 if orig_v != 0:
+            #                     diff_list.append(abs(orig_v - pred_v) / orig_v * 100)
+            #         avg_diff_pct = sum(diff_list) / len(diff_list) if diff_list else None
+            #         features_gt["voltage_avg_pct_diff"] = avg_diff_pct
 
             # Save the updated ground truth features.
             with open(feat_gt_dir / f"{graph_id}.pkl", "wb") as f:
@@ -235,10 +237,11 @@ def init_logging(method):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
-    parser.add_argument('--folder_path', default=r"data\transformed_subgraphs_27032025"
+    parser.add_argument('--folder_path', #default=r"data\transformed_subgraphs_27032025"
+                        default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-5_nVal-5_2732025_1"
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_3"
                         , type=str, help='Dataset folder path')
-    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='', help='Dataset set to process; leave empty for no subfolder')
+    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='test', help='Dataset set to process; leave empty for no subfolder')
     parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
 
@@ -247,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument('--include_voltage_bounds_constraint', type=bool, default=True, help="Include voltage bounds constraint SOCP")
     parser.add_argument('--include_power_balance_constraint', type=bool, default=True, help="Include power balance constraint SOCP")
     parser.add_argument('--include_radiality_constraints', type=bool, default=True, help="Include radiality constraints SOCP")
-    parser.add_argument('--use_spanning_tree_radiality', type=bool, default=True, help="Use spanning tree radiality SOCP")
+    parser.add_argument('--use_spanning_tree_radiality', type=bool, default=False, help="Use spanning tree radiality SOCP")
     parser.add_argument('--include_switch_penalty', type=bool, default=False, help="Include switch penalty in objective SOCP")
 
     args = parser.parse_args()

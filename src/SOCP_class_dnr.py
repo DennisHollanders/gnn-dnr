@@ -2,11 +2,11 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-#from pint import UnitRegistry
+from pint import UnitRegistry
 from pyomo.opt import TerminationCondition
 import networkx as nx
 
-#ureg = UnitRegistry()
+ureg = UnitRegistry()
 import logging
 from pyomo.environ import (
     ConcreteModel,
@@ -112,17 +112,17 @@ class SOCP_class:
         # Process line data with unit checking:
         line_df = self.net.line.copy()
         # Compute resistance in ohm 
-        # line_df["r_ohm"] = line_df.apply(
-        #     lambda row: (row["r_ohm_per_km"] * (ureg.ohm/ureg.km) * row["length_km"] * ureg.km).to(ureg.ohm).magnitude,
-        #     axis=1
-        # )
-        # # Compute reactance in ohm similarly:
-        # line_df["x_ohm"] = line_df.apply(
-        #     lambda row: (row["x_ohm_per_km"] * (ureg.ohm/ureg.km) * row["length_km"] * ureg.km).to(ureg.ohm).magnitude,
-        #     axis=1
-        # )
-        line_df["r_ohm"] = line_df["r_ohm_per_km"] * line_df["length_km"]
-        line_df["x_ohm"] = line_df["x_ohm_per_km"] * line_df["length_km"]
+        line_df["r_ohm"] = line_df.apply(
+            lambda row: (row["r_ohm_per_km"] * (ureg.ohm/ureg.km) * row["length_km"] * ureg.km).to(ureg.ohm).magnitude,
+            axis=1
+        )
+        # Compute reactance in ohm similarly:
+        line_df["x_ohm"] = line_df.apply(
+            lambda row: (row["x_ohm_per_km"] * (ureg.ohm/ureg.km) * row["length_km"] * ureg.km).to(ureg.ohm).magnitude,
+            axis=1
+        )
+        #line_df["r_ohm"] = line_df["r_ohm_per_km"] * line_df["length_km"]
+        #line_df["x_ohm"] = line_df["x_ohm_per_km"] * line_df["length_km"]
 
         self.switch_df = self.net.switch.copy()
         self.initial_switch_status = self.switch_df['closed'].copy()
@@ -169,7 +169,6 @@ class SOCP_class:
             )
             # Note: For loads, ensure that your sign convention is correct.
             self.reactive_bus_injection[bus_name] = q_gen + q_sgen + q_shunt - q_load
-            # Optional: Log injections for checking
             if abs(self.reactive_bus_injection[bus_name]) > 1e-6:
                  self.logger.debug(f"Bus {bus_name}: Reactive Injection = {self.reactive_bus_injection[bus_name]:.4f}")
 
@@ -299,48 +298,48 @@ class SOCP_class:
         v_lower_factor = 0.90  # Example: 0.90 pu
 
         # Ensure you are squaring the pu value for V_m_sqr bounds
-        # model.V_overline = Param(
-        #     model.buses,
-        #     initialize=lambda m, b: ( (self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * v_upper_factor).to(ureg.volt).magnitude )**2 
-        # )
-        # model.V_underline = Param(
-        #     model.buses,
-        #     initialize=lambda m, b: ( (self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * v_lower_factor).to(ureg.volt).magnitude )**2
-        # )
-
         model.V_overline = Param(
             model.buses,
-            initialize=lambda m, b: (self.voltages_bus.at[b, 'vn_kv'] * 1000 * v_upper_factor)**2
+            initialize=lambda m, b: ( (self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * v_upper_factor).to(ureg.volt).magnitude )**2 
         )
         model.V_underline = Param(
             model.buses,
-            initialize=lambda m, b: (self.voltages_bus.at[b, 'vn_kv'] * 1000 * v_lower_factor)**2
+            initialize=lambda m, b: ( (self.voltages_bus.at[b, 'vn_kv'] * ureg.kV * v_lower_factor).to(ureg.volt).magnitude )**2
         )
+
+        # model.V_overline = Param(
+        #     model.buses,
+        #     initialize=lambda m, b: (self.voltages_bus.at[b, 'vn_kv'] * 1000 * v_upper_factor)**2
+        # )
+        # model.V_underline = Param(
+        #     model.buses,
+        #     initialize=lambda m, b: (self.voltages_bus.at[b, 'vn_kv'] * 1000 * v_lower_factor)**2
+        # )
         
         # xᵢⱼ: Line reactance in equation (26)
-        # model.xl_mOhm = Param(
-        #     model.lines,
-        #     within=NonNegativeReals,
-        #     initialize=lambda m, l: ((self.line_df.set_index("name").at[l, "x_ohm"] * ureg.ohm)
-        #                                 .to(ureg.mohm).magnitude)
-        # )
-        # # rᵢⱼ: Line resistance in equations (25) and (26)
-        # model.rl_mOhm = Param(
-        #     model.lines,
-        #     within=NonNegativeReals,
-        #     initialize=lambda m, l: ((self.line_df.set_index("name").at[l, "r_ohm"] * ureg.ohm)
-        #                                 .to(ureg.mohm).magnitude)
-        # )
         model.xl_mOhm = Param(
             model.lines,
             within=NonNegativeReals,
-            initialize=lambda m, l: self.line_df.set_index("name").at[l, "x_ohm"] * 1e3
+            initialize=lambda m, l: ((self.line_df.set_index("name").at[l, "x_ohm"] * ureg.ohm)
+                                        .to(ureg.mohm).magnitude)
         )
+        # rᵢⱼ: Line resistance in equations (25) and (26)
         model.rl_mOhm = Param(
             model.lines,
             within=NonNegativeReals,
-            initialize=lambda m, l: self.line_df.set_index("name").at[l, "r_ohm"] * 1e3
+            initialize=lambda m, l: ((self.line_df.set_index("name").at[l, "r_ohm"] * ureg.ohm)
+                                        .to(ureg.mohm).magnitude)
         )
+        # model.xl_mOhm = Param(
+        #     model.lines,
+        #     within=NonNegativeReals,
+        #     initialize=lambda m, l: self.line_df.set_index("name").at[l, "x_ohm"] * 1e3
+        # )
+        # model.rl_mOhm = Param(
+        #     model.lines,
+        #     within=NonNegativeReals,
+        #     initialize=lambda m, l: self.line_df.set_index("name").at[l, "r_ohm"] * 1e3
+        # )
         
         # Demand parameter for radiality constraint - used in flow balance for radiality
         model.radial_demand = Param(model.buses, initialize=lambda m, b: 0 if b in self.substations else 1)
