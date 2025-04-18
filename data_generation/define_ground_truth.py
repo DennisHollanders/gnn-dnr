@@ -23,13 +23,27 @@ from load_data import load_graph_data
 
 
 def validate_and_store_optimized_model(optimizer, net, graph_id, logger,
-                                         storage_folder=Path("optimized_models"),
+                                         root_folder=Path("dataset_folder"),  # The root folder of your dataset
                                          voltage_lower=0.9, voltage_upper=1.10):
     """
-    Validates optimization outcomes and stores the updated pandapower network and a networkx graph.
+    Validates optimization outcomes and stores the updated pandapower network and a networkx graph
+    in the folder structure: root_folder/Original, Post_MST, Optimization.
     """
-    # Ensure the storage folder exists.
-    storage_folder.mkdir(parents=True, exist_ok=True)
+    # Define the folder structure.
+    original_folder = root_folder / "original"
+    post_mst_folder = root_folder / "post_MST"
+    optimization_folder = root_folder / "optimization"
+
+    # Create necessary directories.
+    original_folder.mkdir(parents=True, exist_ok=True)
+    post_mst_folder.mkdir(parents=True, exist_ok=True)
+    optimization_folder.mkdir(parents=True, exist_ok=True)
+
+    # Subfolders for features, networkx, and pandapower graphs
+    for folder in [original_folder, post_mst_folder, optimization_folder]:
+        (folder / "graph_features").mkdir(parents=True, exist_ok=True)
+        (folder / "networkx_graphs").mkdir(parents=True, exist_ok=True)
+        (folder / "pandapower_networks").mkdir(parents=True, exist_ok=True)
 
     # Extract optimization results.
     opt_results = optimizer.extract_results()
@@ -55,23 +69,110 @@ def validate_and_store_optimized_model(optimizer, net, graph_id, logger,
     # Update the pandapower network with optimized switch statuses.
     net_updated = optimizer.update_network()
 
-    # Save the updated pandapower network as JSON.
+    # Save Original pandapower network.
     try:
-        pp_file = storage_folder / f"{graph_id}_optimized.json"
+        original_pp_dir = original_folder / "pandapower_networks"
+        pp_file = original_pp_dir / f"{graph_id}_original.json"
+        net_json = pp.to_json(net)
+        with open(pp_file, "w") as f:
+            f.write(net_json)
+        logger.info(f"Graph {graph_id}: Original pandapower network stored in {pp_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error saving original pandapower network - {e}")
+
+    # Save Original networkx graph.
+    try:
+        original_nx_dir = original_folder / "networkx_graphs"
+        G = nx.Graph()
+        for bus in net.bus.index:
+            G.add_node(bus)
+        for idx, line in net.line.iterrows():
+            add_edge = True
+            if hasattr(net, "switch") and not net.switch.empty:
+                switches = net.switch[(net.switch.et == 'l') & (net.switch.element == idx)]
+                if not switches.empty and not all(switches["closed"]):
+                    add_edge = False
+            if add_edge:
+                G.add_edge(line["from_bus"], line["to_bus"])
+        nx_file = original_nx_dir / f"{graph_id}_original.graphml"
+        nx.write_graphml(G, str(nx_file))
+        logger.info(f"Graph {graph_id}: Original networkx graph stored in {nx_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error creating networkx graph - {e}")
+
+    # Save features for original graph.
+    try:
+        original_feat_dir = original_folder / "graph_features"
+        features_file = original_feat_dir / f"{graph_id}_features.pkl"
+        with open(features_file, "wb") as f:
+            pkl.dump(opt_results, f)
+        logger.info(f"Graph {graph_id}: Features stored in {features_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error saving features - {e}")
+
+    # Apply MST and store networks in Post-MST folder.
+    optimizer.initialize_with_alternative_mst(penalty=1.0)
+
+    # Save Post-MST pandapower network.
+    try:
+        net.switch["closed"] = optimizer.switch_df["closed"]
+        pp.runpp(net, enforce_q_lims=False)
+        post_mst_pp_dir = post_mst_folder / "pandapower_networks"
+        pp_file = post_mst_pp_dir / f"{graph_id}_post_mst.json"
+        net_json = pp.to_json(net)
+        with open(pp_file, "w") as f:
+            f.write(net_json)
+        logger.info(f"Graph {graph_id}: Post-MST pandapower network stored in {pp_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error saving post-MST pandapower network - {e}")
+
+    # Save Post-MST networkx graph.
+    try:
+        post_mst_nx_dir = post_mst_folder / "networkx_graphs"
+        G = nx.Graph()
+        for bus in net.bus.index:
+            G.add_node(bus)
+        for idx, line in net.line.iterrows():
+            add_edge = True
+            if hasattr(net, "switch") and not net.switch.empty:
+                switches = net.switch[(net.switch.et == 'l') & (net.switch.element == idx)]
+                if not switches.empty and not all(switches["closed"]):
+                    add_edge = False
+            if add_edge:
+                G.add_edge(line["from_bus"], line["to_bus"])
+        nx_file = post_mst_nx_dir / f"{graph_id}_post_mst.graphml"
+        nx.write_graphml(G, str(nx_file))
+        logger.info(f"Graph {graph_id}: Post-MST networkx graph stored in {nx_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error creating post-MST networkx graph - {e}")
+
+    # Save features for Post-MST.
+    try:
+        post_mst_feat_dir = post_mst_folder / "graph_features"
+        features_file = post_mst_feat_dir / f"{graph_id}_features.pkl"
+        with open(features_file, "wb") as f:
+            pkl.dump(opt_results, f)
+        logger.info(f"Graph {graph_id}: Features stored in {features_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error saving features - {e}")
+
+    # Save Optimized pandapower network.
+    try:
+        optimization_pp_dir = optimization_folder / "pandapower_networks"
+        pp_file = optimization_pp_dir / f"{graph_id}_optimized.json"
         net_json = pp.to_json(net_updated)
         with open(pp_file, "w") as f:
             f.write(net_json)
         logger.info(f"Graph {graph_id}: Optimized pandapower network stored in {pp_file}")
     except Exception as e:
-        logger.error(f"Graph {graph_id}: Error saving pandapower network - {e}")
+        logger.error(f"Graph {graph_id}: Error saving optimized pandapower network - {e}")
 
-    # Create a networkx graph representation from the updated network.
+    # Save Optimized networkx graph.
     try:
+        optimization_nx_dir = optimization_folder / "networkx_graphs"
         G = nx.Graph()
-        # Add all buses as nodes.
         for bus in net_updated.bus.index:
             G.add_node(bus)
-        # Add edges for each line that is in service (all related switches closed).
         for idx, line in net_updated.line.iterrows():
             add_edge = True
             if hasattr(net_updated, "switch") and not net_updated.switch.empty:
@@ -80,15 +181,23 @@ def validate_and_store_optimized_model(optimizer, net, graph_id, logger,
                     add_edge = False
             if add_edge:
                 G.add_edge(line["from_bus"], line["to_bus"])
-        nx_file = storage_folder / f"{graph_id}_optimized.graphml"
+        nx_file = optimization_nx_dir / f"{graph_id}_optimized.graphml"
         nx.write_graphml(G, str(nx_file))
         logger.info(f"Graph {graph_id}: Optimized networkx graph stored in {nx_file}")
     except Exception as e:
-        logger.error(f"Graph {graph_id}: Error creating networkx graph - {e}")
-        G = None
+        logger.error(f"Graph {graph_id}: Error creating optimized networkx graph - {e}")
+
+    # Save features for Optimized graph.
+    try:
+        optimization_feat_dir = optimization_folder / "graph_features"
+        features_file = optimization_feat_dir / f"{graph_id}_features.pkl"
+        with open(features_file, "wb") as f:
+            pkl.dump(opt_results, f)
+        logger.info(f"Graph {graph_id}: Features stored in {features_file}")
+    except Exception as e:
+        logger.error(f"Graph {graph_id}: Error saving features - {e}")
 
     return net_updated, G
-
 
 def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggles=None, debug=False, logger=None):
     folder_path = Path(folder_path)
@@ -191,7 +300,7 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
             print(f"Saved ground truth features for {graph_id}")
 
             # Validate optimization results and store updated models.
-            net_updated, nx_graph = validate_and_store_optimized_model(optimizer, net, graph_id, logger)
+            net_updated, nx_graph = validate_and_store_optimized_model(optimizer, net, graph_id, logger,root_folder =folder_path )
             
             # Optionally, store the updated pandapower network (e.g., in a ground truth folder).
             updated_pp_file = pp_gt_dir / f"{graph_id}_optimized.json"
@@ -241,16 +350,12 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
     # Bar plot for optimization time per graph.
     axes[1].hist(metrics_df['optimization_time'], bins=10, color='green', alpha=0.7)
     axes[1].set_title('Optimization Time per Graph (s)')
-    axes[1].set_xlabel('Time (s)')e
+    axes[1].set_xlabel('Time (s)')
     axes[1].set_ylabel('Frequency')
 
     plt.tight_layout()
     plt.show()
-   # axes[1].tick_params(axis='x', rotation=45)
-
-    plt.tight_layout()
-    plt.show()
-
+   
 
 def is_radial_and_connected(net):
     """
