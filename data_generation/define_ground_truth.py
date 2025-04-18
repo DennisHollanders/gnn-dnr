@@ -118,30 +118,31 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
                 net = pp.from_json_string(net)
                 print("In loop: loaded network as string.")
 
-            # Run a power flow to check convergence.
+            # --- RUN BASE CASE PF and record original ground truth ---
             pp.runpp(net, enforce_q_lims=False)
             if not net.converged:
                 print(f"Power flow did not converge for {graph_id}. Skipping optimization.")
                 continue
-
+            original_vm = net.res_bus.vm_pu.copy()
+            original_loss = net.res_line.pl_mw.sum()
             original_switch_states = net.switch["closed"].copy() if hasattr(net, "switch") else None
-            original_vm_pu = net.res_bus.vm_pu.copy()
 
             # Instantiate optimizer based on chosen method.
-            #if method.upper() == "MILP":
-            #    optimizer = MILP_class(net, graph_id, logger=logger, toggles=toggles)
-            #else:
             optimizer = SOCP_class(net, graph_id, logger=logger, toggles=toggles)
 
             if hasattr(optimizer, 'initialize'):
                 optimizer.initialize()
             
-            # Call initialize_with_alternative_mst which may alter switch states.
-            try:
-                optimizer.initialize_with_alternative_mst(penalty=1.0)
-            except Exception as e:
-                print(f"Error during initialize_with_alternative_mst for {graph_id}: {e}")
-            
+            # Call initialize_with_alternative_mst which alters switch_df but not net yet.
+            optimizer.initialize_with_alternative_mst(penalty=1.0)
+
+            # --- APPLY ALTERNATIVE MST TO NET and record alternative PF ground truth ---
+            net.switch["closed"] = optimizer.switch_df["closed"]
+            pp.runpp(net, enforce_q_lims=False)
+            alternative_vm = net.res_bus.vm_pu.copy()
+            alternative_loss = net.res_line.pl_mw.sum()
+            alternative_switch_states = net.switch["closed"].copy()
+
             # Build and solve the optimization model.
             model = optimizer.create_model()  
             start_time = time.time()
@@ -154,16 +155,33 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
             
             # Extract the optimization results.
             opt_results = optimizer.extract_results()
+            opt_switch_states = {s: info['optimized'] for s, info in opt_results.get('switches', {}).items()}
+
             try:
                 print(f"Optimization solved in {optimization_time:.4f} seconds, Switches changed: {num_switches_changed}")
             except AttributeError:
                 print("Optimization results not available.")
 
-            # Prepare ground truth features with optimization metadata and predicted voltages.
+            # --- APPLY OPTIMIZED SWITCH PATTERN and record final PF ground truth ---
+            optimizer.update_network()
+            pp.runpp(net, enforce_q_lims=False)
+            optimized_vm = net.res_bus.vm_pu.copy()
+            optimized_loss = net.res_line.pl_mw.sum()
+
+            # Prepare ground truth features with optimization metadata and PF results.
             features_gt = features.get(graph_id, {}).copy()
             features_gt.update({
                 "optimization_time": optimization_time,
                 "switches_changed": num_switches_changed,
+                "original_vm": original_vm,
+                "original_loss": original_loss,
+                "alternative_vm": alternative_vm,
+                "alternative_loss": alternative_loss,
+                "optimized_vm": optimized_vm,
+                "optimized_loss": optimized_loss,
+                "original_switch_states": original_switch_states,
+                "alternative_switch_states": alternative_switch_states,
+                "opt_switch_states": opt_switch_states,
                 "predicted_voltages": opt_results.get("voltage_profiles", {})
             })
 
@@ -214,20 +232,21 @@ def apply_optimization_and_store_ground_truths(folder_path, method="SOCP", toggl
 
     # Plot the distribution of switches changed and optimization time.
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-
     # Bar plot for number of switches changed per graph.
-    axes[0].bar(metrics_df['graph_id'], metrics_df['switches_changed'], color='blue')
+    axes[0].hist(metrics_df['switches_changed'], bins=10, color='blue', alpha=0.7)
     axes[0].set_title('Switches Changed per Graph')
-    axes[0].set_xlabel('Graph ID')
-    axes[0].set_ylabel('Switches Changed')
-    axes[0].tick_params(axis='x', rotation=45)
+    axes[0].set_xlabel('Switches Changed')
+    axes[0].set_ylabel('Frequency')
 
     # Bar plot for optimization time per graph.
-    axes[1].bar(metrics_df['graph_id'], metrics_df['optimization_time'], color='green')
+    axes[1].hist(metrics_df['optimization_time'], bins=10, color='green', alpha=0.7)
     axes[1].set_title('Optimization Time per Graph (s)')
-    axes[1].set_xlabel('Graph ID')
-    axes[1].set_ylabel('Time (s)')
-    axes[1].tick_params(axis='x', rotation=45)
+    axes[1].set_xlabel('Time (s)')e
+    axes[1].set_ylabel('Frequency')
+
+    plt.tight_layout()
+    plt.show()
+   # axes[1].tick_params(axis='x', rotation=45)
 
     plt.tight_layout()
     plt.show()
@@ -303,9 +322,9 @@ def init_logging(method):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_26032025_4",
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_3",
                         type=str, help='Dataset folder path')
-    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='', help='Dataset set to process; leave empty for no subfolder')
+    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='test', help='Dataset set to process; leave empty for no subfolder')
     parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
 
