@@ -1,11 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=process_subgraphs
-#SBATCH --output=logs/process_subgraphs_%j.out
-#SBATCH --error=logs/process_subgraphs_%j.err
-#SBATCH --time=24:00:00             # hh:mm:ss
+#SBATCH --output=logs/slurm-%j.out
+#SBATCH --error=logs/slurm-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
+# SBATCH --gres=gpu:1 
 #SBATCH --mem=32G
-#SBATCH --partition=compute
+#SBATCH --time=1-00:00:00
+#SBATCH --partition=tue.default.q # Or tue.gpu.q if using the --gres=gpu:1 directive
 
 module purge # Start with a clean environment
 module load Python/3.11.3
