@@ -65,7 +65,7 @@ def parse_arguments():
     # Subgraph options
     parser.add_argument('--subgraph_folder', type=str, 
     #default='filtered_complete_subgraphs_final.pkl',
-    default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\cbs_buurts",
+    default = r"/vast.mnt/home/20174047/gnn-dnr/data/cbs_buurts_nodes/",
                         help='Filename for subgraphs input ')
     parser.add_argument('--n_loadcase_time_intervals', type=int, default=1,
                         help='Number of time intervals per sample (default: 1)')
