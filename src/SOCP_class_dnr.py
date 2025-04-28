@@ -751,7 +751,7 @@ class SOCP_class:
                 opt = SolverFactory(solver)
 
             if solver.lower() != 'gurobi':
-                # Use SolverFactory branch. Set default options and update with any solver_options.
+                # Use SolverFactory branch.
                 current_options = solver_options.copy()
                 if solver.lower() == 'gurobi':
                     defaults = {
@@ -782,12 +782,10 @@ class SOCP_class:
                     term_cond = self.solver_results.solver.termination_condition
                     if term_cond in [TerminationCondition.infeasible, TerminationCondition.infeasibleOrUnbounded]:
                         self.logger.warning("Model reported as infeasible or unbounded. Attempting IIS computation...")
-                        lp_filename = f"data_generation/logs/infeasible_model_{getattr(self, 'graph_id', 'default')}.lp"
-                        try:
-                            self.model.write(lp_filename, io_options={'symbolic_solver_labels': True})
-                            self.logger.info(f"Wrote potentially infeasible model to {lp_filename}")
-                        except Exception as write_e:
-                            self.logger.error(f"Failed to write model file: {write_e}")
+                        if self.toggles.get("write_model", True):
+                            lp_filename = f"model_{getattr(self, 'graph_id', 'default')}.lp"
+                            self.model.write(lp_filename, io_options={"symbolic_solver_labels": True})
+                            self.logger.info(f"Wrote model to {lp_filename}")
                         if solver.lower() == 'gurobi':
                             # In the SolverFactory branch, we may not have direct access to computeIIS.
                             self.logger.warning("To compute IIS with Gurobi, run:")

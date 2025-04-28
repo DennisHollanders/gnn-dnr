@@ -1,0 +1,30 @@
+activation: relu
+batch_size: 8
+batching_type: dynamic
+criterion_name: MSELoss
+data_folder: data\transformed_subgraphs_26032025_4
+description: Train Graph Autoencoder
+dropout_rate: 0.0
+epochs: 100
+hidden_dims:
+- 256
+- 128
+- 64
+- 32
+- 16
+hp_search: false
+hp_search_n_trials: 50
+input_dim: 4
+job_name: first run
+latent_dim: 8
+learning_rate: 0.001
+max_edges: 5000
+max_nodes: 1000
+model_module: GraphAutoencoder
+num_workers: 0
+patience: 10
+real_data_folder: null
+seed: 42
+train_ratio: 0.8
+wandb: false
+weight_decay: 5.0e-05

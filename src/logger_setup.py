@@ -11,3 +11,5 @@ listener = QueueListener(log_queue, file_handler)
 listener.start()
 
 logger = logging.getLogger("Distribution Network Reconfiguration -- Dataset Generation")
+logger.addHandler(queue_handler)
+logger.setLevel(logging.INFO)

@@ -11,7 +11,17 @@ import numpy as np
 import pandapower as pp
 from preprocess_data import *
 from pandapower import from_json, from_json_dict
- 
+import tqdm
+import logging 
+
+
+# ─── configure root logger ─────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 class DataloaderType(Enum):
     DEFAULT = "default"
@@ -62,66 +72,137 @@ class DNRDataset(Data):
         else:
             raise AttributeError("Conductance matrix is not set for this data instance.")
 
-def load_graph_data(base_directory):
-    print("\nLoading stored data...")
-    
+def load_graph_data_old(base_directory):
+    logger.info("Loading stored data from %s", base_directory)
+
     # Load features
     features = {}
     features_dir = os.path.join(base_directory, "graph_features")
-    if os.path.exists(features_dir):
-        for filename in os.listdir(features_dir):
-            if filename.endswith(".pkl"):
-                file_path = os.path.join(features_dir, filename)
-                with open(file_path, "rb") as f:
-                    key = os.path.splitext(filename)[0]  # Remove .pkl extension
-                    print(f"Loading feature: {key}")
-                    features[key] = pkl.load(f)
+    if os.path.isdir(features_dir):
+        for fn in os.listdir(features_dir):
+            if not fn.endswith(".pkl"): 
+                continue
+            key = fn[:-4]
+            path = os.path.join(features_dir, fn)
+            logger.debug("  → loading feature %s", key)
+            with open(path, "rb") as f:
+                features[key] = pkl.load(f)
     else:
-        print(f"Warning: No graph features found in: {features_dir}")
-    print(f"Loaded {len(features)} feature sets.")
-    
-    # Load NetworkX graphs
+        logger.warning("No graph_features folder at %s", features_dir)
+    logger.info("Loaded %d feature sets", len(features))
+
+    # Load NetworkX
     nx_graphs = {}
     nx_dir = os.path.join(base_directory, "networkx_graphs")
-    if os.path.exists(nx_dir):
-        for filename in os.listdir(nx_dir):
-            if filename.endswith(".pkl"):
-                file_path = os.path.join(nx_dir, filename)
-                with open(file_path, "rb") as f:
-                    key = os.path.splitext(filename)[0]  # Remove .pkl extension
+    if os.path.isdir(nx_dir):
+        for fn in os.listdir(nx_dir):
+            if not fn.endswith(".pkl"): 
+                continue
+            key = fn[:-4]
+            path = os.path.join(nx_dir, fn)
+            try:
+                with open(path, "rb") as f:
                     nx_graphs[key] = pkl.load(f)
+            except Exception as e:
+                logger.error("Failed loading NX graph %s: %s", key, e)
     else:
-        print(f"Warning: No NetworkX graphs found in: {nx_dir}")
-    print(f"Loaded {len(nx_graphs)} NetworkX graphs.")
-    
-    # Load Pandapower networks
+        logger.warning("No networkx_graphs folder at %s", nx_dir)
+    logger.info("Loaded %d NetworkX graphs", len(nx_graphs))
+
+    # Load pandapower
     pp_networks = {}
     pp_dir = os.path.join(base_directory, "pandapower_networks")
-    if os.path.exists(pp_dir):
-        for filename in os.listdir(pp_dir):
-            if filename.endswith(".json"):
-                file_path = os.path.join(pp_dir, filename)
+    if os.path.isdir(pp_dir):
+        for fn in os.listdir(pp_dir):
+            if not fn.endswith(".json"): 
+                continue
+            key = fn[:-5]
+            path = os.path.join(pp_dir, fn)
+            try:
+                with open(path) as f:
+                    raw = f.read()
                 try:
-                    with open(file_path, "r") as f:
-                        key = os.path.splitext(filename)[0]  # Remove .json extension
-                        json_str = f.read()
-                        try:
-                            pp_net = pp.from_json_string(json_str)
-                            pp_networks[key] = pp_net
-                        except Exception as e:
-                            print(f"Warning: Could not load {key} as pandapower network: {e}")
-                            pp_networks[key] = json.loads(json_str)
-                except Exception as e:
-                    print(f"Error loading {file_path}: {e}")
+                    pp_networks[key] = pp.from_json_string(raw)
+                except Exception:
+                    pp_networks[key] = json.loads(raw)
+                logger.debug("  → loaded pandapower network %s", key)
+            except Exception as e:
+                logger.error("Failed loading pandapower %s: %s", key, e)
     else:
-        print(f"Warning: No pandapower networks found in: {pp_dir}")
-    print(f"Loaded {len(pp_networks)} Pandapower networks.")
-    
+        logger.warning("No pandapower_networks folder at %s", pp_dir)
+    logger.info("Loaded %d Pandapower networks", len(pp_networks))
+
+    return nx_graphs, pp_networks, features
+
+def load_graph_data(base_directory):
+    """
+    Load networkx graphs, pandapower networks and feature‐pickles
+    from three subfolders: original, post_MST, optimization.
+    Returns three dicts: nx_graphs, pp_networks, features each keyed by
+    phase ∈ {"original","post_mst","optimization"} → {graph_id → obj}
+    """
+    phases = {
+        "original":    ("original",     "_original"),
+        "post_mst":    ("post_MST",     "_post_mst"),
+        "optimization":("optimization", "_optimized"),
+    }
+
+    nx_graphs   = {p: {} for p in phases}
+    pp_networks = {p: {} for p in phases}
+    features    = {p: {} for p in phases}
+
+    for phase, (subdir, suffix) in phases.items():
+        feat_dir = os.path.join(base_directory, subdir, "graph_features")
+        for fn in os.listdir(feat_dir) if os.path.isdir(feat_dir) else []:
+            if fn.endswith(".pkl"):
+                base, _ = os.path.splitext(fn)
+                gid = base[:-len(suffix)] if base.endswith(suffix) else base
+                with open(os.path.join(feat_dir, fn), "rb") as f:
+                    features[phase][gid] = pkl.load(f)
+
+        nx_dir = os.path.join(base_directory, subdir, "networkx_graphs")
+        for fn in os.listdir(nx_dir) if os.path.isdir(nx_dir) else []:
+            base, ext = os.path.splitext(fn)
+            gid = base[:-len(suffix)] if base.endswith(suffix) else base
+            path = os.path.join(nx_dir, fn)
+            if ext == ".pkl":
+                with open(path, "rb") as f:
+                    nx_graphs[phase][gid] = pkl.load(f)
+            elif ext == ".graphml":
+                nx_graphs[phase][gid] = nx.read_graphml(path)
+
+        pp_dir = os.path.join(base_directory, subdir, "pandapower_networks")
+        for fn in os.listdir(pp_dir) if os.path.isdir(pp_dir) else []:
+            if fn.endswith(".json"):
+                base = fn[:-5]
+                gid = base[:-len(suffix)] if base.endswith(suffix) else base
+                s = open(os.path.join(pp_dir, fn)).read()
+                try:
+                    # pandapower ≥2.4
+                    pp_networks[phase][gid] = pp.from_json_string(s)
+                except:
+                    pp_networks[phase][gid] = json.loads(s)
+
     return nx_graphs, pp_networks, features
 
 def create_pyg_data_from_nx(nx_graph, pp_network, loader_type=DataloaderType.DEFAULT,
                             use_fallback_features=False, fallback_features=None):
     # Validate that the graph has all required node attributes
+    if hasattr(pp_network, "bus"):
+        pp.runpp(pp_network)
+        for node in nx_graph.nodes():
+            try:
+                res = pp_network.res_bus.loc[node]
+            except KeyError:
+                # fallback to row-by-position
+                res = pp_network.res_bus.iloc[int(node)]
+            nx_graph.nodes[node].update({
+                "p":     res.p_mw,
+                "q":     res.q_mvar,
+                "v":     res.vm_pu,
+                "theta": res.va_degree,
+            })
+    
     for node in nx_graph.nodes():
         for attr in ["p", "q", "v", "theta"]:
             if attr not in nx_graph.nodes[node]:
@@ -243,7 +324,7 @@ def create_pyg_data_from_nx(nx_graph, pp_network, loader_type=DataloaderType.DEF
 
     return custom_data
     
-def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
+def create_pyg_dataset_old(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
     nx_graphs, pp_networks, features = load_graph_data(base_directory)
     
     data_list = []
@@ -283,7 +364,51 @@ def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_f
     print(f"Failed conversions: {failed_conversions}")
     
     return data_list
+def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
+    # new loader: returns dicts keyed by phase → {graph_id: obj}
+    nx_all, pp_all, feat_all = load_graph_data(base_directory)
+    data_list = []
 
+    # loop phases original → post_mst → optimization
+    for phase in ("original", "post_mst", "optimization"):
+        for graph_name, nx_graph in nx_all[phase].items():
+            nx_opt = nx_all["optimization"].get(graph_name)
+            if nx_opt is None:
+                logger.warning("No optimized graph for %s, skipping y-labels", graph_name)
+                continue
+            logger.info("Phase %s — Processing graph: %s", phase, graph_name)
+            pp_net = pp_all[phase].get(graph_name)
+            fallback = (feat_all[phase].get(graph_name)
+                        if use_fallback_features else None)
+            try:
+                # 1) build the usual Data object from original graph
+                data = create_pyg_data_from_nx(
+                    nx_graph,
+                    pp_net,
+                    loader_type,
+                    use_fallback_features=use_fallback_features,
+                    fallback_features=fallback
+                )
+             
+                logger.debug("Successfully converted graph: %s", graph_name, phase)
+                # 2) compute ground-truth switch states on each original edge
+                #    (1 if that edge still exists in nx_opt, else 0)
+                opt_edges = {tuple(sorted(e)) for e in nx_opt.edges()}
+                # data.edge_index is 2×E; transpose to list of (u,v)
+                uv = data.edge_index.t().tolist()
+                y = torch.tensor([1.0 if tuple(sorted((u, v))) in opt_edges else 0.0
+                                for u, v in uv],
+                                dtype=torch.float)
+
+                data.y = y
+                data_list.append(data)
+            except Exception as e:
+                logger.error("Error creating PyG data for %s: %s", graph_name, e)
+                # Let the exception propagate if this is a critical error
+                if "missing required attribute" in str(e) or "zero" in str(e):
+                    raise
+    print(f"Created {len(data_list)} Data objects for training")
+    return data_list
 
 def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True, **kwargs):
     class DynamicBatchSampler(torch.utils.data.Sampler):
@@ -293,12 +418,11 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             self.max_edges = max_edges
             self.shuffle = shuffle
             self.indices = list(range(len(dataset)))
-            
-            # Pre-compute the number of nodes and edges for each graph
-            self.graph_sizes = []
-            for data in dataset:
-                self.graph_sizes.append((data.num_nodes, data.num_edges))
-            
+        
+            self.graph_sizes = [(d.num_nodes, d.num_edges) for d in dataset]
+            logger.info("Sampler initialized: %d graphs; node_limit=%d, edge_limit=%d",
+                        len(self.indices), max_nodes, max_edges)
+
         def __iter__(self):
             # Get indices of all graphs
             indices = self.indices.copy()
@@ -307,6 +431,8 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             if self.shuffle:
                 torch.manual_seed(int(torch.empty((), dtype=torch.int64).random_().item()))
                 torch.randperm(len(indices), out=torch.tensor(indices))
+                indices = torch.randperm(len(indices)).tolist()
+                logger.debug("Shuffled indices: %s", indices)
             
             # Create batches
             current_batch = []
@@ -320,6 +446,7 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
                      current_edges + edges > self.max_edges) and 
                     len(current_batch) > 0):
                     # Yield the current batch
+                    logger.debug("Yielding batch of %d graphs (nodes=%d, edges=%d)", len(batch), nodes, edges)
                     yield current_batch
                     # Start a new batch with the current graph
                     current_batch = [idx]
@@ -333,6 +460,7 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             
             # Yield the last batch if it's not empty
             if current_batch:
+                logger.debug("Yielding final batch of %d graphs", len(batch))
                 yield current_batch
                 
         def __len__(self):
@@ -341,10 +469,9 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
                 return 0
             total_nodes = sum(nodes for nodes, _ in self.graph_sizes)
             total_edges = sum(edges for _, edges in self.graph_sizes)
-            return max(1, min(
-                int(total_nodes / self.max_nodes) + 1,
-                int(total_edges / self.max_edges) + 1
-            ))
+            est = max(1, min(total_nodes // self.max_nodes + 1, total_edges // self.max_edges + 1))
+            logger.debug("Sampler __len__ estimate: %d", est)
+            return est
     
     # Create the batch sampler
     batch_sampler = DynamicBatchSampler(dataset, max_nodes, max_edges, shuffle)
@@ -403,13 +530,17 @@ def create_data_loaders(base_directory,secondary_directory=None, loader_type=Dat
 
 
 if __name__ == "__main__":
+    log_level = os.getenv("PYTHON_LOG_LEVEL", "INFO").upper()
+    logger.setLevel(log_level)
+
+
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
-    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_24032025", help="Base directory containing the train/validation folders")
+    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_27032025_gt", help="Base directory containing the train/validation folders")
     parser.add_argument("--secondary_dir", type=str, #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",
                         help="Secondary directory containing the test/validation folders")
-    parser.add_argument("--loader_type", type=str, default="pinn", 
+    parser.add_argument("--loader_type", type=str, default="default", 
                         choices=["default", "graphyr", "pinn",],
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="dynamic",
@@ -417,7 +548,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--max_nodes", type=int, default=1000, help="Maximum number of nodes in a batch (for dynamic batching)")
     parser.add_argument("--max_edges", type=int, default=5000, help="Maximum number of edges in a batch (for dynamic batching)")
-    parser.add_argument("--train_ratio", type=float, default=0.7, help="Ratio of training set")
+    parser.add_argument("--train_ratio", type=float, default=0.85, help="Ratio of training set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for dataset splitting")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
     
@@ -478,4 +609,5 @@ if __name__ == "__main__":
         if args.secondary_dir:         
             print("test_batch:", batch_test) 
             print(f"Test Batch size: {len(batch_test)}")
-        
+    
+    logger.info("Data loaders created successfully.")

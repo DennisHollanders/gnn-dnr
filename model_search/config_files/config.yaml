@@ -1,7 +1,7 @@
 description: "Train Graph Autoencoder"
 
 # Data
-data_folder: "data\\transformed_subgraphs_24032025"
+data_folder: "data\\transformed_subgraphs_26032025_4"
 real_data_folder: 
 
 # Model
