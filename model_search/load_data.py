@@ -13,6 +13,15 @@ from preprocess_data import *
 from pandapower import from_json, from_json_dict
 import tqdm
 import logging 
+import sys
+import random
+
+# Add necessary source paths
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if src_path not in sys.path:
+    sys.path.append(src_path)
+
+from electrify_subgraph import extract_node_features, extract_edge_features
 
 
 # ─── configure root logger ─────────────────────────────────────────────────────
@@ -134,280 +143,420 @@ def load_graph_data_old(base_directory):
 
     return nx_graphs, pp_networks, features
 
-def load_graph_data(base_directory):
+# def load_graph_data(base_directory):
+#     """
+#     Load networkx graphs, pandapower networks and feature‐pickles
+#     from three subfolders: original, post_MST, optimization.
+#     Returns three dicts: nx_graphs, pp_networks, features each keyed by
+#     phase ∈ {"original","post_mst","optimization"} → {graph_id → obj}
+#     """
+#     phases = {
+#     "original":    ("original",     "_original"),
+#     "post_mst":    ("post_MST",     "_post_mst"),
+#     "optimization":("optimized",    "_optimized"), 
+#     }
+
+#     #nx_graphs   = {p: {} for p in phases}
+#     pp_networks = {p: {} for p in phases}
+#     #features    = {p: {} for p in phases}
+
+#     for phase, (subdir, suffix) in phases.items():
+#         # feat_dir = os.path.join(base_directory, subdir, "graph_features")
+#         # for fn in os.listdir(feat_dir) if os.path.isdir(feat_dir) else []:
+#         #     if fn.endswith(".pkl"):
+#         #         base, _ = os.path.splitext(fn)
+#         #         gid = base[:-len(suffix)] if base.endswith(suffix) else base
+#         #         with open(os.path.join(feat_dir, fn), "rb") as f:
+#         #             features[phase][gid] = pkl.load(f)
+#         # print(f"Loaded {len(features[phase])} {phase} features")
+
+#         # nx_dir = os.path.join(base_directory, subdir, "networkx_graphs")
+#         # for fn in os.listdir(nx_dir) if os.path.isdir(nx_dir) else []:
+#         #     base, ext = os.path.splitext(fn)
+#         #     gid = base[:-len(suffix)] if base.endswith(suffix) else base
+#         #     path = os.path.join(nx_dir, fn)
+#         #     if ext == ".pkl":
+#         #         with open(path, "rb") as f:
+#         #             nx_graphs[phase][gid] = pkl.load(f)
+#         #     elif ext == ".graphml":
+#         #         nx_graphs[phase][gid] = nx.read_graphml(path)
+#         # print(f"Loaded {len(nx_graphs[phase])} {phase} graphs")
+
+#         pp_dir = os.path.join(base_directory, subdir, "pandapower_networks")
+#         for fn in os.listdir(pp_dir) if os.path.isdir(pp_dir) else []:
+#             if fn.endswith(".json"):
+#                 base = fn[:-5]
+#                 gid = base[:-len(suffix)] if base.endswith(suffix) else base
+#                 s = open(os.path.join(pp_dir, fn)).read()
+#                 try:
+#                     # pandapower ≥2.4
+#                     pp_networks[phase][gid] = pp.from_json_string(s)
+#                 except:
+#                     pp_networks[phase][gid] = json.loads(s)
+#         print(f"Loaded {len(pp_networks[phase])} {phase} graphs")
+
+#     #return nx_graphs, pp_networks, features
+#     return pp_networks 
+
+
+def load_pp_networks(base_directory):
     """
-    Load networkx graphs, pandapower networks and feature‐pickles
-    from three subfolders: original, post_MST, optimization.
-    Returns three dicts: nx_graphs, pp_networks, features each keyed by
-    phase ∈ {"original","post_mst","optimization"} → {graph_id → obj}
+    Load pandapower nets from:
+      base/original/…
+      base/post_MST/…
+      base/optimized/…
+    Correctly strips suffixes so that all phases share the same graph_id.
     """
     phases = {
-        "original":    ("original",     "_original"),
-        "post_mst":    ("post_MST",     "_post_mst"),
-        "optimization":("optimization", "_optimized"),
+        "original": {
+            "subdir": "original",
+            "suffix": ""                 # no suffix on original JSONs
+        },
+        "post_mst": {
+            "subdir": "post_MST",
+            "suffix": "_post_mst"        # lowercase matches filenames
+        },
+        "optimization": {
+            "subdir": "optimized",
+            "suffix": "_optimized"
+        }
     }
-
-    nx_graphs   = {p: {} for p in phases}
-    pp_networks = {p: {} for p in phases}
-    features    = {p: {} for p in phases}
-
-    for phase, (subdir, suffix) in phases.items():
-        feat_dir = os.path.join(base_directory, subdir, "graph_features")
-        for fn in os.listdir(feat_dir) if os.path.isdir(feat_dir) else []:
-            if fn.endswith(".pkl"):
-                base, _ = os.path.splitext(fn)
-                gid = base[:-len(suffix)] if base.endswith(suffix) else base
-                with open(os.path.join(feat_dir, fn), "rb") as f:
-                    features[phase][gid] = pkl.load(f)
-
-        nx_dir = os.path.join(base_directory, subdir, "networkx_graphs")
-        for fn in os.listdir(nx_dir) if os.path.isdir(nx_dir) else []:
-            base, ext = os.path.splitext(fn)
-            gid = base[:-len(suffix)] if base.endswith(suffix) else base
-            path = os.path.join(nx_dir, fn)
-            if ext == ".pkl":
-                with open(path, "rb") as f:
-                    nx_graphs[phase][gid] = pkl.load(f)
-            elif ext == ".graphml":
-                nx_graphs[phase][gid] = nx.read_graphml(path)
-
-        pp_dir = os.path.join(base_directory, subdir, "pandapower_networks")
-        for fn in os.listdir(pp_dir) if os.path.isdir(pp_dir) else []:
-            if fn.endswith(".json"):
-                base = fn[:-5]
-                gid = base[:-len(suffix)] if base.endswith(suffix) else base
-                s = open(os.path.join(pp_dir, fn)).read()
-                try:
-                    # pandapower ≥2.4
-                    pp_networks[phase][gid] = pp.from_json_string(s)
-                except:
-                    pp_networks[phase][gid] = json.loads(s)
-
-    return nx_graphs, pp_networks, features
-
-def create_pyg_data_from_nx(nx_graph, pp_network, loader_type=DataloaderType.DEFAULT,
-                            use_fallback_features=False, fallback_features=None):
-    # Validate that the graph has all required node attributes
-    if hasattr(pp_network, "bus"):
-        pp.runpp(pp_network)
-        for node in nx_graph.nodes():
+    nets = {phase: {} for phase in phases}
+    for phase, info in phases.items():
+        subdir = info["subdir"]
+        suffix = info["suffix"]
+        folder = os.path.join(base_directory, subdir, "pandapower_networks")
+        if not os.path.isdir(folder):
+            logger.warning("No folder for phase '%s': %s", phase, folder)
+            continue
+        for fn in os.listdir(folder):
+            if not fn.endswith(".json"):
+                continue
+            base = fn[:-5]
+            # strip only the exact suffix
+            if suffix and base.endswith(suffix):
+                gid = base[:-len(suffix)]
+            else:
+                gid = base
+            raw = open(os.path.join(folder, fn)).read()
             try:
-                res = pp_network.res_bus.loc[node]
-            except KeyError:
-                # fallback to row-by-position
-                res = pp_network.res_bus.iloc[int(node)]
-            nx_graph.nodes[node].update({
-                "p":     res.p_mw,
-                "q":     res.q_mvar,
-                "v":     res.vm_pu,
-                "theta": res.va_degree,
-            })
+                nets[phase][gid] = pp.from_json_string(raw)
+            except Exception:
+                raw_dict = json.loads(raw)
+                nets[phase][gid] = from_json_dict(raw_dict)
+        logger.info("Loaded %d pandapower nets for phase '%s'", len(nets[phase]), phase)
+    return nets
+
+# def create_pyg_data_from_nx(nx_graph, pp_network, loader_type=DataloaderType.DEFAULT,
+#                             use_fallback_features=False, fallback_features=None):
+#     # Validate that the graph has all required node attributes
+#     if hasattr(pp_network, "bus"):
+#         pp.runpp(pp_network)
+#         for node in nx_graph.nodes():
+#             try:
+#                 res = pp_network.res_bus.loc[node]
+#             except KeyError:
+#                 # fallback to row-by-position
+#                 res = pp_network.res_bus.iloc[int(node)]
+#             nx_graph.nodes[node].update({
+#                 "p":     res.p_mw,
+#                 "q":     res.q_mvar,
+#                 "v":     res.vm_pu,
+#                 "theta": res.va_degree,
+#             })
     
-    for node in nx_graph.nodes():
-        for attr in ["p", "q", "v", "theta"]:
-            if attr not in nx_graph.nodes[node]:
-                if use_fallback_features and fallback_features and "node_features" in fallback_features:
-                    node_feats = fallback_features["node_features"]
-                    if node in node_feats and attr in node_feats[node]:
-                        nx_graph.nodes[node][attr] = node_feats[node][attr]
-                    else:
-                        raise ValueError(f"Node {node} missing attribute '{attr}' and not found in fallback features")
-                else:
-                    raise ValueError(f"Node {node} missing required attribute '{attr}'")
+#     for node in nx_graph.nodes():
+#         for attr in ["p", "q", "v", "theta"]:
+#             if attr not in nx_graph.nodes[node]:
+#                 if use_fallback_features and fallback_features and "node_features" in fallback_features:
+#                     node_feats = fallback_features["node_features"]
+#                     if node in node_feats and attr in node_feats[node]:
+#                         nx_graph.nodes[node][attr] = node_feats[node][attr]
+#                     else:
+#                         raise ValueError(f"Node {node} missing attribute '{attr}' and not found in fallback features")
+#                 else:
+#                     raise ValueError(f"Node {node} missing required attribute '{attr}'")
 
-    # Validate that the graph has all required edge attributes
-    for u, v in nx_graph.edges():
-        for attr in ["R", "X", "switch_state"]:
-            if attr not in nx_graph[u][v]:
-                if use_fallback_features and fallback_features and "edge_features" in fallback_features:
-                    edge_feats = fallback_features["edge_features"]
-                    if (u, v) in edge_feats and attr in edge_feats[(u, v)]:
-                        nx_graph[u][v][attr] = edge_feats[(u, v)][attr]
-                    elif (v, u) in edge_feats and attr in edge_feats[(v, u)]:
-                        nx_graph[u][v][attr] = edge_feats[(v, u)][attr]
-                    else:
-                        raise ValueError(f"Edge {u}-{v} missing attribute '{attr}' and not found in fallback features")
-                else:
-                    raise ValueError(f"Edge {u}-{v} missing required attribute '{attr}'")
+#     # Validate that the graph has all required edge attributes
+#     for u, v in nx_graph.edges():
+#         for attr in ["R", "X", "switch_state"]:
+#             if attr not in nx_graph[u][v]:
+#                 if use_fallback_features and fallback_features and "edge_features" in fallback_features:
+#                     edge_feats = fallback_features["edge_features"]
+#                     if (u, v) in edge_feats and attr in edge_feats[(u, v)]:
+#                         nx_graph[u][v][attr] = edge_feats[(u, v)][attr]
+#                     elif (v, u) in edge_feats and attr in edge_feats[(v, u)]:
+#                         nx_graph[u][v][attr] = edge_feats[(v, u)][attr]
+#                     else:
+#                         raise ValueError(f"Edge {u}-{v} missing attribute '{attr}' and not found in fallback features")
+#                 else:
+#                     raise ValueError(f"Edge {u}-{v} missing required attribute '{attr}'")
 
-            if attr in ["R", "X"] and nx_graph[u][v][attr] == 0:
-                raise ValueError(f"Edge {u}-{v} has zero {attr} value which will cause division by zero")
+#             if attr in ["R", "X"] and nx_graph[u][v][attr] == 0:
+#                 raise ValueError(f"Edge {u}-{v} has zero {attr} value which will cause division by zero")
 
-    # Create the edge_index tensor
-    edges = list(nx_graph.edges())
-    if not edges:
-        raise ValueError("Graph has no edges")
-    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+#     # Create the edge_index tensor
+#     edges = list(nx_graph.edges())
+#     if not edges:
+#         raise ValueError("Graph has no edges")
+#     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
 
-    # Extract edge attributes
-    edge_attrs = []
-    for u, v in edges:
-        edge_attrs.append([
-            nx_graph[u][v]["R"],
-            nx_graph[u][v]["X"],
-            nx_graph[u][v]["switch_state"]
-        ])
-    edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
+#     # Extract edge attributes
+#     edge_attrs = []
+#     for u, v in edges:
+#         edge_attrs.append([
+#             nx_graph[u][v]["R"],
+#             nx_graph[u][v]["X"],
+#             nx_graph[u][v]["switch_state"]
+#         ])
+#     edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
 
-    # print("before loading:", pp_network[:100])
-    # print(type(pp_network))
-    # # Ensure pp_network is a dictionary before calling from_json_dict
-    # if isinstance(pp_network, str):
-    #     pp_network = json.loads(pp_network)
-    # pp_network_loaded = from_json_dict(pp_network)
-    # print("after loading:", str(pp_network_loaded)[:100])
-    # print(pp_network_loaded.line.iloc[0])
+#     # print("before loading:", pp_network[:100])
+#     # print(type(pp_network))
+#     # # Ensure pp_network is a dictionary before calling from_json_dict
+#     # if isinstance(pp_network, str):
+#     #     pp_network = json.loads(pp_network)
+#     # pp_network_loaded = from_json_dict(pp_network)
+#     # print("after loading:", str(pp_network_loaded)[:100])
+#     # print(pp_network_loaded.line.iloc[0])
 
-    # line_currents = torch.tensor(pp_network_loaded.res_line.loading_percent.values, dtype=torch.float)
-    # edge_attr = torch.cat([edge_attr, line_currents.unsqueeze(1)], dim=1)
+#     # line_currents = torch.tensor(pp_network_loaded.res_line.loading_percent.values, dtype=torch.float)
+#     # edge_attr = torch.cat([edge_attr, line_currents.unsqueeze(1)], dim=1)
 
-    # Extract node features
-    num_nodes = nx_graph.number_of_nodes()
-    node_features = []
-    nodes = list(nx_graph.nodes())
-    if set(nodes) != set(range(len(nodes))):
-        raise ValueError("Graph nodes must be consecutive integers starting from 0")
-    for node_idx in range(num_nodes):
-        node_data = nx_graph.nodes[node_idx]
-        node_features.append([
-            node_data["p"],
-            node_data["q"],
-            node_data["v"],
-            node_data["theta"]
-        ])
-    x = torch.tensor(node_features, dtype=torch.float)
+#     # Extract node features
+#     num_nodes = nx_graph.number_of_nodes()
+#     node_features = []
+#     nodes = list(nx_graph.nodes())
+#     if set(nodes) != set(range(len(nodes))):
+#         raise ValueError("Graph nodes must be consecutive integers starting from 0")
+#     for node_idx in range(num_nodes):
+#         node_data = nx_graph.nodes[node_idx]
+#         node_features.append([
+#             node_data["p"],
+#             node_data["q"],
+#             node_data["v"],
+#             node_data["theta"]
+#         ])
+#     x = torch.tensor(node_features, dtype=torch.float)
 
-    # Create the PyG Data object
+#     # Create the PyG Data object
+#     data = Data(
+#         x=x,
+#         edge_index=edge_index,
+#         edge_attr=edge_attr,
+#         num_nodes=num_nodes
+#     )
+
+#     # Create our custom DNRDataset with the data
+#     custom_data = DNRDataset(
+#         x=data.x, 
+#         edge_index=data.edge_index,
+#         edge_attr=data.edge_attr,
+#         num_nodes=data.num_nodes
+#     )
+
+#     # Add edge_y (switch state is the 3rd column - index 2)
+#     switch_state_column = 2
+#     custom_data.edge_y = edge_attr[:, switch_state_column].float()
+
+#     # Add matrices based on loader type
+#     if loader_type != DataloaderType.DEFAULT:
+#         conductance_matrix = calculate_conductance_matrix(nx_graph)
+#         coalesced = conductance_matrix.coalesce()
+#         custom_data.conductance_matrix_index = coalesced.indices()
+#         custom_data.conductance_matrix_values = coalesced.values()
+
+#         adjacency_matrix = calculate_adjacency_matrix(nx_graph)
+#         custom_data.adjacency_matrix_index = adjacency_matrix.coalesce().indices()
+#         custom_data.adjacency_matrix_values = adjacency_matrix.coalesce().values()
+
+#         switch_matrix = calculate_switch_matrix(nx_graph)
+#         custom_data.switch_matrix_index = switch_matrix.coalesce().indices()
+#         custom_data.switch_matrix_values = switch_matrix.coalesce().values()
+
+#     # Add PINN-specific matrices
+#     if loader_type == DataloaderType.PINN:
+#         laplacian_matrix = calculate_laplacian_matrix(nx_graph)
+#         custom_data.laplacian_matrix_index = laplacian_matrix.coalesce().indices()
+#         custom_data.laplacian_matrix_values = laplacian_matrix.coalesce().values()
+
+#         admittance_matrix = calculate_admittance_matrix(nx_graph)
+#         custom_data.admittance_matrix_index = admittance_matrix.coalesce().indices()
+#         custom_data.admittance_matrix_values = admittance_matrix.coalesce().values()
+
+#     return custom_data
+    
+# def create_pyg_dataset_old(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
+#     nx_graphs, pp_networks, features = load_graph_data(base_directory)
+    
+#     data_list = []
+#     successful_conversions = 0
+#     failed_conversions = 0
+    
+#     for graph_name in nx_graphs.keys():
+#         print(f"\n--- Processing graph: {graph_name} ---")
+#         nx_graph = nx_graphs[graph_name]
+        
+#         # Get features as fallback only if requested
+#         fallback_features = features.get(graph_name, None) if use_fallback_features else None
+        
+#         try:
+#             # Create PyG data directly from the NetworkX graph, let errors propagate
+#             data = create_pyg_data_from_nx(
+#                 nx_graph, 
+#                 pp_networks[graph_name],
+#                 loader_type, 
+#                 use_fallback_features=use_fallback_features,
+#                 fallback_features=fallback_features
+#             )
+            
+#             data_list.append(data)
+#             successful_conversions += 1
+#             print(f"Successfully converted graph: {graph_name}")
+                
+#         except Exception as e:
+#             failed_conversions += 1
+#             print(f"Error creating PyG data for {graph_name}: {e}")
+#             # Let the exception propagate if this is a critical error
+#             if "missing required attribute" in str(e) or "zero" in str(e):
+#                 raise  # Re-raise important errors
+    
+#     print(f"\nCreated {len(data_list)} PyG data objects")
+#     print(f"Successful conversions: {successful_conversions}")
+#     print(f"Failed conversions: {failed_conversions}")
+    
+#     return data_list
+# def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
+#     # new loader: returns dicts keyed by phase → {graph_id: obj}
+#     nx_all, pp_all, feat_all = load_graph_data(base_directory)
+#     data_list = []
+ 
+#     # loop phases original → post_mst → optimization
+#     for phase in ("original", "post_mst", "optimization"):
+#         for graph_name, nx_graph in nx_all[phase].items():
+#             nx_opt = nx_all["optimization"].get(graph_name)
+#             if nx_opt is None:
+#                 logger.warning("No optimized graph for %s, skipping y-labels", graph_name)
+#                 continue
+#             logger.info("Phase %s — Processing graph: %s", phase, graph_name)
+#             pp_net = pp_all[phase].get(graph_name)
+#             fallback = (feat_all[phase].get(graph_name)
+#                         if use_fallback_features else None)
+#             try:
+#                 # 1) build the usual Data object from original graph
+#                 data = create_pyg_data_from_nx(
+#                     nx_graph,
+#                     pp_net,
+#                     loader_type,
+#                     use_fallback_features=use_fallback_features,
+#                     fallback_features=fallback
+#                 )
+             
+#                 logger.debug("Successfully converted graph: %s", graph_name, phase)
+#                 # 2) compute ground-truth switch states on each original edge
+#                 #    (1 if that edge still exists in nx_opt, else 0)
+#                 opt_edges = {tuple(sorted(e)) for e in nx_opt.edges()}
+#                 # data.edge_index is 2×E; transpose to list of (u,v)
+#                 uv = data.edge_index.t().tolist()
+#                 y = torch.tensor([1.0 if tuple(sorted((u, v))) in opt_edges else 0.0
+#                                 for u, v in uv],
+#                                 dtype=torch.float)
+
+#                 data.y = y
+#                 data_list.append(data)
+#             except Exception as e:
+#                 logger.error("Error creating PyG data for %s: %s", graph_name, e)
+#                 # Let the exception propagate if this is a critical error
+#                 if "missing required attribute" in str(e) or "zero" in str(e):
+#                     raise
+#     print(f"Created {len(data_list)} Data objects for training")
+#     print(f"Successful conversions: {len(data_list)}")
+#     print(f"Failed conversions: {len(nx_all[phase]) - len(data_list)}")
+
+#     return data_list
+
+
+def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
+    """
+    Accepts either a pandapower Net, a JSON string, or a dict.
+    Converts to a Net if needed, then runs PF and extracts features.
+    """
+    # --- ensure we have a Net object ---
+    if isinstance(pp_net_raw, str):
+        # raw JSON string
+        pp_net = pp.from_json_string(pp_net_raw)
+    elif isinstance(pp_net_raw, dict):
+        # loaded JSON dict
+        pp_net = from_json_dict(pp_net_raw)
+    else:
+        # already a Net
+        pp_net = pp_net_raw
+
+    # --- run power flow ---
+    pp.runpp(pp_net)
+
+    # --- node features ---
+    bus_res = pp_net.res_bus
+    x = torch.tensor(
+        np.stack([
+            bus_res.p_mw.values,
+            bus_res.q_mvar.values,
+            bus_res.vm_pu.values,
+            bus_res.va_degree.values
+        ], axis=1),
+        dtype=torch.float
+    )
+
+    # --- edge list & features ---
+    lines = pp_net.line
+    from_b = lines.from_bus.values.astype(int)
+    to_b   = lines.to_bus.values.astype(int)
+    edge_index = torch.tensor([from_b, to_b], dtype=torch.long)
+
+    R = lines.r_ohm_per_km.values
+    X = lines.x_ohm_per_km.values
+    switches = pp_net.switch
+    sw_map = {(int(r.bus), int(r.element)): int(r.closed) for _, r in switches.iterrows()}
+    switch_state = [sw_map.get((u, v), 0) for u, v in zip(from_b, to_b)]
+    edge_attr = torch.tensor(np.stack([R, X, switch_state], axis=1), dtype=torch.float)
+
     data = Data(
         x=x,
         edge_index=edge_index,
         edge_attr=edge_attr,
-        num_nodes=num_nodes
+        num_nodes=x.size(0)
     )
+    return data
 
-    # Create our custom DNRDataset with the data
-    custom_data = DNRDataset(
-        x=data.x, 
-        edge_index=data.edge_index,
-        edge_attr=data.edge_attr,
-        num_nodes=data.num_nodes
-    )
+def create_pyg_dataset_simple(
+    base_directory,
+    loader_type: DataloaderType = DataloaderType.DEFAULT,
+    feature_phase_prob: float = 0.5,
+    seed: int = None
+):
+    pp_all = load_pp_networks(base_directory)
+    if seed is not None:
+        random.seed(seed)
 
-    # Add edge_y (switch state is the 3rd column - index 2)
-    switch_state_column = 2
-    custom_data.edge_y = edge_attr[:, switch_state_column].float()
-
-    # Add matrices based on loader type
-    if loader_type != DataloaderType.DEFAULT:
-        conductance_matrix = calculate_conductance_matrix(nx_graph)
-        coalesced = conductance_matrix.coalesce()
-        custom_data.conductance_matrix_index = coalesced.indices()
-        custom_data.conductance_matrix_values = coalesced.values()
-
-        adjacency_matrix = calculate_adjacency_matrix(nx_graph)
-        custom_data.adjacency_matrix_index = adjacency_matrix.coalesce().indices()
-        custom_data.adjacency_matrix_values = adjacency_matrix.coalesce().values()
-
-        switch_matrix = calculate_switch_matrix(nx_graph)
-        custom_data.switch_matrix_index = switch_matrix.coalesce().indices()
-        custom_data.switch_matrix_values = switch_matrix.coalesce().values()
-
-    # Add PINN-specific matrices
-    if loader_type == DataloaderType.PINN:
-        laplacian_matrix = calculate_laplacian_matrix(nx_graph)
-        custom_data.laplacian_matrix_index = laplacian_matrix.coalesce().indices()
-        custom_data.laplacian_matrix_values = laplacian_matrix.coalesce().values()
-
-        admittance_matrix = calculate_admittance_matrix(nx_graph)
-        custom_data.admittance_matrix_index = admittance_matrix.coalesce().indices()
-        custom_data.admittance_matrix_values = admittance_matrix.coalesce().values()
-
-    return custom_data
-    
-def create_pyg_dataset_old(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
-    nx_graphs, pp_networks, features = load_graph_data(base_directory)
-    
     data_list = []
-    successful_conversions = 0
-    failed_conversions = 0
-    
-    for graph_name in nx_graphs.keys():
-        print(f"\n--- Processing graph: {graph_name} ---")
-        nx_graph = nx_graphs[graph_name]
-        
-        # Get features as fallback only if requested
-        fallback_features = features.get(graph_name, None) if use_fallback_features else None
-        
-        try:
-            # Create PyG data directly from the NetworkX graph, let errors propagate
-            data = create_pyg_data_from_nx(
-                nx_graph, 
-                pp_networks[graph_name],
-                loader_type, 
-                use_fallback_features=use_fallback_features,
-                fallback_features=fallback_features
-            )
-            
-            data_list.append(data)
-            successful_conversions += 1
-            print(f"Successfully converted graph: {graph_name}")
-                
-        except Exception as e:
-            failed_conversions += 1
-            print(f"Error creating PyG data for {graph_name}: {e}")
-            # Let the exception propagate if this is a critical error
-            if "missing required attribute" in str(e) or "zero" in str(e):
-                raise  # Re-raise important errors
-    
-    print(f"\nCreated {len(data_list)} PyG data objects")
-    print(f"Successful conversions: {successful_conversions}")
-    print(f"Failed conversions: {failed_conversions}")
-    
-    return data_list
-def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
-    # new loader: returns dicts keyed by phase → {graph_id: obj}
-    nx_all, pp_all, feat_all = load_graph_data(base_directory)
-    data_list = []
+    for gid, net_orig in pp_all["original"].items():
+        net_opt = pp_all["optimization"].get(gid)
+        if net_opt is None:
+            logger.warning(f"No optimized net for {gid}, skipping")
+            continue
 
-    # loop phases original → post_mst → optimization
-    for phase in ("original", "post_mst", "optimization"):
-        for graph_name, nx_graph in nx_all[phase].items():
-            nx_opt = nx_all["optimization"].get(graph_name)
-            if nx_opt is None:
-                logger.warning("No optimized graph for %s, skipping y-labels", graph_name)
-                continue
-            logger.info("Phase %s — Processing graph: %s", phase, graph_name)
-            pp_net = pp_all[phase].get(graph_name)
-            fallback = (feat_all[phase].get(graph_name)
-                        if use_fallback_features else None)
-            try:
-                # 1) build the usual Data object from original graph
-                data = create_pyg_data_from_nx(
-                    nx_graph,
-                    pp_net,
-                    loader_type,
-                    use_fallback_features=use_fallback_features,
-                    fallback_features=fallback
-                )
-             
-                logger.debug("Successfully converted graph: %s", graph_name, phase)
-                # 2) compute ground-truth switch states on each original edge
-                #    (1 if that edge still exists in nx_opt, else 0)
-                opt_edges = {tuple(sorted(e)) for e in nx_opt.edges()}
-                # data.edge_index is 2×E; transpose to list of (u,v)
-                uv = data.edge_index.t().tolist()
-                y = torch.tensor([1.0 if tuple(sorted((u, v))) in opt_edges else 0.0
-                                for u, v in uv],
-                                dtype=torch.float)
+        # 1) pick original vs post_mst for X-features
+        phase = "post_mst" if random.random() < feature_phase_prob else "original"
+        data_x = create_pyg_from_pp(pp_all[phase][gid], loader_type)
 
-                data.y = y
-                data_list.append(data)
-            except Exception as e:
-                logger.error("Error creating PyG data for %s: %s", graph_name, e)
-                # Let the exception propagate if this is a critical error
-                if "missing required attribute" in str(e) or "zero" in str(e):
-                    raise
-    print(f"Created {len(data_list)} Data objects for training")
+        # 2) build y-labels from optimized net
+        data_y = create_pyg_from_pp(net_opt, loader_type)
+        data_x.edge_y = data_y.edge_attr[:, 2]    # switch_state
+        data_x.node_y_voltage = data_y.x[:, 2]    # vm_pu
+
+        data_list.append(data_x)
+
+    logger.info(f"Built {len(data_list)} Data objects (simple loader)")
     return data_list
 
 def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True, **kwargs):
@@ -487,11 +636,11 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
 def create_data_loaders(base_directory,secondary_directory=None, loader_type=DataloaderType.DEFAULT, 
                        batch_size=32, max_nodes=1000, max_edges=5000,
                         transform=None, train_ratio=0.8, seed=0,batching_type="standard", num_workers=1,):
-    dataset = create_pyg_dataset(base_directory, loader_type)
+    dataset = create_pyg_dataset_simple(base_directory, loader_type)
     if secondary_directory:
         print("==================================================","\n start loading secondary data")
-        val_real_set = create_pyg_dataset(os.path.join(secondary_directory, "validation"), loader_type)
-        test_set = create_pyg_dataset(os.path.join(secondary_directory, "test"), loader_type)
+        val_real_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "validation"), loader_type)
+        test_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "test"), loader_type)
 
     
     if transform:
@@ -537,7 +686,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
-    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\transformed_subgraphs_27032025_gt", help="Base directory containing the train/validation folders")
+    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test", help="Base directory containing the train/validation folders")
     parser.add_argument("--secondary_dir", type=str, #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",
                         help="Secondary directory containing the test/validation folders")
     parser.add_argument("--loader_type", type=str, default="default", 
