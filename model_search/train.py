@@ -2,16 +2,21 @@ import torch
 import torch.nn as nn
 import wandb
 import psutil
+import logging 
+
+logger = logging.getLogger(__name__)
 
 def train(model, train_loader, optimizer, criterion, device):
     model.train()
     running_loss = 0.0
     running_local_losses = {}
+    local_losses = {}  
+    loss = torch.tensor(0.0, device=device,requires_grad=True)
     batch_count = 0
-    torch.autograd.set_detect_anomaly(True)
+    #torch.autograd.set_detect_anomaly(True)
     for data in train_loader:
         if data is None:
-            print("Warning: Data is None, skipping this batch.")
+            logger.info("Warning: Data is None, skipping this batch.")
             continue
 
         data = data.to(device)
@@ -33,26 +38,26 @@ def train(model, train_loader, optimizer, criterion, device):
                  # Ensure shapes match before calculating loss
                 if predicted_scores.shape == target_switches.shape:
                      # Criterion expects input and target tensors
-                     loss = criterion(predicted_scores, target_switches.float()) # Ensure target is float if needed by criterion
+                     loss = criterion(predicted_scores, target_switches.float()) 
                      accuracy = (predicted_scores.round() == target_switches).float().mean()
-                     local_losses = {"accuracy": accuracy} # Initialize local_losses if your criterion doesn't return them
+                     local_losses = {"accuracy": accuracy} 
                 else:
                      # Handle shape mismatch - this might indicate a problem in your model or data
-                     print(f"Warning: Shape mismatch after squeezing: predicted scores ({predicted_scores.shape}) and target switches ({target_switches.shape}). Skipping loss calculation for this batch.")
+                     logger.debug(f"Warning: Shape mismatch after squeezing: predicted scores ({predicted_scores.shape}) and target switches ({target_switches.shape}). Skipping loss calculation for this batch.")
                      # Add debug prints for the batch causing the shape mismatch
-                     print("--- Debugging Shape Mismatch Batch ---")
-                     print("Batch keys:", data.keys())
-                     print("Batch x shape:", data.x.shape)
-                     print("Batch edge_index shape:", data.edge_index.shape)
-                     print("Batch edge_attr shape:", data.edge_attr.shape)
-                     if hasattr(data, 'batch'): print("Batch 'batch' tensor shape:", data.batch.shape)
-                     if hasattr(data, 'ptr'): print("Batch 'ptr' tensor shape:", data.ptr.shape)
-                     print("--------------------------------------")
+                     logger.debug("--- Debugging Shape Mismatch Batch ---")
+                     logger.debug("Batch keys:", data.keys())
+                     logger.debug("Batch x shape:", data.x.shape)
+                     logger.debug("Batch edge_index shape:", data.edge_index.shape)
+                     logger.debug("Batch edge_attr shape:", data.edge_attr.shape)
+                     if hasattr(data, 'batch'): logger.debug("Batch 'batch' tensor shape:", data.batch.shape)
+                     if hasattr(data, 'ptr'): logger.debug("Batch 'ptr' tensor shape:", data.ptr.shape)
+                     logger.debug("--------------------------------------")
 
                      loss = torch.tensor(0.0, requires_grad=True) # Assign a zero loss to continue training
                      local_losses = {}
             else:
-                 print("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
+                 logger.debug("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
                  loss = torch.tensor(0.0, requires_grad=True)
                  local_losses = {}
 
@@ -81,14 +86,6 @@ def compute_switch_metrics(
         threshold: float = 0.5,
         eps: float = 1e-8,
 ) -> dict:
-    """
-    scores   –  shape [..., 1] or [...]   (logits or probabilities)
-    targets  –  shape [...]               (0 / 1 labels, dtype torch.float or long)
-
-    Returns a dict with:
-      accuracy, precision, recall, f1, jaccard, dice,
-      tp / fp / fn / tn (as *floats* so they play nicely with .item()).
-    """
 
     # --- squeeze any trailing singleton dimension --------------------------------
     if scores.ndim == targets.ndim + 1 and scores.size(-1) == 1:
@@ -130,7 +127,10 @@ def test(model, loader, criterion, device):
     model.eval()
     running_loss = 0.0
     running_local_losses = {}
+    local_losses = {}  
+    loss = torch.tensor(0.0, device=device,requires_grad=True)
     batch_count = 0
+    
 
     total_switched = 0
     total_edges = 0
@@ -138,7 +138,7 @@ def test(model, loader, criterion, device):
     with torch.no_grad():
         for data in loader:
             if data is None:
-                print("Warning: Data is None, skipping this batch.")
+                logger.info("Warning: Data is None, skipping this batch.")
                 continue
 
             data = data.to(device)
@@ -166,21 +166,21 @@ def test(model, loader, criterion, device):
                             running_local_losses[k] = running_local_losses.get(k, 0.0) + v# Initialize local_losses if your criterion doesn't return them
                     else:
                         # Handle shape mismatch - this might indicate a problem in your model or data
-                        print(f"Warning: Shape mismatch after squeezing: predicted scores ({predicted_scores.shape}) and target switches ({target_switches.shape}). Skipping loss calculation for this batch.")
+                        logger.debug(f"Warning: Shape mismatch after squeezing: predicted scores ({predicted_scores.shape}) and target switches ({target_switches.shape}). Skipping loss calculation for this batch.")
                         # Add debug prints for the batch causing the shape mismatch
-                        print("--- Debugging Shape Mismatch Batch ---")
-                        print("Batch keys:", data.keys())
-                        print("Batch x shape:", data.x.shape)
-                        print("Batch edge_index shape:", data.edge_index.shape)
-                        print("Batch edge_attr shape:", data.edge_attr.shape)
-                        if hasattr(data, 'batch'): print("Batch 'batch' tensor shape:", data.batch.shape)
-                        if hasattr(data, 'ptr'): print("Batch 'ptr' tensor shape:", data.ptr.shape)
-                        print("--------------------------------------")
+                        logger.debug("--- Debugging Shape Mismatch Batch ---")
+                        logger.debug("Batch keys:", data.keys())
+                        logger.debug("Batch x shape:", data.x.shape)
+                        logger.debug("Batch edge_index shape:", data.edge_index.shape)
+                        logger.debug("Batch edge_attr shape:", data.edge_attr.shape)
+                        if hasattr(data, 'batch'): logger.debug("Batch 'batch' tensor shape:", data.batch.shape)
+                        if hasattr(data, 'ptr'): logger.debug("Batch 'ptr' tensor shape:", data.ptr.shape)
+                        logger.debug("--------------------------------------")
 
                         loss = torch.tensor(0.0, requires_grad=True) # Assign a zero loss to continue training
                         local_losses = {}
                 else:
-                    print("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
+                    logger.warning("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
                     loss = torch.tensor(0.0, requires_grad=True)
                     local_losses = {}
 
@@ -212,17 +212,17 @@ def test(model, loader, criterion, device):
                          total_switched += batch_switched
                          total_edges += original_switch_states.numel()
                     else:
-                         print(f"Warning: Mismatched shapes for switch state comparison: model output {updated_switch_scores.shape}, target {original_switch_states.shape}. Skipping switch count for this batch.")
+                         logger.warning(f"Warning: Mismatched shapes for switch state comparison: model output {updated_switch_scores.shape}, target {original_switch_states.shape}. Skipping switch count for this batch.")
                          # Still increment batch_count even if switch comparison fails
 
 
     if batch_count == 0:
-        print("Warning: No valid batches were processed in the loader.")
+        logger.warning("Warning: No valid batches were processed in the loader.")
         return 0.0, {}
     else:
         avg_loss = running_loss / batch_count
         log_dict = {"test_loss": avg_loss}
-        for key, value in running_local_losses.items():
+        for key, value in metrics.items():
             log_dict[f"test_{key}"] = value / batch_count
 
         # Calculate overall percentage of switches changed.

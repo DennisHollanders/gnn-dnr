@@ -28,13 +28,8 @@ if src_path not in sys.path:
 
 from electrify_subgraph import extract_node_features, extract_edge_features
 
+CACHE_ROOT_DIR = Path("data/cached_datasets")
 
-# ─── configure root logger ─────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 class DataloaderType(Enum):
@@ -172,30 +167,7 @@ def load_pp_networks(base_directory):
         }
     }
     nets = {phase: {} for phase in phases}
-    # for phase, info in phases.items():
-    #     subdir = info["subdir"]
-    #     suffix = info["suffix"]
-    #     folder = os.path.join(base_directory, subdir, "pandapower_networks")
-    #     if not os.path.isdir(folder):
-    #         logger.warning("No folder for phase '%s': %s", phase, folder)
-    #         continue
-    #     for fn in os.listdir(folder):
-    #         if not fn.endswith(".json"):
-    #             continue
-    #         base = fn[:-5]
-    #         # strip only the exact suffix
-    #         if suffix and base.endswith(suffix):
-    #             gid = base[:-len(suffix)]
-    #         else:
-    #             gid = base
-    #         raw = open(os.path.join(folder, fn)).read()
-    #         try:
-    #             nets[phase][gid] = pp.from_json_string(raw)
-    #         except Exception:
-    #             raw_dict = json.loads(raw)
-    #             nets[phase][gid] = from_json_dict(raw_dict)
-    #     logger.info("Loaded %d pandapower nets for phase '%s'", len(nets[phase]), phase)
-    # return nets
+
     nets: dict[str, dict[str, pp.pandapowerNet]] = {p: {} for p in phases}
 
     for phase, info in phases.items():
@@ -218,7 +190,6 @@ def load_pp_networks(base_directory):
             path = os.path.join(folder, fn)
 
             # ── step 1 – normal reader ───────────────────────────────
-            print(type(path))
             try:
                 net = pp.from_json(path)
             except Exception:
@@ -226,7 +197,6 @@ def load_pp_networks(base_directory):
                 try:
                     with open(path) as f:
                         raw = f.read()
-                        print(type(raw))
 
                     # case a) JSON string encoded twice
                     if raw.startswith('"') and raw.endswith('"'):
@@ -362,8 +332,8 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             self.indices = list(range(len(dataset)))
         
             self.graph_sizes = [(d.num_nodes, d.num_edges) for d in dataset]
-            logger.info("Sampler initialized: %d graphs; node_limit=%d, edge_limit=%d",
-                        len(self.indices), max_nodes, max_edges)
+            #logger.info("Sampler initialized: %d graphs; node_limit=%d, edge_limit=%d",
+            #            len(self.indices), max_nodes, max_edges)
 
         def __iter__(self):
             # Get indices of all graphs
@@ -372,9 +342,8 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             # Shuffle if required
             if self.shuffle:
                 torch.manual_seed(int(torch.empty((), dtype=torch.int64).random_().item()))
-                torch.randperm(len(indices), out=torch.tensor(indices))
                 indices = torch.randperm(len(indices)).tolist()
-                logger.debug("Shuffled indices: %s", indices)
+                #logger.debug("Shuffled indices: %s", indices)
             
             # Create batches
             current_batch = []
@@ -388,10 +357,10 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
                      current_edges + edges > self.max_edges) and 
                     len(current_batch) > 0):
                     # Yield the current batch
-                    logger.debug("Yielding batch of %d graphs (nodes=%d, edges=%d)",
-                        len(current_batch),           # <-- was len(batch)
-                        current_nodes,
-                        current_edges)
+                    #logger.debug("Yielding batch of %d graphs (nodes=%d, edges=%d)",
+                        # len(current_batch),           # <-- was len(batch)
+                        # current_nodes,
+                        # current_edges)
                     yield current_batch
                     # Start a new batch with the current graph
                     current_batch = [idx]
@@ -405,10 +374,10 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             
             # Yield the last batch if it's not empty
             if current_batch:
-                logger.debug(
-                    "Yielding final batch of %d graphs",
-                    len(current_batch)        # <-- was len(batch)
-                )
+                # logger.debug(
+                #     "Yielding final batch of %d graphs",
+                #     len(current_batch)        # <-- was len(batch)
+                # )
                 yield current_batch
                 
         def __len__(self):
@@ -418,7 +387,7 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             total_nodes = sum(nodes for nodes, _ in self.graph_sizes)
             total_edges = sum(edges for _, edges in self.graph_sizes)
             est = max(1, min(total_nodes // self.max_nodes + 1, total_edges // self.max_edges + 1))
-            logger.debug("Sampler __len__ estimate: %d", est)
+            #logger.debug("Sampler __len__ estimate: %d", est)
             return est
     
     # Create the batch sampler
@@ -440,309 +409,217 @@ def create_neighbor_loaders(dataset, num_neighbors=[15, 10], batch_size=1024, **
         **kwargs,
     )
 
-def create_data_loaders(
-    base_directory,
-    secondary_directory=None,
-    loader_type: DataloaderType = DataloaderType.DEFAULT,
-    batch_size=32, max_nodes=1000, max_edges=5000,
-    transform=None, train_ratio=0.85, seed=0,
-    batching_type="standard", num_workers=1,
+
+def _get_cache_path_suffix(original_path_str: str) -> Path:
+    """Helper function to determine the suffix for the cache path."""
+    original_path = Path(original_path_str)
+    if original_path.parts and original_path.parts[0].lower() == "data":
+        return Path(*original_path.parts[1:])
+    return original_path
+
+def _load_or_create_dataset(
+    dataset_name: str,
+    input_data_path_str: str,
+    dataset_cache_file_path: Path, # Accepts the full path to the cache file
+    loader_type: DataloaderType,
+    seed: int
 ):
-    """
-    Creates data loaders for power network data with caching datasets.
-    Generates and saves datasets if cache is not found.
-    """
-    # Optional: check_directory_structure(base_directory, secondary_directory)
-    # It's good practice, uncomment if desired.
+    """Handles loading a single dataset from cache or creating and caching it."""
+    dataset_cache_dir = dataset_cache_file_path.parent # Derive dir from full file path
+    dataset_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    loaded_dataset = []
 
-    # Use a generator for reproducible splits
+    if os.path.exists(dataset_cache_file_path):
+        logger.info(f"Loading {dataset_name} dataset from cache: {dataset_cache_file_path}")
+        try:
+            loaded_dataset = torch.load(dataset_cache_file_path, weights_only=False)
+            if not isinstance(loaded_dataset, list):
+                loaded_dataset = list(loaded_dataset)
+            logger.info(f"{dataset_name} dataset loaded from cache ({len(loaded_dataset)} samples).")
+        except Exception as e:
+            logger.error(f"Failed to load {dataset_name} dataset from cache: {e}. Regenerating.", exc_info=True)
+            loaded_dataset = [] # Ensure it's an empty list to trigger generation
+    
+    if not loaded_dataset: # If cache miss or loading failed
+        logger.info(f"Generating {dataset_name} dataset for: {input_data_path_str}")
+        created_data = create_pyg_dataset_simple(input_data_path_str, loader_type, seed=seed)
+        loaded_dataset = created_data if created_data is not None else []
+
+        if not loaded_dataset and input_data_path_str: # Check if still empty after attempting generation
+            logger.error(f"Failed to generate {dataset_name} dataset for {input_data_path_str}.")
+            return [] 
+        
+        try:
+            logger.info(f"Saving generated {dataset_name} dataset to cache: {dataset_cache_file_path}")
+            torch.save(loaded_dataset, dataset_cache_file_path)
+            logger.info(f"{dataset_name} dataset saved to cache.")
+        except Exception as e:
+            logger.error(f"Failed to save {dataset_name} dataset to cache: {e}", exc_info=True)
+            # Proceed with in-memory data even if saving fails
+
+    return loaded_dataset
+
+
+def create_data_loaders(
+    base_directory: str,
+    secondary_directory: str = None,
+    loader_type: DataloaderType = DataloaderType.DEFAULT,
+    batch_size: int = 32,
+    max_nodes: int = 1000,
+    max_edges: int = 5000,
+    transform=None,
+    train_ratio: float = 0.85,
+    seed: int = 0,
+    batching_type: str = "standard",
+    num_workers: int = 0,
+):
     generator = torch.Generator().manual_seed(seed)
-    torch.manual_seed(seed) # Ensure other random operations (like feature_phase_prob) are also reproducible
-    random.seed(seed) # Seed random module used in create_pyg_dataset_simple
+    torch.manual_seed(seed)
+    random.seed(seed)
 
+    CACHE_ROOT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Define cache directory and paths
-    # Use a cache directory that incorporates relevant parameters for uniqueness
-    base_dir_part = Path(base_directory).name.replace('.', '_').replace('/', '_').replace('\\', '_')
-    # Handle cases where base_directory itself is a root or drive letter
-    if not base_dir_part:
-         base_dir_part = Path(base_directory).stem.replace('.', '_') if Path(base_directory).stem else "root"
+    # --- Synthetic Dataset (from base_directory, for train/val_synthetic split) ---
+    # The cache directory key is derived from the parent of the specific data folder (e.g., parent of 'test')
+    # base_directory is like 'data/SET_NAME/test'
+    # We want the cache key for the set, which is 'SET_NAME'
+    base_set_name_path_str = str(Path(base_directory).parent) 
+    base_set_cache_key = _get_cache_path_suffix(base_set_name_path_str)
+    
+    synthetic_cache_dir = CACHE_ROOT_DIR / base_set_cache_key
+    synthetic_cache_filename = f"{Path(base_directory).name}.pt" # e.g., "test.pt"
+    synthetic_cache_file_path = synthetic_cache_dir / synthetic_cache_filename
 
-    secondary_dir_part = ""
+    synthetic_dataset = _load_or_create_dataset(
+        dataset_name="synthetic (from base_dir)",
+        input_data_path_str=base_directory,
+        dataset_cache_file_path=synthetic_cache_file_path,
+        loader_type=loader_type,
+        seed=seed
+    )
+    if not synthetic_dataset and base_directory:
+        logger.error("Base dataset (for synthetic) generation failed. Cannot proceed.")
+        return None, None, None, None
+
+    # --- Real Validation Set (from secondary_directory/validation) ---
+    val_real_set = []
     if secondary_directory:
-        secondary_dir_part = Path(secondary_directory).name.replace('.', '_').replace('/', '_').replace('\\', '_')
-        if not secondary_dir_part:
-            secondary_dir_part = Path(secondary_directory).stem.replace('.', '_') if Path(secondary_directory).stem else "root"
+        # secondary_directory is like 'data/SET_NAME'
+        secondary_set_cache_key = _get_cache_path_suffix(secondary_directory)
+        
+        val_real_input_path_str = str(Path(secondary_directory) / "validation")
+        val_real_cache_dir = CACHE_ROOT_DIR / secondary_set_cache_key
+        val_real_cache_filename = "validation.pt"
+        val_real_cache_file_path = val_real_cache_dir / val_real_cache_filename
 
-    # Incorporate parameters that change dataset generation/split
-    cache_subdir_name_parts = [base_dir_part]
-    if secondary_directory:
-        cache_subdir_name_parts.append(secondary_dir_part)
-
-    cache_subdir_name_parts.extend([
-         loader_type.value,
-         f"s{seed}",
-         f"r{int(train_ratio*100)}"
-    ])
-    cache_subdir_name = "_".join(cache_subdir_name_parts)
-
-
-    cache_dir = Path("data") / "cached_datasets" / cache_subdir_name
-    cache_dir.mkdir(parents=True, exist_ok=True) # Ensure cache directory exists
-
-
-    # Define specific file paths within the cache directory
-    # Use consistent names regardless of input directory names within the cache folder
-    synthetic_dataset_path = cache_dir / "synthetic_dataset.pt"
-    val_real_dataset_path = cache_dir / "val_real_dataset.pt"
-    test_dataset_path = cache_dir / "test_dataset.pt"
-
-
-    # Initialize dataset variables - they will be populated from cache or generation
-    synthetic_dataset = None # This holds the full base dataset before splitting
-    train_set = None
-    val_synthetic_set = None
-    val_real_set = None
-    test_set = None
-
-    # 2. Check cache availability for base and secondary datasets separately
-    cache_found_base = os.path.exists(synthetic_dataset_path)
-    cache_found_secondary = False
-    if secondary_directory:
-         cache_found_secondary = os.path.exists(val_real_dataset_path) and os.path.exists(test_dataset_path)
-
-
-    logger.info(f"Cache found for base data ({synthetic_dataset_path}): {cache_found_base}")
-    if secondary_directory:
-         logger.info(f"Cache found for secondary data ({val_real_dataset_path}, {test_dataset_path}): {cache_found_secondary}")
-
-
-    # 3. Load or Generate Base Data
-    if cache_found_base:
-        logger.info(f"Cache found for base data at {synthetic_dataset_path}, loading dataset...")
-        try:
-            # **FIX:** Use the correct path and disable weights_only
-            synthetic_dataset = torch.load(synthetic_dataset_path, weights_only=False)
-            logger.info(f"Base dataset loaded from cache ({len(synthetic_dataset) if synthetic_dataset is not None else 0} samples).")
-            if not isinstance(synthetic_dataset, list): # Ensure it's a list after loading
-                 synthetic_dataset = list(synthetic_dataset)
-                 logger.warning("Loaded base dataset was not a list, converted to list.")
-        except Exception as e:
-            logger.error(f"Failed to load base dataset from cache: {e}. Proceeding with data generation.", exc_info=True) # Log traceback
-            synthetic_dataset = None # Ensure it's None to trigger generation
-
-    if synthetic_dataset is None or not synthetic_dataset: # If cache failed, not found, or loaded empty list
-        logger.info("==================================================")
-        logger.info("Start loading and generating base data") # **FIX:** Corrected logging message
-        synthetic_dataset = create_pyg_dataset_simple(base_directory, loader_type, seed=seed) # Pass seed for internal randomness
-
-        if not synthetic_dataset:
-            logger.error("Failed to generate base dataset. Cannot proceed.")
-            # Return None for all loaders
-            return None, None, None, None
-
-        # Save the generated base dataset
-        logger.info(f"Saving generated base dataset to cache at {synthetic_dataset_path}...")
-        try:
-            # **FIX:** Save the generated dataset
-            torch.save(synthetic_dataset, synthetic_dataset_path)
-            logger.info("Base dataset saved to cache.")
-        except Exception as e:
-            logger.error(f"Failed to save base dataset to cache: {e}", exc_info=True) # Log traceback
-
-
-    # 4. Load or Generate Secondary Data
-    if secondary_directory:
-        if cache_found_secondary:
-            logger.info(f"Cache found for secondary data at {val_real_dataset_path} and {test_dataset_path}, loading datasets...")
-            try:
-                # **FIX:** Use the correct paths and disable weights_only
-                val_real_set = torch.load(val_real_dataset_path, weights_only=False)
-                test_set = torch.load(test_dataset_path, weights_only=False)
-                logger.info(f"Secondary datasets loaded from cache (Val:{len(val_real_set) if val_real_set is not None else 0}, Test:{len(test_set) if test_set is not None else 0} samples).")
-                # Ensure they are lists after loading
-                if not isinstance(val_real_set, list): val_real_set = list(val_real_set)
-                if not isinstance(test_set, list): test_set = list(test_set)
-            except Exception as e:
-                 logger.error(f"Failed to load secondary datasets from cache: {e}. Proceeding with data generation.", exc_info=True) # Log traceback
-                 val_real_set = None # Ensure None to trigger generation
-                 test_set = None
-        # else: # Cache not found - handled by the generation block below
-
-
-        if val_real_set is None or test_set is None or not val_real_set or not test_set: # If cache failed, not found, or loaded empty lists
-            logger.info("==================================================")
-            logger.info("Start loading and generating secondary data") # **FIX:** Corrected logging message
-            val_real_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "validation"), loader_type, seed=seed) # Pass seed? Depends if randomness matters for secondary data generation.
-            test_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "test"), loader_type, seed=seed) # Pass seed?
-
-            # Ensure lists even if None was returned by create_pyg_dataset_simple
-            if val_real_set is None: val_real_set = []
-            if test_set is None: test_set = []
-
-            # Save the generated secondary datasets
-            logger.info(f"Saving generated secondary datasets to cache at {val_real_dataset_path} and {test_dataset_path}...")
-            try:
-                # **FIX:** Save the generated datasets
-                torch.save(val_real_set, val_real_dataset_path)
-                torch.save(test_set, test_dataset_path)
-                logger.info("Secondary datasets saved to cache.")
-            except Exception as e:
-                logger.error(f"Failed to save secondary datasets to cache: {e}", exc_info=True) # Log traceback
-    else: # No secondary_directory provided
-        val_real_set = [] # Explicitly ensure empty lists
-        test_set = []
-        logger.info("No secondary directory provided. Real validation and test datasets are empty.")
-
-
-    # 5. Perform Train/Validation Split on the Base Dataset
-    # This happens *after* the base dataset is guaranteed to be loaded or generated.
-    logger.info("==================================================") # **FIX:** Corrected logging message
-    logger.info("Performing train/validation split on base dataset")
-
-    # Ensure synthetic_dataset is valid before splitting
-    if not synthetic_dataset or not isinstance(synthetic_dataset, list):
-         logger.error("Base synthetic dataset is empty or not a list. Cannot perform split.")
-         # Return None for loaders or handle appropriately
-         train_set = [] # Ensure empty lists for consistency
-         val_synthetic_set = []
+        val_real_set = _load_or_create_dataset(
+            dataset_name="real validation",
+            input_data_path_str=val_real_input_path_str,
+            dataset_cache_file_path=val_real_cache_file_path,
+            loader_type=loader_type,
+            seed=seed
+        )
     else:
-        train_size = int(train_ratio * len(synthetic_dataset))
+        logger.info("No secondary directory provided for real validation set.")
 
-        # Handle edge cases for splitting small datasets
+    test_set = [] 
+    if secondary_directory:
+        # secondary_directory is like 'data/SET_NAME_SECONDARY'
+        secondary_set_cache_key = _get_cache_path_suffix(secondary_directory)
+        
+        test_input_path_str = str(Path(secondary_directory) / "test")
+        test_cache_dir = CACHE_ROOT_DIR / secondary_set_cache_key # Same cache dir as val_real_set
+        test_cache_filename = "test.pt" # Specific filename for this dataset
+        test_cache_file_path = test_cache_dir / test_cache_filename
+
+        test_set = _load_or_create_dataset(
+            dataset_name="test set (from secondary_dir/test)",
+            input_data_path_str=test_input_path_str,
+            dataset_cache_file_path=test_cache_file_path,
+            loader_type=loader_type,
+            seed=seed
+        )
+        if not test_set: # Check if test set loading/generation failed
+            logger.warning(f"Test set from {test_input_path_str} could not be loaded/generated.")
+    else:
+        logger.info("No secondary directory provided, so no dedicated test set will be loaded from it for the 'test_set' variable.")
+        # test_set remains [] if secondary_directory is None
+
+    # --- Perform Train/Validation Split on the Base Dataset ---
+    train_set = []
+    val_synthetic_set = []
+    if synthetic_dataset:
+        logger.info("Performing train/validation split on base dataset (synthetic_dataset).")
+        train_size = int(train_ratio * len(synthetic_dataset))
+        
         if len(synthetic_dataset) < 2:
-             logger.warning("Synthetic dataset size is less than 2. Cannot perform train/val split.")
-             train_set = list(synthetic_dataset) # Use the whole dataset for training or handle as needed
-             val_synthetic_set = [] # Empty val set
-        elif train_size == 0:
-             logger.warning("Calculated train set size is 0. Entire synthetic dataset used for validation.")
-             train_set = [] # Empty train set
-             val_synthetic_set = list(synthetic_dataset)
-        elif train_size == len(synthetic_dataset):
-             logger.warning("Calculated train set size equals dataset size. No synthetic validation set.")
-             train_set = list(synthetic_dataset)
-             val_synthetic_set = [] # Empty val set
-        else:
-            # Perform the random split
+            logger.warning("Base dataset (synthetic_dataset) too small for split. Adjusting.")
+            if train_ratio > 0 or len(synthetic_dataset) == 0 : # if train_ratio is 0, it all goes to val
+                train_set = list(synthetic_dataset)
+                val_synthetic_set = []
+            else: # train_ratio is 0 and dataset has 1 element
+                train_set = []
+                val_synthetic_set = list(synthetic_dataset)
+        elif train_size == len(synthetic_dataset) and train_size > 0 :
+            train_set = list(synthetic_dataset)
+            val_synthetic_set = []
+            logger.warning("Train ratio resulted in full dataset for training, no synthetic validation.")
+        elif train_size == 0 and len(synthetic_dataset) > 0:
+            train_set = []
+            val_synthetic_set = list(synthetic_dataset)
+            logger.warning("Train ratio resulted in zero for training, using all for synthetic validation.")
+        else: # Regular split for len(synthetic_dataset) >= 2
             train_set, val_synthetic_set = torch.utils.data.random_split(
                 synthetic_dataset, [train_size, len(synthetic_dataset) - train_size], generator=generator
             )
-            # Convert Subset objects from random_split back to lists for consistency
             train_set = list(train_set)
             val_synthetic_set = list(val_synthetic_set)
-
-    logger.info(f"Split base dataset: Train ({len(train_set)}), Synthetic Val ({len(val_synthetic_set)})")
-
-
-    # 6. Apply transform to all datasets (after loading/generating and splitting synthetic)
-    logger.info("==================================================") # **FIX:** Corrected logging message
-    logger.info("Start applying transform")
+        logger.info(f"Split base dataset: Train ({len(train_set)}), Synthetic Val ({len(val_synthetic_set)})")
+    else:
+        logger.warning("Base dataset (synthetic_dataset) is empty. Train and synthetic validation sets will be empty.")
+        
+    # --- Apply transform to all datasets ---
     if transform:
-        # Check if datasets are not None and are lists before transforming
-        # The split ensures train_set and val_synthetic_set are lists, but check just in case
-        if train_set is not None and isinstance(train_set, list):
-             logger.info(f"Applying transform to {len(train_set)} train samples.")
-             train_set = [transform(data) for data in train_set]
-        else: logger.debug("Train set is None or not a list (or empty), skipping transform.")
-
-        if val_synthetic_set is not None and isinstance(val_synthetic_set, list):
-             logger.info(f"Applying transform to {len(val_synthetic_set)} synthetic validation samples.")
-             val_synthetic_set = [transform(data) for data in val_synthetic_set]
-        else: logger.debug("Synthetic validation set is None or not a list (or empty), skipping transform.")
-
-        # Only attempt secondary transforms if secondary_directory was originally provided AND datasets are lists
-        if secondary_directory:
-             if val_real_set is not None and isinstance(val_real_set, list):
-                  logger.info(f"Applying transform to {len(val_real_set)} real validation samples.")
-                  val_real_set = [transform(data) for data in val_real_set]
-             else: logger.debug("Real validation set is None or not a list (or empty), skipping transform.")
-
-             if test_set is not None and isinstance(test_set, list):
-                  logger.info(f"Applying transform to {len(test_set)} test samples.")
-                  test_set = [transform(data) for data in test_set]
-             else: logger.debug("Test set is None or not a list (or empty), skipping transform.")
-
+        logger.info("Applying transform to datasets.")
+        if train_set: train_set = [transform(data) for data in train_set]
+        if val_synthetic_set: val_synthetic_set = [transform(data) for data in val_synthetic_set]
+        if val_real_set: val_real_set = [transform(data) for data in val_real_set]
+        if test_set: test_set = [transform(data) for data in test_set]
         logger.info("Transform application finished.")
     else:
-        logger.info("No transform specified, skipping transform step.")
+        logger.info("No transform specified.")
 
+    # --- Create DataLoaders ---
+    logger.info("Creating data loaders.")
+    train_loader, val_synthetic_loader, val_real_loader, test_loader = None, None, None, None
 
-    # 7. Create DataLoaders from the datasets
-    logger.info("==================================================") # **FIX:** Corrected logging message
-    logger.info("Start creating loaders")
+    def _create_loader(dataset, is_train_loader): # Renamed for clarity
+        if not dataset: return None
+        if batching_type == "dynamic":
+            return create_dynamic_loader(dataset, max_nodes=max_nodes, max_edges=max_edges, shuffle=is_train_loader, num_workers=num_workers)
+        elif batching_type == "standard":
+            return DataLoader(dataset, batch_size=batch_size, shuffle=is_train_loader, num_workers=num_workers)
+        # Add other batching types if needed
+        return None
 
-    # Initialize loaders to None
-    train_loader = None
-    val_synthetic_loader = None
-    val_real_loader = None
-    test_loader = None
-
-    # Create loaders only if the corresponding dataset list is not empty
-    # Dynamic and Standard Loaders expect a list of Data objects
-    if batching_type == "dynamic":
-        if train_set: # Check if list is not empty/None
-             train_loader = create_dynamic_loader(train_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=True, num_workers=num_workers)
-        else: logger.warning("Train dataset is empty, train_loader is None.")
-
-        if val_synthetic_set: # Check if list is not empty/None
-             val_synthetic_loader = create_dynamic_loader(val_synthetic_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
-        else: logger.warning("Synthetic validation dataset is empty, val_synthetic_loader is None.")
-
-        if secondary_directory:
-             if val_real_set: # Check if list is not empty/None
-                  val_real_loader = create_dynamic_loader(val_real_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
-             else: logger.warning("Real validation dataset is empty, val_real_loader is None.")
-
-             if test_set: # Check if list is not empty/None
-                  test_loader = create_dynamic_loader(test_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
-             else: logger.warning("Test dataset is empty, test_loader is None.")
-        else: logger.info("No secondary directory, val_real_loader and test_loader remain None.")
-
-
-    elif batching_type == "neighbor":
-         # **FIX:** NeighborLoader support for list[Data] is not standard. Keep as placeholder returning None.
-         logger.error("NeighborLoader batching_type not fully implemented for dataset lists. Loaders will be None.")
-         train_loader = None
-         val_synthetic_loader = None
-         val_real_loader = None
-         test_loader = None
-
-    else: # Use standard DataLoader
-        if train_set: # Check if list is not empty/None
-             train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-        else: logger.warning("Train dataset is empty, train_loader is None.")
-
-        if val_synthetic_set: # Check if list is not empty/None
-             val_synthetic_loader = DataLoader(val_synthetic_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        else: logger.warning("Synthetic validation dataset is empty, val_synthetic_loader is None.")
-
-        if secondary_directory:
-             if val_real_set: # Check if list is not empty/None
-                  val_real_loader = DataLoader(val_real_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-             else: logger.warning("Real validation dataset is empty, val_real_loader is None.")
-
-             if test_set: # Check if list is not empty/None
-                  test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-             else: logger.warning("Test dataset is empty, test_loader is None.")
-        else: logger.info("No secondary directory, val_real_loader and test_loader remain None.")
-
-
-    # Print counts - handle potential None datasets gracefully
-    # Use the variables *after* they have been assigned
-    train_count = len(train_set) if train_set is not None and isinstance(train_set, list) else 0
-    val_synth_count = len(val_synthetic_set) if val_synthetic_set is not None and isinstance(val_synthetic_set, list) else 0
-    val_real_count = len(val_real_set) if val_real_set is not None and isinstance(val_real_set, list) else 0
-    test_count = len(test_set) if test_set is not None and isinstance(test_set, list) else 0
-
+    train_loader = _create_loader(train_set, True)
+    val_synthetic_loader = _create_loader(val_synthetic_set, False)
+    val_real_loader = _create_loader(val_real_set, False)
+    test_loader = _create_loader(test_set, False)
+    
+    if batching_type == "neighbor": # Specific warning if this type is chosen
+         logger.error("NeighborLoader batching_type not fully implemented for list[Data] in this setup. Loaders will be None if this was the intended type for all.")
 
     print(f"\nCreated data loaders with:")
-    print(f"  Training samples: {train_count}")
-    print(f"  Synthetic validation samples: {val_synth_count}")
-    print(f"  Real validation samples: {val_real_count}")
-    print(f"  Test samples: {test_count}")
-
+    print(f"  Training samples: {len(train_set)}")
+    print(f"  Synthetic validation samples: {len(val_synthetic_set)}")
+    print(f"  Real validation samples: {len(val_real_set)}")
+    print(f"  Test samples: {len(test_set)}") # This is now from base_directory
 
     return train_loader, val_synthetic_loader, val_real_loader, test_loader
+
+
 
 def _collect_batch_stats(loader):
     """Return list[(n_nodes, n_edges)] for *all* batches in loader."""
@@ -764,66 +641,24 @@ def _plot_hist(vals, title, fname):
     plt.title(title); plt.xlabel("count"); plt.ylabel("#batches")
     plt.tight_layout(); plt.savefig(fname); plt.close()
 
-def run_loader_diagnostics(train_loader, val_synth_loader,
-                           val_real_loader=None, test_loader=None,
-                           out_dir="diagnostics"):
-    out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
-    all_loaders = {
-        "train": train_loader,
-        "val_synth": val_synth_loader,
-        "val_real": val_real_loader,
-        "test": test_loader,
-    }
-
-    # ── iterate once through every loader ────────────────────────────────────
-    for name, loader in all_loaders.items():
-        if loader is None: continue
-        stats = _collect_batch_stats(loader)
-        if not stats: continue
-
-        n_nodes, n_edges = zip(*stats)
-        _plot_hist(n_nodes, f"{name}: nodes per batch", out_dir/f"{name}_nodes.png")
-        _plot_hist(n_edges, f"{name}: edges per batch", out_dir/f"{name}_edges.png")
-
-        print(f"\n[{name.upper()}]  batches={len(stats)}")
-        print(f"  nodes  :  min={min(n_nodes)}  max={max(n_nodes)}  mean={sum(n_nodes)/len(stats):.1f}")
-        print(f"  edges  :  min={min(n_edges)}  max={max(n_edges)}  mean={sum(n_edges)/len(stats):.1f}")
-
-        # ── attribute checks on first batch ────────────────────────────────
-        first = next(iter(loader))
-        msg = f"  attrs  : " + ", ".join(sorted(first.__dict__.keys()))
-        print(msg)
-
-        assert first.edge_index.size(1) == first.edge_attr.size(0), \
-            f"{name}: edge_index vs edge_attr mismatch"
-        if hasattr(first, "edge_y"):
-            assert first.edge_y.size(0) == first.edge_index.size(1), \
-                f"{name}: edge_y length mismatch"
-
-        for tensor_name, t in first.__dict__.items():
-            if torch.is_tensor(t):
-                assert torch.isfinite(t).all(), f"{name}: {tensor_name} contains NaN/Inf"
-
-        # extra matrices for GRAPHYR / PINN
-        for mat in ["conductance_matrix_index", "laplacian_matrix_index"]:
-            if hasattr(first, mat):
-                idx = getattr(first, mat)
-                assert idx.dim() == 2 and idx.size(0) == 2, f"{name}: {mat} malformed"
-
-    print(f"\nDiagnostic plots saved to: {out_dir.resolve()}\n")
-
 
 if __name__ == "__main__":
-    log_level = os.getenv("PYTHON_LOG_LEVEL", "INFO").upper()
-    logger.setLevel(log_level)
-
+    # logging.basicConfig(
+    # level=logging.INFO,
+    # format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    # datefmt="%Y-%m-%d %H:%M:%S",
+    # )
+    # logger = logging.getLogger(__name__)
+    # log_level = os.getenv("PYTHON_LOG_LEVEL", "INFO").upper()
+    # logger.setLevel(log_level)
+    # # # ─── configure root logger ─────────────────────────────────────────────────────
 
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
     parser.add_argument("--base_dir", type=str,
-                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test", 
                         #default=r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test",
+                        
                         default = r"data\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\test",
                         help="Base directory containing the train/validation folders")
     parser.add_argument("--secondary_dir", type=str,
@@ -865,7 +700,7 @@ if __name__ == "__main__":
         train_ratio=args.train_ratio,
         seed=args.seed,
         num_workers=args.num_workers,
-        batching_type = args.batching_type
+        batching_type = args.batching_type,
     )
     
     print("\nData loaders created successfully.")
@@ -903,8 +738,3 @@ if __name__ == "__main__":
             print(f"Test Batch size: {len(batch_test)}")
     
     logger.info("Data loaders created successfully.")
-
-    # Run the diagnostics on the loaders
-    run_loader_diagnostics(train_loader, val_synthetic_loader,
-                           val_real_loader=val_real_loader, test_loader=test_loader,
-                           out_dir="diagnostics")

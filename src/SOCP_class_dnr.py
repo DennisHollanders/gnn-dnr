@@ -40,12 +40,12 @@ class SOCP_class:
             "voltage_bounds": True,
             "power_balance": True,
             "radiality": True,
-            "radiality_spanning": True,   # else flow‑based
+            "radiality_spanning": True,   
             "switch_cost": True,
         }
         self.switch_penalty = switch_penalty
         self.slack_penalty = slack_penalty
-
+        self.num_switches_changed = None
         # bus activity mask ------------------------------------------------
         if active_bus_mask is None:
             self.active_bus = pd.Series(True, index=net.bus.index)
@@ -240,6 +240,28 @@ class SOCP_class:
                 within=Binary,
                 initialize=lambda m, s: 1 if self.initial_switch_status.at[s] else 0
         )
+        self.primary_root_for_radiality = None
+        if model.buses: # Check if model.buses is populated
+            # Option 1: Prefer an ext_grid bus if available from the original logic, then a trafo, then a gen.
+            # This requires slightly more sophisticated selection if you mix data types.
+            # For now, let's assume for synthetic data, all substations are gens.
+
+            potential_roots = [bus_idx for bus_idx in model.buses if bus_idx in self.substations]
+            if potential_roots:
+                # You could sort them by bus_idx or pick the first one.
+                # Consistent picking is good. Let's pick the smallest index.
+                self.primary_root_for_radiality = min(potential_roots)
+                self.logger.info(f"Selected bus {self.primary_root_for_radiality} as the primary root for flow-based radiality from {potential_roots}.")
+            elif model.buses: # Fallback if no substations are in active model.buses (should not happen if active_bus_mask is sane)
+                self.logger.warning(f"No substations found among active model buses. Picking arbitrary bus {next(iter(model.buses))} as primary root for radiality.")
+                self.primary_root_for_radiality = next(iter(model.buses)) # First active bus
+            else:
+                self.logger.error("Cannot determine primary root: model.buses is empty.")
+                # This would be a critical failure.
+        else:
+            self.logger.error("Cannot determine primary root: model.buses is not initialized or empty before radiality constraint setup.")
+            raise ValueError("Model buses not defined before attempting to set up radiality constraints.")
+
         # --------------------------------------------
         # Initialize slack variables
         # ---------------------------------------------
@@ -257,8 +279,6 @@ class SOCP_class:
         def _is_up_rule(m, b):
             return m.bus_energised[b] if b in m.partitionedbuses else 1
         model.is_up = Expression(model.buses, rule=_is_up_rule)
-
-        model.SwitchLineLink = Constraint(model.switches, rule=_switch_line_link)
 
         # ------------------------------------------------------------------
         #  CONSTRAINTS
@@ -358,23 +378,47 @@ class SOCP_class:
         def _spanning(m):
             rhs = len(m.buses) - 1 - sum(1 - m.is_up[b] for b in m.partitionedbuses)
             return sum(m.line_closed[l] for l in m.lines) == rhs
+        
         def root_cap(m, l):
-            return m.root_flow[l] <=  m.line_closed[l] #(len(m.buses) - 1) *
+            return m.root_flow[l] <= m.line_closed[l] * (len(m.buses)-1)        
+        
+        #def root_cap(m, l):
+        #    return m.root_flow[l] <=  m.line_closed[l] #(len(m.buses) - 1) *
 
         # Flow balance:
         #   – Each substation *sources* Σ y_k units (one per energised PQ-bus)
         #   – Every energised PQ-bus *sinks* one unit
-        def root_balance(m, b):
+        # def root_balance(m, b):
+        #     inflow  = sum(m.root_flow[l] for l in m.lines if m.to_bus[l]   == b)
+        #     outflow = sum(m.root_flow[l] for l in m.lines if m.from_bus[l] == b)
+
+        #     if b in self.substations:
+        #         # Source delivers demand of all energised partitioned buses
+        #         return outflow - inflow == sum(m.is_up[k] for k in m.partitionedbuses)
+        #     else:
+        #         # Demand is 1 pu when the bus is energised, 0 otherwise
+        #         return inflow - outflow == (m.is_up[b] if b in m.partitionedbuses else 0)
+        def root_balance(m, b): # Renamed to avoid conflict if you redefine
             inflow  = sum(m.root_flow[l] for l in m.lines if m.to_bus[l]   == b)
             outflow = sum(m.root_flow[l] for l in m.lines if m.from_bus[l] == b)
 
-            if b in self.substations:
-                # Source delivers demand of all energised partitioned buses
+            if self.primary_root_for_radiality is None:
+                # This case should ideally be prevented by checks above.
+                # If it occurs, perhaps skip the constraint or raise an error.
+                self.logger.error(f"Primary root for radiality is None when evaluating root_balance for bus {b}. Skipping constraint.")
+                return Constraint.Skip
+
+
+            if b == self.primary_root_for_radiality:
+                # The designated primary root supplies all artificial demand
                 return outflow - inflow == sum(m.is_up[k] for k in m.partitionedbuses)
-            else:
+            elif b in self.substations:
+                # Other substations (slack gens) are neutral for artificial flow
+                return outflow - inflow == 0
+            else: # Partitioned buses
                 # Demand is 1 pu when the bus is energised, 0 otherwise
                 return inflow - outflow == (m.is_up[b] if b in m.partitionedbuses else 0)
-            
+    
         # (34)-(35) Bus‑line logical links (only needed if radiality on) ----
         if self.toggles["include_radiality_constraints"]:
             model.LineBusFrom = Constraint(model.lines, rule=_line_bus_link_from)
@@ -445,11 +489,10 @@ class SOCP_class:
             self.logger.warning("Solver finished with status %s",
                              self.solver_results.solver.termination_condition)
 
-        self.logger.info(
-            "Solved in %.2fs  (obj = %.3f)",
-            self.solve_time,
-            pyo_val(self.model.objective)
-        )
+        obj_val = pyo_val(self.model.objective)
+        self.logger.info("Solved in %.2fs  (obj = %.3f)",
+                    self.solve_time, obj_val)
+        self._count_changed_switches()
         return self.solver_results
     
     def _count_changed_switches(self):

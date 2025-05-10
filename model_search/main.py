@@ -14,10 +14,16 @@ import importlib
 import sys
 import logging 
 from tqdm import tqdm
+from torch.profiler import profile, record_function, ProfilerActivity
 
 console = logging.StreamHandler(sys.stdout)
 console.setFormatter(logging.Formatter("%(message)s"))   # just the text
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    )
 # ── 2. attach it to your logger ──────────────────────────────────────────────
 logger = logging.getLogger("Distribution Network Reconfiguration -- Model Search")
 logger.setLevel(logging.INFO)
@@ -45,8 +51,8 @@ def parse_args():
     # New argument to allow overriding the description (e.g., "Train PIGNN")
     parser.add_argument("--description", type=str, help="Description for the training job")
     parser.add_argument("--job_name", type=str, default="default_job", help="Job name")
-    parser.add_argument("--data_folder", type=str, help="Path to synthetic data folder")
-    parser.add_argument("--real_data_folder", type=str, help="Path to real data folder for second validation loop")
+    parser.add_argument("--train_data_folder", type=str, help="Path to synthetic data folder")
+    parser.add_argument("--real_val_data_folder", type=str, help="Path to real data folder for second validation loop")
     parser.add_argument("--model_module", type=str, default="first_model",                        help="Name of file containing the model class")
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[64, 32, 16], help="Hidden dimensions")
     parser.add_argument("--latent_dim", type=int, default=8, help="Latent dimension")
@@ -63,6 +69,7 @@ def parse_args():
     parser.add_argument("--hp_search_n_trials", type=int, default=50, help="Number of trials for hyperparameter search")
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--config", type=str, help="Path to YAML config file (overrides arguments)")
+    parser.add_argument("--evaluate_every_x_epoch", type=int, default=5, help="Epoch interval for validation")
     
     parser.add_argument("--loader_type", type=str, default="default", choices=["default", "PINN", "PIGNN", "GNN", "MLP"],)
     parser.add_argument("--batching_type", type=str, default="dynamic", choices=["standard", "dynamic"])
@@ -150,11 +157,11 @@ def main():
 
     logger.info(args.loader_type)
     
-    logger.info(args.data_folder)
-    logger.info(args.real_data_folder)
+    logger.info(args.train_data_folder)
+    logger.info(args.real_val_data_folder)
     train_loader, val_loader, val_real_loader, test_loader = create_data_loaders(
-        base_directory=args.data_folder,
-        secondary_directory=args.real_data_folder,
+        base_directory=args.train_data_folder,
+        secondary_directory=args.real_val_data_folder,
         loader_type=DataloaderType[args.loader_type.upper()], 
         batch_size=args.batch_size,
         max_nodes=args.max_nodes,
@@ -162,21 +169,21 @@ def main():
         train_ratio=args.train_ratio,
         seed=args.seed,
         num_workers=args.num_workers,
-        batching_type=args.batching_type
+        batching_type=args.batching_type,
     )
     loaders = [train_loader, val_loader, val_real_loader, test_loader]
 
     model_class = getattr(model_module, args.model_module)
 
-    logger.info("\n +++++++++++++++++++")
-    for idx, loader in enumerate(loaders):
-        logger.info(f"\n ---printing {loader}  stats:")
-        batch = next(iter(loader))
-        logger.info(f"keys: {batch.keys()}")
-        logger.info(f"batch size: {batch.batch_size}")
-        logger.info(f"edge index: {batch.edge_index.shape}")
-        logger.info(f"edge attr: {batch.edge_attr.shape}")
-        logger.info(f"node attr: {batch.x.shape}")
+    # logger.info("\n +++++++++++++++++++")
+    # for idx, loader in enumerate(loaders):
+    #     logger.info(f"\n ---printing {loader}  stats:")
+    #     batch = next(iter(loader))
+    #     logger.info(f"keys: {batch.keys()}")
+    #     logger.info(f"batch size: {batch.batch_size}")
+    #     logger.info(f"edge index: {batch.edge_index.shape}")
+    #     logger.info(f"edge attr: {batch.edge_attr.shape}")
+    #     logger.info(f"node attr: {batch.x.shape}")
 
     node_input_dim = train_loader.dataset[0].x.shape[1]
     edge_input_dim = train_loader.dataset[0].edge_attr.shape[1]
@@ -198,7 +205,7 @@ def main():
     
     model = model_class(
         node_input_dim=node_input_dim,
-        edge_input_dim= edge_input_dim, #args.edge_input_dim,
+        edge_input_dim= edge_input_dim,
         hidden_dims=args.hidden_dims,
         latent_dim=args.latent_dim,
         activation=args.activation,
@@ -210,6 +217,9 @@ def main():
     best_loss = float("inf")
     patience = 0
 
+    for loader in train_loader: 
+        print(f"Loader type: {type(loader)}")
+
     logger.info(f"Training {args.model_module} with {len(train_loader.dataset)} samples")
     logger.info(f"Validation with {len(val_loader.dataset)} samples")
     try:
@@ -218,18 +228,36 @@ def main():
     except AttributeError:
         logger.info("No test dataset provided")
 
-    for epoch in tqdm(range(args.epochs), desc="Training Progress"):
+    for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
         train_loss, train_dict = train(model, train_loader, optimizer, criterion, device)
         val_loss, val_dict = test(model, val_loader, criterion, device)
+        if epoch == 1: # Or any specific epoch you want to profile
+            with profile(activities=[ProfilerActivity.CPU], 
+                        record_shapes=True, 
+                        profile_memory=True,
+                        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1), # Profile 3 steps after 1 wait and 1 warmup step
+                        on_trace_ready=torch.profiler.tensorboard_trace_handler('./log_dir/profile'), # Save to tensorboard
+                        with_stack=True
+                        ) as prof:
+                for i_batch, current_batch_data in enumerate(train_loader): # Assuming train_loader is your training data loader
+                    # Your existing training step for one batch
+                    train_loss_batch, train_dict_batch = train(model, [current_batch_data], optimizer, criterion, device) # Pass a list containing the single batch
+                    prof.step() # Important: call after each step
+                    if i_batch >= 5: # e.g. profile 5 steps (1 wait + 1 warmup + 3 active)
+                        break 
+        # Then proceed with normal training for the rest of the epoch / other epochs
+        else:
+            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device)
 
         if epoch % 5 == 0:
             if val_real_loader:
                 val_real_loss, val_real_dict = test(model, val_real_loader, criterion, device)
-                logger.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Real Loss: {val_real_loss:.4f}")
+                logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Real Loss: {val_real_loss:.4f}")
                 if args.wandb:
                     wandb.log({"val_real_loss": val_real_loss, **val_real_dict})
             else:
-                logger.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+                logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+                
             if args.wandb:
                 wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
             if val_loss < best_loss:
@@ -241,16 +269,18 @@ def main():
                 if patience == args.patience:
                     logger.info(f"Early stopping at epoch {epoch+1}")
                     break
+        else:
+            logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
     # Check if test_loader is a valid DataLoader object before using it
     if test_loader:
-        test_loss, test_dict = test(model, test_loader, criterion, device) # Assuming test also returns a dict
+        test_loss, test_dict = test(model, test_loader, criterion, device) 
         logger.info(f"Test Loss: {test_loss:.4f}")
         if args.wandb:
              wandb.log({"test_loss": test_loss, **test_dict}) # Log test loss and metrics
 
     run_evaluation(model, train_loader, val_loader, val_real_loader, test_loader, device, args)
 
-    torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch +1}-Last.pt")
+    torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch}-Last.pt")
 
 if __name__ == "__main__":
    main()

@@ -25,7 +25,7 @@ job_name: "first run"
 criterion_name: MSELoss
 wandb: false
 loader_type: "default"
-
+evaluate_every_x_epoch:5
 # Data Loading Configuration
 batching_type: "dynamic"
 max_nodes: 1000

@@ -34,10 +34,7 @@ from tqdm import tqdm
 import uuid
 
 random.seed(0)
-
-
-from logger_setup import logger 
-print(f"opened logger:{logger}")
+logger = logging.getLogger(__name__)
 
 # # Ensure subgraph nodes have valid positions
 # def get_subgraph_centroid(subgraph):

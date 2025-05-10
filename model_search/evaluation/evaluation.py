@@ -6,7 +6,9 @@ import matplotlib.pyplot as plt
 import pandapower as pp
 import pandapower.plotting as plot
 import os
+import logging 
 
+logger = logging.getLogger(__name__)
 
 def run_evaluation(model, train_loader, val_loader, val_real_loader, test_loader, device, args):
     """
@@ -54,15 +56,15 @@ def run_evaluation(model, train_loader, val_loader, val_real_loader, test_loader
     )
 
     try:
-        print(f"Executing notebook: {evaluation_template_path}")
+        logger.debug(f"Executing notebook: {evaluation_template_path}")
         # Execute the notebook, making notebook_globals available
         executor.preprocess(nb, {'metadata': {'path': './'}}, globals=notebook_globals)
-        print("Notebook executed successfully.")
+        logger.debug("Notebook executed successfully.")
 
         # Save the executed notebook
         with open(executed_notebook_path, 'w', encoding='utf-8') as f:
             nbformat.write(nb, f)
-        print(f"Executed notebook saved to: {executed_notebook_path}")
+        logger.debug(f"Executed notebook saved to: {executed_notebook_path}")
 
         # Convert the executed notebook to HTML
         html_exporter = nbconvert.HTMLExporter()
@@ -74,16 +76,16 @@ def run_evaluation(model, train_loader, val_loader, val_real_loader, test_loader
         # Save the HTML report
         with open(html_output_path, 'w', encoding='utf-8') as f:
             f.write(body)
-        print(f"HTML report saved to: {html_output_path}")
+        logger.debug(f"HTML report saved to: {html_output_path}")
 
     except Exception as e:
-        print(f"Error during notebook execution or conversion: {e}")
-        print("Saving the notebook with injected code for debugging.")
+        logger.debug(f"Error during notebook execution or conversion: {e}")
+        logger.debug("Saving the notebook with injected code for debugging.")
         # Save the notebook even if execution fails for debugging
         with open(executed_notebook_path, 'w', encoding='utf-8') as f:
             nbformat.write(nb, f)
-        print(f"Notebook saved to: {executed_notebook_path}")
-    print("Evaluation completed.")
+        logger.debug(f"Notebook saved to: {executed_notebook_path}")
+    logger.debug("Evaluation completed.")
 
 
 

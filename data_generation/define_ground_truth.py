@@ -17,6 +17,7 @@ import copy
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
+from pandapower.powerflow import LoadflowNotConverged
 
 # Add necessary source paths
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -34,13 +35,8 @@ from electrify_subgraph import extract_node_features, extract_edge_features
 SHARED_LOG_PATH = Path(__file__).parent / "network_optimizer_all.log"
 
 def init_worker_logging():
-    """
-    Attach a FileHandler to the 'network_optimizer' logger in *every*
-    process (main + workers), appending to SHARED_LOG_PATH.
-    """
     logger = logging.getLogger("network_optimizer")
     logger.setLevel(logging.DEBUG)
-    # (avoid adding duplicates if someone re‐calls this)
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(SHARED_LOG_PATH)
                for h in logger.handlers):
         fh = logging.FileHandler(SHARED_LOG_PATH, mode="a",
@@ -49,16 +45,13 @@ def init_worker_logging():
         fmt = "%(asctime)s - %(levelname)s - %(processName)s - %(message)s"
         fh.setFormatter(logging.Formatter(fmt))
         logger.addHandler(fh)
-    # optional: silence propagation so we don’t double‐up on console
     logger.propagate = False
 
 def init_logging(method):
-    # 1) Grab your specific logger and configure it only—no basicConfig
     logger = logging.getLogger("network_optimizer")
     logger.setLevel(logging.INFO)
-    logger.propagate = False              # don’t bubble up to root
+    logger.propagate = False              
 
-    # 2) File handler at DEBUG
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(log_dir / f"{method.upper()}_logs.txt",
@@ -67,13 +60,10 @@ def init_logging(method):
     fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(fh)
 
-    # 3) Stream handler at DEBUG (or INFO if you prefer less console spam)
     sh = logging.StreamHandler(sys.stdout)
     sh.setLevel(logging.DEBUG)
     sh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(sh)
-
-    # 4) Silence all matplotlib logging below WARNING
     ml = logging.getLogger("matplotlib")
     ml.setLevel(logging.WARNING)
     mf = logging.getLogger("matplotlib.font_manager")
@@ -88,22 +78,11 @@ def get_n_workers():
     return int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
 
 def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
-    """
-    Computes a penalised MST on the *energised* buses only
-    and updates net.switch['closed'] in-place.
 
-    Parameters
-    ----------
-    net : pandapowerNet (will be modified in-place)
-    penalty : float           # as before
-    y_mask : pandas.Series / dict / None
-        1 ↦ bus must be in the tree, 0 ↦ bus can be ignored.
-        If None → every bus is treated as energised.
-    """
     # ---------- prepare mask ------------------------------------------
     if y_mask is None:
         active_bus = pd.Series(1, index=net.bus.index)
-    else:                                 # accept dict, Series, ndarray…
+    else:                                
         active_bus = pd.Series(y_mask, index=net.bus.index).fillna(0).astype(bool)
 
     # ---------- collect meta ------------------------------------------
@@ -112,7 +91,6 @@ def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
     init_stat = switch_df['closed'].copy()
     bus_name  = net.bus['name'].to_dict()
 
-    # map line-name → list of switch indices
     lines_with_switches = {}
     for s, sw in switch_df.query("et=='l'").iterrows():
         ln_idx = sw.element
@@ -125,19 +103,16 @@ def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
         if active_bus[b.Index]:
             G.add_node(b.name)
 
-    # each physical line becomes an edge **only if both end-buses active**
     for ln in line_df.itertuples():
         if not (active_bus[ln.from_bus] and active_bus[ln.to_bus]):
-            continue                      # ignore islands / inactive buses
+            continue                     
         w  = ln.r_ohm_per_km * ln.length_km
         if any(init_stat[s] for s in lines_with_switches.get(ln.name, [])):
-            w += penalty                 # penalise currently closed switch
+            w += penalty                
         G.add_edge(bus_name[ln.from_bus], bus_name[ln.to_bus],
                    weight=w, line_name=ln.name)
-
-    # early exit: if G has <2 nodes nothing to do
     if G.number_of_nodes() < 2:
-        for s in switch_df.index:          # open every switch to be safe
+        for s in switch_df.index:          
             net.switch.at[s, 'closed'] = False
         return net
 
@@ -153,7 +128,6 @@ def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
         for s in sw_list:
             net.switch.at[s, 'closed'] = new_state
 
-    # every line whose *either* end bus is inactive is forced open
     for s, sw in switch_df.query("et=='l'").iterrows():
         fb = net.line.at[sw.element, 'from_bus']
         tb = net.line.at[sw.element, 'to_bus']
@@ -163,57 +137,33 @@ def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
     return net
 
 
-def store_snapshots(
-    graph_id: str,
-    root_folder: Path,
-    logger,
-    **nets,
-):
-    """
-    Parameters
-    ----------
-    graph_id      : unique id / filename stem of the graph
-    root_folder   : root of the data set (Path)
-    logger        : std. logger for progress messages
-    **nets        : keyword pairs  phase_name = pandapowerNet
-                    e.g.  original=net_orig, mst=net_mst, optimised=net_opt
-    """
+def store_snapshots(graph_id: str, root_folder: Path, logger, **nets,):
     for phase, net in nets.items():
         out_dir = root_folder / phase / "pandapower_networks"
         out_dir.mkdir(parents=True, exist_ok=True)
-
-        fname = out_dir / f"{graph_id}.json"          # or f"{graph_id}_{phase}.json"
+        fname = out_dir / f"{graph_id}.json"         
         with open(fname, "w") as fp:
             fp.write(pp.to_json(net))
 
         logger.info(f"[{graph_id}] snapshot '{phase}' saved → {fname}")
 def _potential_graph(net):
-    """
-    Graph of *possible* current paths.
-    Edges are added irrespective of switch status, so that we keep
-    every element that *could* become energised.
-    """
     G = nx.Graph()
     G.add_nodes_from(net.bus.index)
 
-    # ------------------------------------------------------------------
     # 1) Lines ----------------------------------------------------------
-    for idx, ln in net.line.iterrows():            # idx is line index
+    for idx, ln in net.line.iterrows():            
         if not ln.in_service:
             continue
         G.add_edge(ln.from_bus, ln.to_bus,
                    element=("line", idx))
 
-    # ------------------------------------------------------------------
-    # 2) Two-winding transformers --------------------------------------
+    # 2) transformers --------------------------------------
     for idx, tf in net.trafo.iterrows():
         if not tf.in_service:
             continue
         G.add_edge(tf.hv_bus, tf.lv_bus,
                    element=("trafo", idx))
 
-    # ------------------------------------------------------------------
-    # 3) Three-winding transformers  (connect hv-mv and hv-lv) ---------
     for idx, tf in net.trafo3w.iterrows():
         if not tf.in_service:
             continue
@@ -221,41 +171,33 @@ def _potential_graph(net):
                    element=("trafo3w_hm", idx))
         G.add_edge(tf.hv_bus, tf.lv_bus,
                    element=("trafo3w_hl", idx))
-        # (hv–mv–lv triangle is enough, the mv-lv edge is redundant)
 
-    # ------------------------------------------------------------------
-    # 4) Impedances -----------------------------------------------------
+
+    # 3) Impedances -----------------------------------------------------
     for idx, imp in net.impedance.iterrows():
         if not imp.in_service:
             continue
         G.add_edge(imp.from_bus, imp.to_bus,
                    element=("impedance", idx))
 
-    # ------------------------------------------------------------------
-    # 5) Bus-bus and inline switches  (regardless of 'closed') ---------
+
+    # 4) Bus-bus and inline switches  
     for s, sw in net.switch.iterrows():
-        if sw.et == "b":        # bus-bus
+        if sw.et == "b":        
             G.add_edge(sw.bus, sw.element,
                        element=("switch_b", s))
-        elif sw.et == "l":      # inline → reuse line data
+        elif sw.et == "l":      
             ln = net.line.loc[sw.element]
             G.add_edge(ln.from_bus, ln.to_bus,
                        element=("switch_l", s))
     return G
 
 def is_radial_and_connected(net, y_mask=None, require_single_ref=False):
-    """
-    Returns (is_radial, is_connected) **on the energised sub-graph**.
-    A network is radial if each connected component is a tree with exactly one reference bus.
-    
-    y_mask : 1/0 per bus (Series / dict / ndarray).  None ⇒ all 1.
-    """
     if y_mask is None:
         active_bus = pd.Series(1, index=net.bus.index)
     else:
         active_bus = pd.Series(y_mask, index=net.bus.index).fillna(0).astype(bool)
 
-    # Build graph of *closed* lines between active buses
     G = nx.Graph()
     G.add_nodes_from(net.bus.index[active_bus])
 
@@ -265,57 +207,34 @@ def is_radial_and_connected(net, y_mask=None, require_single_ref=False):
             G.add_edge(ln.from_bus, ln.to_bus)
 
     if G.number_of_nodes() == 0:
-        return True, True       # vacuously radial & connected
+        return True, True       
 
-    # Get reference buses (both ext_grid and slack generators)
     ref_buses = set(net.ext_grid.bus.tolist())
     if "slack" in net.gen.columns:
         ref_buses |= set(net.gen[net.gen.slack].bus)
-    
-    # Filter reference buses to only include active ones
+
     ref_buses = ref_buses & set(G.nodes())
     
     components = list(nx.connected_components(G))
     if not components:
         return True, True
-    largest_component = max(components, key=len)
-    G_largest = G.subgraph(largest_component)
 
-    # # Now perform the radial and connected check on G_largest
-    # is_connected = nx.is_connected(G_largest)
-    # is_radial = True
-    # for component in nx.connected_components(G_largest):
-    #     comp_graph = G_largest.subgraph(component)
-    #     comp_refs = ref_buses & component
-    #     if len(comp_refs) != 1 or not nx.is_tree(comp_graph):
-    #         is_radial = False
-    #         break
-    # return is_radial, is_connected
     components = list(nx.connected_components(G))
     if not components:
         return True, True
 
-    # Connectedness is always evaluated on the largest energised component
     is_connected = nx.is_connected(G.subgraph(max(components, key=len)))
 
-    if require_single_ref:          # original strict version
+    if require_single_ref:          
         for comp in components:
             comp_refs = ref_buses & comp
             if len(comp_refs) != 1 or not nx.is_tree(G.subgraph(comp)):
                 return False, is_connected
         return True, is_connected
-
-    # ← default: ignore how many reference buses live in each tree
     return all(nx.is_tree(G.subgraph(comp)) for comp in components), is_connected
 
 
 def reduce_to_slack_component(net):
-    """
-    Keep **all** buses that belong to a connected component
-    containing at least one reference bus (ext_grid or gen.slack == True).
-
-    Returns (net_red, (rad_full, conn_full), (rad_red, conn_red))
-    """
     # -- 0  identify reference buses
     slack_buses = slack_buses = set(net.ext_grid.bus) | \
                   set(net.gen[getattr(net.gen, "slack", False)].bus)
@@ -342,7 +261,6 @@ def reduce_to_slack_component(net):
     net_red = pp.select_subnet(
         net,
         buses  = list(keep_nodes),
-        #lines  = list(keep_lines),    # <- NEW
         include_switch_buses = True,
         include_results      = False,
     )
@@ -354,96 +272,12 @@ def reduce_to_slack_component(net):
 
     return net_red, (rad_full, conn_full), (rad_red, conn_red)
 
-# def process_single_graph(graph_id, net_json, folder_path,
-#                          toggles, logger=None):
-#     # ------------------------------------------------------------------
-#     net_orig = pp.from_json_string(net_json)
-
-#     if logger is None:
-#         logger = logging.getLogger("network_optimizer")
-    
-#     # ------------------------------------------------------------------
-#     # 1  ─ original PF
-#     pp.runpp(net_orig, enforce_q_lims=False)
-#     if not net_orig.converged: 
-#         logger.warning(f"{graph_id}: PF on original net failed – skip")
-#         return None
-
-#     # ------------------------------------------------------------------
-#     # 2  ─ reduce to LCC
-
-#     net_lcc, (rad_full, conn_full), (rad_lcc, conn_lcc) = \
-#         reduce_to_slack_component(net_orig)
-
-#     bus_mask = net_orig.bus.index.isin(net_lcc.bus.index).astype(int)
-    
-#     pp.runpp(net_lcc, enforce_q_lims=False)
-#     if not net_lcc.converged:
-#         logger.warning(f"{graph_id}: PF on LCC failed – skip")
-#         return None
-#     #logger.info(f"{graph_id}: original (rad,conn)=({rad_full},{conn_full})  "
-#     #            f"LCC (rad,conn)=({rad_lcc},{conn_lcc})")
-
-#     # ------------------------------------------------------------------
-#     # 3  ─ apply MST
-#     net_mst = alternative_mst_reconfigure(copy.deepcopy(net_orig), penalty=1.0, y_mask=bus_mask)
-#     pp.runpp(net_mst, enforce_q_lims=False)
-#     if not net_mst.converged:
-#         logger.warning(f"{graph_id}: PF after MST failed – skip")
-#         return None
-
-#     # ------------------------------------------------------------------
-#     # 4  ─ SOCP optimisation starting from MST net
-#     net_before = copy.deepcopy(net_mst)
-#     optimizer = SOCP_class(net_mst, graph_id, logger=logger, toggles=toggles,  active_bus_mask=bus_mask)
-#     optimizer.initialize()
-#     model        = optimizer.create_model()
-#     model.write(f"model_{optimizer.graph_id}.lp",
-#                 io_options={"symbolic_solver_labels": True})
-#     start        = time.time()
-#     solver_res   = optimizer.solve()
-#     opt_time     = time.time() - start
-#     net_opt      = optimizer.update_network()   # returns the updated net
-#     verify_solution(optimizer.model, tol=1e-6, logger=logger)
-#     pp.runpp(net_opt, enforce_q_lims=False)
-
-#     # ------------------------------------------------------------------
-#     # 5  ─ statistics
-#     flips_orig_lcc = count_switch_changes(net_orig, net_lcc)
-#     flips_lcc_mst  = count_switch_changes(net_lcc,  net_mst)
-#     flips_mst_opt  = count_switch_changes(net_before,  net_opt)
-
-#     logger.info(f"{graph_id}: flips  orig→LCC={flips_orig_lcc}  "
-#                 f"LCC→MST={flips_lcc_mst}  MST→OPT={flips_mst_opt}")
-    
-#     num_switches_changed = optimizer.num_switches_changed 
-
-#     # ------------------------------------------------------------------
-#     # 6  ─ store every snapshot
-#     store_snapshots(
-#         graph_id,
-#         folder_path,
-#         logger,
-#         original = net_orig,
-#         lcc      = net_lcc,
-#         mst      = net_mst,
-#         optimised= net_opt,
-#     )
-
-    # return {"graph_id": graph_id,
-    #         "total_switches": net_orig.switch.shape[0],
-    #         "optimization_time": opt_time,
-    #         "switches_changed_mst": flips_lcc_mst,
-    #         "rad_mst": is_radial_and_connected(net_before, y_mask=bus_mask),
-    #         "switches_changed_opt": flips_mst_opt,
-    #         "switches_changed": num_switches_changed,
-    #         "rad_opt": is_radial_and_connected(net_opt, y_mask=bus_mask)}
-
 
 def process_single_graph(graph_id, net_json, folder_path,
-                         toggles, logger=None):
+                         toggles, logger=None, debug=False):
+    from pyomo.util.infeasible import log_infeasible_constraints
     # ------------------------------------------------------------------
-    # ensure we have a logger
+    # intit logger
     if logger is None:
         logger = logging.getLogger("network_optimizer")
         logger.setLevel(logging.INFO)
@@ -451,117 +285,152 @@ def process_single_graph(graph_id, net_json, folder_path,
     # ------------------------------------------------------------------
     # 1 — load & PF original
     net_orig = pp.from_json_string(net_json)
-    pp.runpp(net_orig, enforce_q_lims=False)
-    if not net_orig.converged:
+    try: 
+        pp.runpp(net_orig, enforce_q_lims=False)
+        if not net_orig.converged:
+            logger.warning(f"{graph_id}: PF on original net failed – skip")
+            return None
+    except LoadflowNotConverged:
         logger.warning(f"{graph_id}: PF on original net failed – skip")
         return None
+    
 
     # ------------------------------------------------------------------
-    # 2 — reduce to largest connected slack component
-    net_lcc, (rad_full, conn_full), (rad_lcc, conn_lcc) = \
-        reduce_to_slack_component(net_orig)
+    # 2 — reduce to largest connected slack component 
+    # simbench/pandapower have unconnected hv islands
+    net_lcc, _, _ = reduce_to_slack_component(net_orig)
     bus_mask = net_orig.bus.index.isin(net_lcc.bus.index).astype(int)
-
-    pp.runpp(net_lcc, enforce_q_lims=False)
-    if not net_lcc.converged:
-        logger.warning(f"{graph_id}: PF on LCC failed – skip")
+    try:
+        pp.runpp(net_lcc, enforce_q_lims=False)
+    except LoadflowNotConverged:
+        logger.warning(f"{graph_id}: PF on LCC did not converge – skip")
         return None
 
     # ------------------------------------------------------------------
     # 3a — MST + optimize from MST
-    net_mst = alternative_mst_reconfigure(copy.deepcopy(net_orig),
-                                          penalty=1.0,
-                                          y_mask=bus_mask)
+    net_mst = alternative_mst_reconfigure(copy.deepcopy(net_orig), penalty=1.0,y_mask=bus_mask)
     print("radial connected mst ", is_radial_and_connected(net_mst, y_mask=bus_mask))
-    pp.runpp(net_mst, enforce_q_lims=False)
-    if not net_mst.converged:
-        logger.warning(f"{graph_id}: PF after MST failed – skip")
+    try:
+        pp.runpp(net_mst, enforce_q_lims=False)
+    except LoadflowNotConverged:
+        logger.warning(f"{graph_id}: PF after MST did not converge – skip")
         return None
 
     net_before_mst_opt = copy.deepcopy(net_mst)
-    optimizer_mst = SOCP_class(net_mst,
-                               graph_id + "_mst",
-                               toggles=toggles,
-                               logger=logger,
-                               active_bus_mask=bus_mask)
+    optimizer_mst = SOCP_class(net_mst, graph_id + "_mst",  toggles=toggles,
+                               logger=logger, active_bus_mask=bus_mask)
     optimizer_mst.initialize()
     optimizer_mst.model = optimizer_mst.create_model()
+     
     t0 = time.time()
-    from pyomo.util.infeasible import log_infeasible_constraints
-    log_infeasible_constraints(optimizer_mst.model , log_expression=True, log_variables=True)  
     optimizer_mst.solve()
     mst_opt_time = time.time() - t0
+    if debug:
+        optimizer_mst.model.write(f"{graph_id}_mst.lp",
+                              io_options={"symbolic_solver_labels": True})
+        log_infeasible_constraints(optimizer_mst.model , log_expression=True, log_variables=True)
     net_opt_mst = optimizer_mst.update_network()
     optimizer_mst.verify_solution( tol=1e-6, logger=logger)
-    pp.runpp(net_opt_mst, enforce_q_lims=False)
+    try:
+        pp.runpp(net_opt_mst, enforce_q_lims=False)
+    except LoadflowNotConverged:
+        logger.warning(f"{net_opt_mst}: PF after optimization of MST did not converge – skip")
+        return None
 
-    flips_lcc_to_mst      = count_switch_changes(net_lcc,      net_mst)
-    flips_mst_to_mst_opt  = count_switch_changes(net_before_mst_opt, net_opt_mst)
+    #flips_orig_lcc = count_switch_changes(net_orig, net_lcc)
+    flips_lcc_mst = count_switch_changes(net_lcc, net_mst)
+    flips_mst_opt = count_switch_changes(net_before_mst_opt, net_opt_mst)
+    num_switches_changed = optimizer_mst.num_switches_changed
+    rad_mst = is_radial_and_connected(net_before_mst_opt, y_mask=bus_mask)
+    rad_opt = is_radial_and_connected(net_opt_mst, y_mask=bus_mask)
     loss_improvement_mst = loss_improvement(net_before_mst_opt, net_opt_mst)
-
-
-    # ------------------------------------------------------------------
-    # 3b — PF original + optimize from original PF
-    net_pf = copy.deepcopy(net_orig)
-    pp.runpp(net_pf, enforce_q_lims=False)
-    # We already checked orig PF, so this *should* converge
-    optimizer_pf = SOCP_class(net_pf,
-                              graph_id + "_origPF",
-                              toggles=toggles,
-                              logger=logger,
-                              active_bus_mask=bus_mask)
-    optimizer_pf.initialize()
-    optimizer_pf.model = optimizer_pf.create_model()
-    t1 = time.time()
-    from pyomo.util.infeasible import log_infeasible_constraints
-    log_infeasible_constraints(optimizer_pf.model, log_expression=True, log_variables=True)  
-    optimizer_pf.solve()
-    pf_opt_time = time.time() - t1
-    net_opt_pf = optimizer_pf.update_network()
-    optimizer_pf.verify_solution( tol=1e-6, logger=logger)
-    pp.runpp(net_opt_pf, enforce_q_lims=False)
-
-    flips_orig_to_pf_opt = count_switch_changes(net_orig, net_opt_pf)
-    loss_improvement_orig = loss_improvement(net_orig, net_opt_pf)
-    # ------------------------------------------------------------------
-    # 4 — compare the two final states
-    flips_pfopt_vs_mstopt = count_switch_changes(net_opt_pf, net_opt_mst)
-
-    logger.info(
-        f"{graph_id}: MST→OPT flips={flips_mst_to_mst_opt}  "
-        f"origPF→OPT flips={flips_orig_to_pf_opt}  "
-        f"state_diff(OPT_orig,OPT_mst)={flips_pfopt_vs_mstopt}"
-    )
-
-    # ------------------------------------------------------------------
-    # 5 — store snapshots
-    store_snapshots(
-        graph_id,
-        folder_path,
-        logger,
-        original    = net_orig,
-        lcc         = net_lcc,
-        mst         = net_mst,
-        optimised_mst = net_opt_mst,
-        optimised_origPF = net_opt_pf,
-    )
-
-    # ------------------------------------------------------------------
-    # 6 — return metrics
-    return {
+    metrics = {
         "graph_id": graph_id,
         "total_switches": net_orig.switch.shape[0],
         "opt_time_mst": mst_opt_time,
-        "opt_time_origPF": pf_opt_time,
-        "switches_changed_lcc_to_mst": flips_lcc_to_mst,
-        "switches_changed_mst_to_opt": flips_mst_to_mst_opt,
-        "switches_changed_orig_to_opt": flips_orig_to_pf_opt,
-        "state_diff_between_opts": flips_pfopt_vs_mstopt,
-        "rad_mst_opt": is_radial_and_connected(net_opt_mst, y_mask=bus_mask),
-        "rad_origPF_opt": is_radial_and_connected(net_opt_pf, y_mask=bus_mask),
+        "switches_changed_lcc_to_mst": flips_lcc_mst,
+        "switches_changed_mst_to_opt": flips_mst_opt,
+        #"switches_changed": num_switches_changed,
         "loss_improvement_mst": loss_improvement_mst["loss_improvement"],
-        "loss_improvement_orig": loss_improvement_orig["loss_improvement"],
+        "rad_mst": rad_mst,
+        "rad_mst_opt": rad_opt,
     }
+    snapshots = {
+        "original": net_orig,
+        "lcc": net_lcc,
+        "mst": net_mst,
+        "optimised_mst": net_opt_mst,
+    }
+
+    # ------------------------------------------------------------------
+    # 3b — PF original + optimize from original PF
+    if debug:
+        net_pf = copy.deepcopy(net_orig)
+        try:
+            pp.runpp(net_pf, enforce_q_lims=False)
+        except LoadflowNotConverged:
+            logger.warning(f"{graph_id}: PF on original net failed – skip")
+            return None
+        # We already checked orig PF, so this *should* converge
+        optimizer_pf = SOCP_class(net_pf,
+                                graph_id + "_origPF",
+                                toggles=toggles,
+                                logger=logger,
+                                active_bus_mask=bus_mask)
+        optimizer_pf.initialize()
+        optimizer_pf.model = optimizer_pf.create_model()
+        optimizer_pf.model.write(f"{graph_id}_origPF.lp",
+                                  io_options={"symbolic_solver_labels": True})
+        from pyomo.util.infeasible import log_infeasible_constraints
+        t1 = time.time()
+        optimizer_pf.solve()
+        pf_opt_time = time.time() - t1
+        log_infeasible_constraints(optimizer_pf.model, log_expression=True, log_variables=True)  
+        net_opt_pf = optimizer_pf.update_network()
+        optimizer_pf.verify_solution( tol=1e-6, logger=logger)
+        try:
+            pp.runpp(net_opt_pf, enforce_q_lims=False)
+        except LoadflowNotConverged:
+            logger.warning(f"{graph_id}: PF after orig opt did not converge – skip")
+            return None
+        flips_pf_to_opt = count_switch_changes(net_pf, net_opt_pf)
+        loss_improvement_pf = loss_improvement(net_pf, net_opt_pf)
+        num_switches_changed = optimizer_mst.num_switches_changed
+        flips_pfopt_vs_mstopt = count_switch_changes(net_opt_mst, net_opt_pf)
+
+        metrics.update({
+            "opt_time_origPF": pf_opt_time,
+            "switches_changed_orig_to_opt": flips_pf_to_opt,
+            "state_diff_between_opts": flips_pfopt_vs_mstopt,
+            "loss_improvement_orig": loss_improvement_pf["loss_improvement"],
+            "rad_origPF_opt": is_radial_and_connected(net_opt_pf, y_mask=bus_mask),
+        })
+        snapshots["optimised_origPF"] = net_opt_pf
+        logger.info(
+            f"{graph_id}: MST→OPT={flips_pf_to_opt} flips; origPF→OPT={flips_mst_opt} flips; diff={flips_pfopt_vs_mstopt}"
+        )
+    else:
+
+        logger.info(f"{graph_id}: MST only, MST→OPT={flips_mst_opt} flips")
+
+    store_snapshots( graph_id,folder_path, logger,**snapshots)
+
+    return metrics
+
+# {
+#         "graph_id": graph_id,
+#         "total_switches": net_orig.switch.shape[0],
+#         "opt_time_mst": mst_opt_time,
+#         "opt_time_origPF": pf_opt_time,
+#         "switches_changed_lcc_to_mst": flips_lcc_to_mst,
+#         "switches_changed_mst_to_opt": flips_mst_to_mst_opt,
+#         "switches_changed_orig_to_opt": flips_orig_to_pf_opt,
+#         "state_diff_between_opts": flips_pfopt_vs_mstopt,
+#         "rad_mst_opt": is_radial_and_connected(net_opt_mst, y_mask=bus_mask),
+#         "rad_origPF_opt": is_radial_and_connected(net_opt_pf, y_mask=bus_mask),
+#         "loss_improvement_mst": loss_improvement_mst["loss_improvement"],
+#         "loss_improvement_orig": loss_improvement_orig["loss_improvement"],
+#     }
 
 
 def count_switch_changes(net_a, net_b):
@@ -623,7 +492,7 @@ def store_optimized_models(
             f.write(pp.to_json(snapshot))
         logger.info(f"Saved PP network ({phase_name})")
 
-def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False):
+def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False, serialize=False):
     folder_path = Path(folder_path)
     init_worker_logging()
 
@@ -633,28 +502,37 @@ def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False):
 
     metrics = []
 
-    # --- Parallel execution ---
-    with ProcessPoolExecutor(
-        max_workers=os.cpu_count(),
-        initializer=init_worker_logging
-    ) as executor:
-        futures = {
-            executor.submit(
-                process_single_graph,
-                gid, net_json, folder_path,
-                toggles, # + pass logger if you want, but not needed now
-            ): gid
-            for gid, net_json in items
-        }
-        for fut in tqdm(as_completed(futures), total=len(futures)):
-            res = fut.result()
-            if res:
-                metrics.append(res)
+    if serialize:
+            #--- Sequential execution ---
+        for gid, net_json in items:
+            res = process_single_graph(gid, net_json, folder_path , toggles, debug = debug)
+            if res: metrics.append(res)
+    else: # default
+        # --- Parallel execution ---
+        with ProcessPoolExecutor(
+            max_workers=os.cpu_count(),
+            initializer=init_worker_logging
+        ) as executor:
+            futures = {
+                executor.submit(
+                    process_single_graph,
+                    gid, net_json, folder_path,
+                    toggles=toggles, debug=debug
+                ): gid
+                for gid, net_json in items
+            }
+            for fut in tqdm(as_completed(futures), total=len(futures)):
+                gid = futures[fut]
+                try:
+                    res = fut.result()
+                except Exception as e:
+                    logging.getLogger("network_optimizer").error(
+                        f"{gid}: failed in worker – skipping", exc_info=True
+                    )
+                    continue
+                if res:
+                    metrics.append(res)
 
-    # --- Sequential execution ---
-    for gid, net_json in items:
-        res = process_single_graph(gid, net_json, folder_path , toggles)
-        if res: metrics.append(res)
 
     df = pd.DataFrame(metrics)
     df.to_csv(folder_path / "optimization_metrics.csv", index=False)
@@ -672,65 +550,57 @@ def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False):
     print("="*50)
     print(f"Total graphs processed: {len(pp_networks)}")
     print(f"Successful optimizations: {len(metrics)}")
+
+
     if not metrics_df.empty:
-        print(f"Average optimization time: {metrics_df['optimization_time'].mean():.4f} seconds")
-        print(f"Total switches changed: {metrics_df['switches_changed'].sum()}")
+        # print basic stats for each numeric column
+        numeric_cols = metrics_df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            # choose sum for counts, mean for times/losses
+            if "time" in col or "loss" in col:
+                stat = metrics_df[col].mean()
+                print(f"Average {col}: {stat:.4f}")
+            else:
+                stat = metrics_df[col].sum()
+                print(f"Total {col}: {stat}")
     print("="*50)
 
+    # --- dynamic histograms ---
+    # pick numeric columns again
+    numeric_cols = metrics_df.select_dtypes(include=[np.number]).columns.tolist()
+    if numeric_cols:
+        n = len(numeric_cols)
+        ncols = min(4, n)
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 3*nrows))
+        axes = np.atleast_1d(axes).flatten()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        for idx, col in enumerate(numeric_cols):
+            ax = axes[idx]
+            ax.hist(metrics_df[col].dropna(), bins=10)
+            ax.set_title(col.replace('_',' ').title())
+            ax.set_xlabel(col)
+            ax.set_ylabel("Frequency")
 
-    if 'switches_changed' in metrics_df:
-        axes[0].hist(metrics_df['switches_changed'], bins=10, alpha=0.7)
-        axes[0].set_title('Switches Changed per Graph')
-        axes[0].set_xlabel('Switches Changed')
-        axes[0].set_ylabel('Frequency')
-    else:
-        axes[0].text(0.5, 0.5, 'No switch data', ha='center')
-        axes[0].set_title('Switches Changed per Graph')
+        # turn off any unused axes
+        for ax in axes[n:]:
+            ax.set_visible(False)
 
-    if 'optimization_time' in metrics_df:
-        axes[1].hist(metrics_df['optimization_time'], bins=10, alpha=0.7)
-        axes[1].set_title('Optimization Time per Graph (s)')
-        axes[1].set_xlabel('Time (s)')
-        axes[1].set_ylabel('Frequency')
-    else:
-        axes[1].text(0.5, 0.5, 'No time data', ha='center')
-        axes[1].set_title('Optimization Time per Graph')
-
-    plt.tight_layout()
-    plt.show()
+        plt.tight_layout()
+        plt.show()
    
-
-from pyomo.util.infeasible import log_infeasible_constraints
-from pyomo.environ import value, Constraint, Var
-
-def debug_infeasibility(model, tol=1e-6):
-    print("=== Infeasible Constraints ===")
-    log_infeasible_constraints(model, log_expression=True, tol=tol)
-
-def print_constraint_violations(model, tol=1e-6):
-    print("\n=== Constraint Violations ===")
-    for constr in model.component_data_objects(Constraint, active=True):
-        try:
-            lower = constr.lower if constr.lower is not None else -float('inf')
-            upper = constr.upper if constr.upper is not None else float('inf')
-            body_val = value(constr.body)
-            violation = max(lower - body_val, body_val - upper, 0)
-            if violation > tol:
-                print(f"{constr.name} (index: {constr.index() if hasattr(constr, 'index') else ''}) violation: {violation:.4e}, body value: {body_val:.4e}, bounds: ({lower}, {upper})")
-        except Exception as e:
-            print(f"Could not evaluate constraint {constr.name}: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
                         default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_3/test/original",
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\28042025_range-130-100_1000_2\original",
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025\validation\original",
                         type=str, help='Dataset folder path')
     parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='', help='Dataset set to process; leave empty for no subfolder')
     parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
-
+    parser.add_argument('--serialize', type=bool, default=True, help='Serialize the optimization results usefull for debugging')
     # SOCP toggles
     parser.add_argument('--include_voltage_drop_constraint', type=bool, default=True, help="Include voltage drop constraint SOCP")
     parser.add_argument('--include_voltage_bounds_constraint', type=bool, default=True, help="Include voltage bounds constraint SOCP")
@@ -755,13 +625,13 @@ if __name__ == "__main__":
     print("Toggles for optimization:")
     print(SOCP_toggles)
     if args.set:
-        apply_optimization(Path(args.folder_path) / args.set, method=args.method, toggles=SOCP_toggles, debug=args.debug)
+        apply_optimization(Path(args.folder_path) / args.set, method=args.method, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
     elif args.set == "all": 
         for set_name in Path(args.folder_path).iterdir():
             if set_name.is_dir():
                 print("\nProcessing set:", set_name)
-                apply_optimization(Path(args.folder_path) / set_name, method=args.method, toggles=SOCP_toggles, debug=args.debug)
+                apply_optimization(Path(args.folder_path) / set_name, method=args.method, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
     else:
-        apply_optimization(args.folder_path, method=args.method, toggles=SOCP_toggles, debug=args.debug)
+        apply_optimization(args.folder_path, method=args.method, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
 
     print("\nGround truth generation complete!!!!")

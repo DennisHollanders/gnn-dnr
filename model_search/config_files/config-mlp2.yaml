@@ -2,9 +2,9 @@ description: "Train Graph Autoencoder"
 
 job_name: "mlp_test"
 # Data
-data_folder: data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test  #"data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\\test"
+train_data_folder: data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test  #"data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\\test"
 
-real_data_folder: "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32"
+real_val_data_folder: "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32"
 
 # Model
 model_module: "MLP"
@@ -19,7 +19,7 @@ dropout_rate: 0.0
 learning_rate: 0.001
 weight_decay: 0.00005
 batch_size: 8
-epochs: 100
+epochs: 2
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
