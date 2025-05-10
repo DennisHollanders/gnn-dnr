@@ -1,18 +1,20 @@
 description: "Train Graph Autoencoder"
 
+job_name: "mlp_test"
 # Data
-data_folder: "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+data_folder: "data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\\test"
 
-real_data_folder: 
+real_data_folder: "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32"
 
 # Model
-model_module: "GraphAutoencoder"
+model_module: "MLP"
 
 # Training
 input_dim: 4
 hidden_dims: [256, 128, 64, 32, 16]
 latent_dim: 8
 activation: "relu"
+criterion_name: MSELoss
 dropout_rate: 0.0
 learning_rate: 0.001
 weight_decay: 0.00005
@@ -21,15 +23,13 @@ epochs: 100
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
-job_name: "first run"
-criterion_name: MSELoss
-wandb: false
+wandb: True
+config: config-mlp.yaml
 loader_type: "default"
-
 # Data Loading Configuration
 batching_type: "dynamic"
 max_nodes: 1000
 max_edges: 5000
-train_ratio: 0.8
+train_ratio: 0.85
 seed: 42
-num_workers: 0
+num_workers: 1

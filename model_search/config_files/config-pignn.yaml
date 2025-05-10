@@ -23,6 +23,7 @@ hp_search_n_trials: 50
 job_name: "first run"
 criterion_name: PIGNNCriterion
 wandb: True
+loader_type: "default"
 
 # Data Loading Configuration
 batching_type: "dynamic"

@@ -4,17 +4,22 @@ import pickle as pkl
 from enum import Enum
 import torch
 from torch_geometric.utils import from_networkx
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
+from torch_geometric.data import Data, Batch
+from torch_geometric.loader import DataLoader, NeighborLoader 
 import networkx as nx
 import numpy as np
 import pandapower as pp
 from preprocess_data import *
+
 from pandapower import from_json, from_json_dict
-import tqdm
 import logging 
 import sys
 import random
+import matplotlib.pyplot as plt
+import math
+from pathlib import Path
+from tqdm import tqdm
+import concurrent.futures
 
 # Add necessary source paths
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -143,61 +148,6 @@ def load_graph_data_old(base_directory):
 
     return nx_graphs, pp_networks, features
 
-# def load_graph_data(base_directory):
-#     """
-#     Load networkx graphs, pandapower networks and feature‐pickles
-#     from three subfolders: original, post_MST, optimization.
-#     Returns three dicts: nx_graphs, pp_networks, features each keyed by
-#     phase ∈ {"original","post_mst","optimization"} → {graph_id → obj}
-#     """
-#     phases = {
-#     "original":    ("original",     "_original"),
-#     "post_mst":    ("post_MST",     "_post_mst"),
-#     "optimization":("optimized",    "_optimized"), 
-#     }
-
-#     #nx_graphs   = {p: {} for p in phases}
-#     pp_networks = {p: {} for p in phases}
-#     #features    = {p: {} for p in phases}
-
-#     for phase, (subdir, suffix) in phases.items():
-#         # feat_dir = os.path.join(base_directory, subdir, "graph_features")
-#         # for fn in os.listdir(feat_dir) if os.path.isdir(feat_dir) else []:
-#         #     if fn.endswith(".pkl"):
-#         #         base, _ = os.path.splitext(fn)
-#         #         gid = base[:-len(suffix)] if base.endswith(suffix) else base
-#         #         with open(os.path.join(feat_dir, fn), "rb") as f:
-#         #             features[phase][gid] = pkl.load(f)
-#         # print(f"Loaded {len(features[phase])} {phase} features")
-
-#         # nx_dir = os.path.join(base_directory, subdir, "networkx_graphs")
-#         # for fn in os.listdir(nx_dir) if os.path.isdir(nx_dir) else []:
-#         #     base, ext = os.path.splitext(fn)
-#         #     gid = base[:-len(suffix)] if base.endswith(suffix) else base
-#         #     path = os.path.join(nx_dir, fn)
-#         #     if ext == ".pkl":
-#         #         with open(path, "rb") as f:
-#         #             nx_graphs[phase][gid] = pkl.load(f)
-#         #     elif ext == ".graphml":
-#         #         nx_graphs[phase][gid] = nx.read_graphml(path)
-#         # print(f"Loaded {len(nx_graphs[phase])} {phase} graphs")
-
-#         pp_dir = os.path.join(base_directory, subdir, "pandapower_networks")
-#         for fn in os.listdir(pp_dir) if os.path.isdir(pp_dir) else []:
-#             if fn.endswith(".json"):
-#                 base = fn[:-5]
-#                 gid = base[:-len(suffix)] if base.endswith(suffix) else base
-#                 s = open(os.path.join(pp_dir, fn)).read()
-#                 try:
-#                     # pandapower ≥2.4
-#                     pp_networks[phase][gid] = pp.from_json_string(s)
-#                 except:
-#                     pp_networks[phase][gid] = json.loads(s)
-#         print(f"Loaded {len(pp_networks[phase])} {phase} graphs")
-
-#     #return nx_graphs, pp_networks, features
-#     return pp_networks 
-
 
 def load_pp_networks(base_directory):
     """
@@ -210,11 +160,11 @@ def load_pp_networks(base_directory):
     phases = {
         "original": {
             "subdir": "original",
-            "suffix": ""                 # no suffix on original JSONs
+            "suffix": ""                
         },
         "post_mst": {
             "subdir": "post_MST",
-            "suffix": "_post_mst"        # lowercase matches filenames
+            "suffix": "_post_mst"       
         },
         "optimization": {
             "subdir": "optimized",
@@ -222,258 +172,85 @@ def load_pp_networks(base_directory):
         }
     }
     nets = {phase: {} for phase in phases}
+    # for phase, info in phases.items():
+    #     subdir = info["subdir"]
+    #     suffix = info["suffix"]
+    #     folder = os.path.join(base_directory, subdir, "pandapower_networks")
+    #     if not os.path.isdir(folder):
+    #         logger.warning("No folder for phase '%s': %s", phase, folder)
+    #         continue
+    #     for fn in os.listdir(folder):
+    #         if not fn.endswith(".json"):
+    #             continue
+    #         base = fn[:-5]
+    #         # strip only the exact suffix
+    #         if suffix and base.endswith(suffix):
+    #             gid = base[:-len(suffix)]
+    #         else:
+    #             gid = base
+    #         raw = open(os.path.join(folder, fn)).read()
+    #         try:
+    #             nets[phase][gid] = pp.from_json_string(raw)
+    #         except Exception:
+    #             raw_dict = json.loads(raw)
+    #             nets[phase][gid] = from_json_dict(raw_dict)
+    #     logger.info("Loaded %d pandapower nets for phase '%s'", len(nets[phase]), phase)
+    # return nets
+    nets: dict[str, dict[str, pp.pandapowerNet]] = {p: {} for p in phases}
+
     for phase, info in phases.items():
-        subdir = info["subdir"]
+        folder = os.path.join(base_directory,
+                              info["subdir"],
+                              "pandapower_networks")
         suffix = info["suffix"]
-        folder = os.path.join(base_directory, subdir, "pandapower_networks")
         if not os.path.isdir(folder):
-            logger.warning("No folder for phase '%s': %s", phase, folder)
+            logger.warning("No folder for %s phase: %s", phase, folder)
             continue
-        for fn in os.listdir(folder):
+
+        logger.info("Loading nets for phase '%s'…", phase)
+        for fn in tqdm(os.listdir(folder), desc=f"{phase} nets", unit="file"):
             if not fn.endswith(".json"):
                 continue
-            base = fn[:-5]
-            # strip only the exact suffix
-            if suffix and base.endswith(suffix):
-                gid = base[:-len(suffix)]
-            else:
-                gid = base
-            raw = open(os.path.join(folder, fn)).read()
+
+            gid = fn[:-5]
+            if suffix and gid.endswith(suffix):
+                gid = gid[:-len(suffix)]
+            path = os.path.join(folder, fn)
+
+            # ── step 1 – normal reader ───────────────────────────────
+            print(type(path))
             try:
-                nets[phase][gid] = pp.from_json_string(raw)
+                net = pp.from_json(path)
             except Exception:
-                raw_dict = json.loads(raw)
-                nets[phase][gid] = from_json_dict(raw_dict)
-        logger.info("Loaded %d pandapower nets for phase '%s'", len(nets[phase]), phase)
+                # ── step 2 – double-encoded / exotic cases ────────────
+                try:
+                    with open(path) as f:
+                        raw = f.read()
+                        print(type(raw))
+
+                    # case a) JSON string encoded twice
+                    if raw.startswith('"') and raw.endswith('"'):
+                        raw = json.loads(raw)
+
+                    # try Pandapower again
+                    try:
+                        net = pp.from_json_string(raw)
+                    except Exception:
+                        # last resort: raw → dict → Net
+                        net = from_json_dict(json.loads(raw))
+                except Exception as e:
+                    logger.error("Failed loading %s: %s", path, e)
+                    continue   # skip this file
+
+            if net.bus.empty:
+                logger.warning("Skipping %s – empty bus table", gid)
+                continue
+
+            nets[phase][gid] = net
+
+        logger.info("Loaded %d nets for phase '%s'", len(nets[phase]), phase)
+
     return nets
-
-# def create_pyg_data_from_nx(nx_graph, pp_network, loader_type=DataloaderType.DEFAULT,
-#                             use_fallback_features=False, fallback_features=None):
-#     # Validate that the graph has all required node attributes
-#     if hasattr(pp_network, "bus"):
-#         pp.runpp(pp_network)
-#         for node in nx_graph.nodes():
-#             try:
-#                 res = pp_network.res_bus.loc[node]
-#             except KeyError:
-#                 # fallback to row-by-position
-#                 res = pp_network.res_bus.iloc[int(node)]
-#             nx_graph.nodes[node].update({
-#                 "p":     res.p_mw,
-#                 "q":     res.q_mvar,
-#                 "v":     res.vm_pu,
-#                 "theta": res.va_degree,
-#             })
-    
-#     for node in nx_graph.nodes():
-#         for attr in ["p", "q", "v", "theta"]:
-#             if attr not in nx_graph.nodes[node]:
-#                 if use_fallback_features and fallback_features and "node_features" in fallback_features:
-#                     node_feats = fallback_features["node_features"]
-#                     if node in node_feats and attr in node_feats[node]:
-#                         nx_graph.nodes[node][attr] = node_feats[node][attr]
-#                     else:
-#                         raise ValueError(f"Node {node} missing attribute '{attr}' and not found in fallback features")
-#                 else:
-#                     raise ValueError(f"Node {node} missing required attribute '{attr}'")
-
-#     # Validate that the graph has all required edge attributes
-#     for u, v in nx_graph.edges():
-#         for attr in ["R", "X", "switch_state"]:
-#             if attr not in nx_graph[u][v]:
-#                 if use_fallback_features and fallback_features and "edge_features" in fallback_features:
-#                     edge_feats = fallback_features["edge_features"]
-#                     if (u, v) in edge_feats and attr in edge_feats[(u, v)]:
-#                         nx_graph[u][v][attr] = edge_feats[(u, v)][attr]
-#                     elif (v, u) in edge_feats and attr in edge_feats[(v, u)]:
-#                         nx_graph[u][v][attr] = edge_feats[(v, u)][attr]
-#                     else:
-#                         raise ValueError(f"Edge {u}-{v} missing attribute '{attr}' and not found in fallback features")
-#                 else:
-#                     raise ValueError(f"Edge {u}-{v} missing required attribute '{attr}'")
-
-#             if attr in ["R", "X"] and nx_graph[u][v][attr] == 0:
-#                 raise ValueError(f"Edge {u}-{v} has zero {attr} value which will cause division by zero")
-
-#     # Create the edge_index tensor
-#     edges = list(nx_graph.edges())
-#     if not edges:
-#         raise ValueError("Graph has no edges")
-#     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
-
-#     # Extract edge attributes
-#     edge_attrs = []
-#     for u, v in edges:
-#         edge_attrs.append([
-#             nx_graph[u][v]["R"],
-#             nx_graph[u][v]["X"],
-#             nx_graph[u][v]["switch_state"]
-#         ])
-#     edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
-
-#     # print("before loading:", pp_network[:100])
-#     # print(type(pp_network))
-#     # # Ensure pp_network is a dictionary before calling from_json_dict
-#     # if isinstance(pp_network, str):
-#     #     pp_network = json.loads(pp_network)
-#     # pp_network_loaded = from_json_dict(pp_network)
-#     # print("after loading:", str(pp_network_loaded)[:100])
-#     # print(pp_network_loaded.line.iloc[0])
-
-#     # line_currents = torch.tensor(pp_network_loaded.res_line.loading_percent.values, dtype=torch.float)
-#     # edge_attr = torch.cat([edge_attr, line_currents.unsqueeze(1)], dim=1)
-
-#     # Extract node features
-#     num_nodes = nx_graph.number_of_nodes()
-#     node_features = []
-#     nodes = list(nx_graph.nodes())
-#     if set(nodes) != set(range(len(nodes))):
-#         raise ValueError("Graph nodes must be consecutive integers starting from 0")
-#     for node_idx in range(num_nodes):
-#         node_data = nx_graph.nodes[node_idx]
-#         node_features.append([
-#             node_data["p"],
-#             node_data["q"],
-#             node_data["v"],
-#             node_data["theta"]
-#         ])
-#     x = torch.tensor(node_features, dtype=torch.float)
-
-#     # Create the PyG Data object
-#     data = Data(
-#         x=x,
-#         edge_index=edge_index,
-#         edge_attr=edge_attr,
-#         num_nodes=num_nodes
-#     )
-
-#     # Create our custom DNRDataset with the data
-#     custom_data = DNRDataset(
-#         x=data.x, 
-#         edge_index=data.edge_index,
-#         edge_attr=data.edge_attr,
-#         num_nodes=data.num_nodes
-#     )
-
-#     # Add edge_y (switch state is the 3rd column - index 2)
-#     switch_state_column = 2
-#     custom_data.edge_y = edge_attr[:, switch_state_column].float()
-
-#     # Add matrices based on loader type
-#     if loader_type != DataloaderType.DEFAULT:
-#         conductance_matrix = calculate_conductance_matrix(nx_graph)
-#         coalesced = conductance_matrix.coalesce()
-#         custom_data.conductance_matrix_index = coalesced.indices()
-#         custom_data.conductance_matrix_values = coalesced.values()
-
-#         adjacency_matrix = calculate_adjacency_matrix(nx_graph)
-#         custom_data.adjacency_matrix_index = adjacency_matrix.coalesce().indices()
-#         custom_data.adjacency_matrix_values = adjacency_matrix.coalesce().values()
-
-#         switch_matrix = calculate_switch_matrix(nx_graph)
-#         custom_data.switch_matrix_index = switch_matrix.coalesce().indices()
-#         custom_data.switch_matrix_values = switch_matrix.coalesce().values()
-
-#     # Add PINN-specific matrices
-#     if loader_type == DataloaderType.PINN:
-#         laplacian_matrix = calculate_laplacian_matrix(nx_graph)
-#         custom_data.laplacian_matrix_index = laplacian_matrix.coalesce().indices()
-#         custom_data.laplacian_matrix_values = laplacian_matrix.coalesce().values()
-
-#         admittance_matrix = calculate_admittance_matrix(nx_graph)
-#         custom_data.admittance_matrix_index = admittance_matrix.coalesce().indices()
-#         custom_data.admittance_matrix_values = admittance_matrix.coalesce().values()
-
-#     return custom_data
-    
-# def create_pyg_dataset_old(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
-#     nx_graphs, pp_networks, features = load_graph_data(base_directory)
-    
-#     data_list = []
-#     successful_conversions = 0
-#     failed_conversions = 0
-    
-#     for graph_name in nx_graphs.keys():
-#         print(f"\n--- Processing graph: {graph_name} ---")
-#         nx_graph = nx_graphs[graph_name]
-        
-#         # Get features as fallback only if requested
-#         fallback_features = features.get(graph_name, None) if use_fallback_features else None
-        
-#         try:
-#             # Create PyG data directly from the NetworkX graph, let errors propagate
-#             data = create_pyg_data_from_nx(
-#                 nx_graph, 
-#                 pp_networks[graph_name],
-#                 loader_type, 
-#                 use_fallback_features=use_fallback_features,
-#                 fallback_features=fallback_features
-#             )
-            
-#             data_list.append(data)
-#             successful_conversions += 1
-#             print(f"Successfully converted graph: {graph_name}")
-                
-#         except Exception as e:
-#             failed_conversions += 1
-#             print(f"Error creating PyG data for {graph_name}: {e}")
-#             # Let the exception propagate if this is a critical error
-#             if "missing required attribute" in str(e) or "zero" in str(e):
-#                 raise  # Re-raise important errors
-    
-#     print(f"\nCreated {len(data_list)} PyG data objects")
-#     print(f"Successful conversions: {successful_conversions}")
-#     print(f"Failed conversions: {failed_conversions}")
-    
-#     return data_list
-# def create_pyg_dataset(base_directory, loader_type=DataloaderType.DEFAULT, use_fallback_features=False):
-#     # new loader: returns dicts keyed by phase → {graph_id: obj}
-#     nx_all, pp_all, feat_all = load_graph_data(base_directory)
-#     data_list = []
- 
-#     # loop phases original → post_mst → optimization
-#     for phase in ("original", "post_mst", "optimization"):
-#         for graph_name, nx_graph in nx_all[phase].items():
-#             nx_opt = nx_all["optimization"].get(graph_name)
-#             if nx_opt is None:
-#                 logger.warning("No optimized graph for %s, skipping y-labels", graph_name)
-#                 continue
-#             logger.info("Phase %s — Processing graph: %s", phase, graph_name)
-#             pp_net = pp_all[phase].get(graph_name)
-#             fallback = (feat_all[phase].get(graph_name)
-#                         if use_fallback_features else None)
-#             try:
-#                 # 1) build the usual Data object from original graph
-#                 data = create_pyg_data_from_nx(
-#                     nx_graph,
-#                     pp_net,
-#                     loader_type,
-#                     use_fallback_features=use_fallback_features,
-#                     fallback_features=fallback
-#                 )
-             
-#                 logger.debug("Successfully converted graph: %s", graph_name, phase)
-#                 # 2) compute ground-truth switch states on each original edge
-#                 #    (1 if that edge still exists in nx_opt, else 0)
-#                 opt_edges = {tuple(sorted(e)) for e in nx_opt.edges()}
-#                 # data.edge_index is 2×E; transpose to list of (u,v)
-#                 uv = data.edge_index.t().tolist()
-#                 y = torch.tensor([1.0 if tuple(sorted((u, v))) in opt_edges else 0.0
-#                                 for u, v in uv],
-#                                 dtype=torch.float)
-
-#                 data.y = y
-#                 data_list.append(data)
-#             except Exception as e:
-#                 logger.error("Error creating PyG data for %s: %s", graph_name, e)
-#                 # Let the exception propagate if this is a critical error
-#                 if "missing required attribute" in str(e) or "zero" in str(e):
-#                     raise
-#     print(f"Created {len(data_list)} Data objects for training")
-#     print(f"Successful conversions: {len(data_list)}")
-#     print(f"Failed conversions: {len(nx_all[phase]) - len(data_list)}")
-
-#     return data_list
 
 
 def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
@@ -495,38 +272,54 @@ def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
     # --- run power flow ---
     pp.runpp(pp_net)
 
+    # ── build a dense, contiguous bus-id → row lookup ─────────────
+    bus_ids = pp_net.bus.index.to_numpy(dtype=int)           # original IDs
+    id2row  = {bid: i for i, bid in enumerate(bus_ids)}      # 0 … n-1
+    n_nodes = len(bus_ids)
+
     # --- node features ---
-    bus_res = pp_net.res_bus
-    x = torch.tensor(
-        np.stack([
-            bus_res.p_mw.values,
-            bus_res.q_mvar.values,
-            bus_res.vm_pu.values,
-            bus_res.va_degree.values
-        ], axis=1),
-        dtype=torch.float
-    )
+    bus_res = pp_net.res_bus.loc[bus_ids]     
+    x = torch.tensor(np.vstack([
+        bus_res.p_mw.values,
+        bus_res.q_mvar.values,
+        bus_res.vm_pu.values,
+        bus_res.va_degree.values
+    ]).T, dtype=torch.float)
 
     # --- edge list & features ---
     lines = pp_net.line
-    from_b = lines.from_bus.values.astype(int)
-    to_b   = lines.to_bus.values.astype(int)
-    edge_index = torch.tensor([from_b, to_b], dtype=torch.long)
+    n_lines = len(lines)
 
+    # bus re-indexing stays exactly as before
+    from_b = [id2row[int(b)] for b in lines.from_bus.values]
+    to_b   = [id2row[int(b)] for b in lines.to_bus.values]
+    
+    #edge_index = torch.tensor([from_b, to_b], dtype=torch.long)
+    edge_index = torch.as_tensor( np.vstack((from_b, to_b)), dtype=torch.long, device="cpu"
+        )  
+    #edge_index = torch.as_tensor(np.vstack((from_b, to_b)), dtype=torch.long)
+    switch_state = np.ones(n_lines, dtype=int)         # default: closed
+
+    for _, sw in pp_net.switch.iterrows():
+        if sw.et == "l":                               # only line-switches
+            line_idx   = int(sw.element)               # idx in  pp_net.line
+            switch_state[line_idx] = int(sw.closed)    # 1 = closed, 0 = open
     R = lines.r_ohm_per_km.values
     X = lines.x_ohm_per_km.values
-    switches = pp_net.switch
-    sw_map = {(int(r.bus), int(r.element)): int(r.closed) for _, r in switches.iterrows()}
-    switch_state = [sw_map.get((u, v), 0) for u, v in zip(from_b, to_b)]
-    edge_attr = torch.tensor(np.stack([R, X, switch_state], axis=1), dtype=torch.float)
 
-    data = Data(
+    # switches = pp_net.switch
+    # sw_map = {(id2row[int(r.bus)], id2row[int(r.element)]): int(r.closed)
+    #           for _, r in switches.iterrows() if r.et == "l"}
+    edge_attr = torch.tensor(np.vstack([R, X, switch_state]).T, dtype=torch.float)
+    #switch_state = [sw_map.get((u, v), 0) for u, v in zip(from_b, to_b)]
+    
+    #edge_attr = torch.tensor(np.vstack([R, X, switch_state]).T, dtype=torch.float)
+    return Data(
         x=x,
         edge_index=edge_index,
         edge_attr=edge_attr,
         num_nodes=x.size(0)
     )
-    return data
 
 def create_pyg_dataset_simple(
     base_directory,
@@ -539,7 +332,7 @@ def create_pyg_dataset_simple(
         random.seed(seed)
 
     data_list = []
-    for gid, net_orig in pp_all["original"].items():
+    for gid, net_orig in tqdm(pp_all["original"].items(), desc= f"Creating pyg data from {base_directory}"):
         net_opt = pp_all["optimization"].get(gid)
         if net_opt is None:
             logger.warning(f"No optimized net for {gid}, skipping")
@@ -595,7 +388,10 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
                      current_edges + edges > self.max_edges) and 
                     len(current_batch) > 0):
                     # Yield the current batch
-                    logger.debug("Yielding batch of %d graphs (nodes=%d, edges=%d)", len(batch), nodes, edges)
+                    logger.debug("Yielding batch of %d graphs (nodes=%d, edges=%d)",
+                        len(current_batch),           # <-- was len(batch)
+                        current_nodes,
+                        current_edges)
                     yield current_batch
                     # Start a new batch with the current graph
                     current_batch = [idx]
@@ -609,7 +405,10 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
             
             # Yield the last batch if it's not empty
             if current_batch:
-                logger.debug("Yielding final batch of %d graphs", len(batch))
+                logger.debug(
+                    "Yielding final batch of %d graphs",
+                    len(current_batch)        # <-- was len(batch)
+                )
                 yield current_batch
                 
         def __len__(self):
@@ -629,53 +428,389 @@ def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,
     return DataLoader(
         dataset, 
         batch_sampler=batch_sampler, 
+        collate_fn= lambda batch: Batch.from_data_list(batch),
         **kwargs
     )
+def create_neighbor_loaders(dataset, num_neighbors=[15, 10], batch_size=1024, **kwargs):
+    return NeighborLoader(
+        dataset,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        shuffle=True,
+        **kwargs,
+    )
+
+def create_data_loaders(
+    base_directory,
+    secondary_directory=None,
+    loader_type: DataloaderType = DataloaderType.DEFAULT,
+    batch_size=32, max_nodes=1000, max_edges=5000,
+    transform=None, train_ratio=0.85, seed=0,
+    batching_type="standard", num_workers=1,
+):
+    """
+    Creates data loaders for power network data with caching datasets.
+    Generates and saves datasets if cache is not found.
+    """
+    # Optional: check_directory_structure(base_directory, secondary_directory)
+    # It's good practice, uncomment if desired.
+
+    # Use a generator for reproducible splits
+    generator = torch.Generator().manual_seed(seed)
+    torch.manual_seed(seed) # Ensure other random operations (like feature_phase_prob) are also reproducible
+    random.seed(seed) # Seed random module used in create_pyg_dataset_simple
 
 
-def create_data_loaders(base_directory,secondary_directory=None, loader_type=DataloaderType.DEFAULT, 
-                       batch_size=32, max_nodes=1000, max_edges=5000,
-                        transform=None, train_ratio=0.8, seed=0,batching_type="standard", num_workers=1,):
-    dataset = create_pyg_dataset_simple(base_directory, loader_type)
+    # 1. Define cache directory and paths
+    # Use a cache directory that incorporates relevant parameters for uniqueness
+    base_dir_part = Path(base_directory).name.replace('.', '_').replace('/', '_').replace('\\', '_')
+    # Handle cases where base_directory itself is a root or drive letter
+    if not base_dir_part:
+         base_dir_part = Path(base_directory).stem.replace('.', '_') if Path(base_directory).stem else "root"
+
+    secondary_dir_part = ""
     if secondary_directory:
-        print("==================================================","\n start loading secondary data")
-        val_real_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "validation"), loader_type)
-        test_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "test"), loader_type)
+        secondary_dir_part = Path(secondary_directory).name.replace('.', '_').replace('/', '_').replace('\\', '_')
+        if not secondary_dir_part:
+            secondary_dir_part = Path(secondary_directory).stem.replace('.', '_') if Path(secondary_directory).stem else "root"
 
-    
-    if transform:
-        dataset = [transform(data) for data in dataset]
-        if secondary_directory: 
-            val_real_set = [transform(data) for data in val_real_set]
-            test_set = [transform(data) for data in test_set]
-    
-    torch.manual_seed(seed)
-    train_size = int(train_ratio * len(dataset))
-    train_set, val_synthetic_set= torch.utils.data.random_split(dataset, [train_size, len(dataset) - train_size])
-    
-     
-    print("==================================================","\n start creating loaders")
-    val_real_loader, test_loader= [None], [None]
+    # Incorporate parameters that change dataset generation/split
+    cache_subdir_name_parts = [base_dir_part]
+    if secondary_directory:
+        cache_subdir_name_parts.append(secondary_dir_part)
 
-    # Create loaders based on the loader type
-    if batching_type == "dynamic":
-        train_loader = create_dynamic_loader(train_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=True, num_workers=num_workers)
-        val_synthetic_loader = create_dynamic_loader(val_synthetic_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
-        if secondary_directory:
-            val_real_loader = create_dynamic_loader(val_real_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
-            test_loader = create_dynamic_loader(test_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
+    cache_subdir_name_parts.extend([
+         loader_type.value,
+         f"s{seed}",
+         f"r{int(train_ratio*100)}"
+    ])
+    cache_subdir_name = "_".join(cache_subdir_name_parts)
+
+
+    cache_dir = Path("data") / "cached_datasets" / cache_subdir_name
+    cache_dir.mkdir(parents=True, exist_ok=True) # Ensure cache directory exists
+
+
+    # Define specific file paths within the cache directory
+    # Use consistent names regardless of input directory names within the cache folder
+    synthetic_dataset_path = cache_dir / "synthetic_dataset.pt"
+    val_real_dataset_path = cache_dir / "val_real_dataset.pt"
+    test_dataset_path = cache_dir / "test_dataset.pt"
+
+
+    # Initialize dataset variables - they will be populated from cache or generation
+    synthetic_dataset = None # This holds the full base dataset before splitting
+    train_set = None
+    val_synthetic_set = None
+    val_real_set = None
+    test_set = None
+
+    # 2. Check cache availability for base and secondary datasets separately
+    cache_found_base = os.path.exists(synthetic_dataset_path)
+    cache_found_secondary = False
+    if secondary_directory:
+         cache_found_secondary = os.path.exists(val_real_dataset_path) and os.path.exists(test_dataset_path)
+
+
+    logger.info(f"Cache found for base data ({synthetic_dataset_path}): {cache_found_base}")
+    if secondary_directory:
+         logger.info(f"Cache found for secondary data ({val_real_dataset_path}, {test_dataset_path}): {cache_found_secondary}")
+
+
+    # 3. Load or Generate Base Data
+    if cache_found_base:
+        logger.info(f"Cache found for base data at {synthetic_dataset_path}, loading dataset...")
+        try:
+            # **FIX:** Use the correct path and disable weights_only
+            synthetic_dataset = torch.load(synthetic_dataset_path, weights_only=False)
+            logger.info(f"Base dataset loaded from cache ({len(synthetic_dataset) if synthetic_dataset is not None else 0} samples).")
+            if not isinstance(synthetic_dataset, list): # Ensure it's a list after loading
+                 synthetic_dataset = list(synthetic_dataset)
+                 logger.warning("Loaded base dataset was not a list, converted to list.")
+        except Exception as e:
+            logger.error(f"Failed to load base dataset from cache: {e}. Proceeding with data generation.", exc_info=True) # Log traceback
+            synthetic_dataset = None # Ensure it's None to trigger generation
+
+    if synthetic_dataset is None or not synthetic_dataset: # If cache failed, not found, or loaded empty list
+        logger.info("==================================================")
+        logger.info("Start loading and generating base data") # **FIX:** Corrected logging message
+        synthetic_dataset = create_pyg_dataset_simple(base_directory, loader_type, seed=seed) # Pass seed for internal randomness
+
+        if not synthetic_dataset:
+            logger.error("Failed to generate base dataset. Cannot proceed.")
+            # Return None for all loaders
+            return None, None, None, None
+
+        # Save the generated base dataset
+        logger.info(f"Saving generated base dataset to cache at {synthetic_dataset_path}...")
+        try:
+            # **FIX:** Save the generated dataset
+            torch.save(synthetic_dataset, synthetic_dataset_path)
+            logger.info("Base dataset saved to cache.")
+        except Exception as e:
+            logger.error(f"Failed to save base dataset to cache: {e}", exc_info=True) # Log traceback
+
+
+    # 4. Load or Generate Secondary Data
+    if secondary_directory:
+        if cache_found_secondary:
+            logger.info(f"Cache found for secondary data at {val_real_dataset_path} and {test_dataset_path}, loading datasets...")
+            try:
+                # **FIX:** Use the correct paths and disable weights_only
+                val_real_set = torch.load(val_real_dataset_path, weights_only=False)
+                test_set = torch.load(test_dataset_path, weights_only=False)
+                logger.info(f"Secondary datasets loaded from cache (Val:{len(val_real_set) if val_real_set is not None else 0}, Test:{len(test_set) if test_set is not None else 0} samples).")
+                # Ensure they are lists after loading
+                if not isinstance(val_real_set, list): val_real_set = list(val_real_set)
+                if not isinstance(test_set, list): test_set = list(test_set)
+            except Exception as e:
+                 logger.error(f"Failed to load secondary datasets from cache: {e}. Proceeding with data generation.", exc_info=True) # Log traceback
+                 val_real_set = None # Ensure None to trigger generation
+                 test_set = None
+        # else: # Cache not found - handled by the generation block below
+
+
+        if val_real_set is None or test_set is None or not val_real_set or not test_set: # If cache failed, not found, or loaded empty lists
+            logger.info("==================================================")
+            logger.info("Start loading and generating secondary data") # **FIX:** Corrected logging message
+            val_real_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "validation"), loader_type, seed=seed) # Pass seed? Depends if randomness matters for secondary data generation.
+            test_set = create_pyg_dataset_simple(os.path.join(secondary_directory, "test"), loader_type, seed=seed) # Pass seed?
+
+            # Ensure lists even if None was returned by create_pyg_dataset_simple
+            if val_real_set is None: val_real_set = []
+            if test_set is None: test_set = []
+
+            # Save the generated secondary datasets
+            logger.info(f"Saving generated secondary datasets to cache at {val_real_dataset_path} and {test_dataset_path}...")
+            try:
+                # **FIX:** Save the generated datasets
+                torch.save(val_real_set, val_real_dataset_path)
+                torch.save(test_set, test_dataset_path)
+                logger.info("Secondary datasets saved to cache.")
+            except Exception as e:
+                logger.error(f"Failed to save secondary datasets to cache: {e}", exc_info=True) # Log traceback
+    else: # No secondary_directory provided
+        val_real_set = [] # Explicitly ensure empty lists
+        test_set = []
+        logger.info("No secondary directory provided. Real validation and test datasets are empty.")
+
+
+    # 5. Perform Train/Validation Split on the Base Dataset
+    # This happens *after* the base dataset is guaranteed to be loaded or generated.
+    logger.info("==================================================") # **FIX:** Corrected logging message
+    logger.info("Performing train/validation split on base dataset")
+
+    # Ensure synthetic_dataset is valid before splitting
+    if not synthetic_dataset or not isinstance(synthetic_dataset, list):
+         logger.error("Base synthetic dataset is empty or not a list. Cannot perform split.")
+         # Return None for loaders or handle appropriately
+         train_set = [] # Ensure empty lists for consistency
+         val_synthetic_set = []
     else:
-        # Use standard DataLoader
-        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,num_workers=num_workers)
-        val_synthetic_loader = DataLoader(val_synthetic_set, batch_size=batch_size, shuffle=False,num_workers=num_workers)
-        if secondary_directory:
-            val_real_loader = DataLoader(val_real_set, batch_size=batch_size, shuffle=False,num_workers=num_workers)
-            test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,num_workers=num_workers)
-    
+        train_size = int(train_ratio * len(synthetic_dataset))
 
-    print(f"Created data loaders with: \n       training: {len(train_set)}\n        synthetic validation:{len(val_synthetic_loader)}\n      real validation:{len(val_real_loader)}\n         test samples:{len(test_loader)}")
-    
+        # Handle edge cases for splitting small datasets
+        if len(synthetic_dataset) < 2:
+             logger.warning("Synthetic dataset size is less than 2. Cannot perform train/val split.")
+             train_set = list(synthetic_dataset) # Use the whole dataset for training or handle as needed
+             val_synthetic_set = [] # Empty val set
+        elif train_size == 0:
+             logger.warning("Calculated train set size is 0. Entire synthetic dataset used for validation.")
+             train_set = [] # Empty train set
+             val_synthetic_set = list(synthetic_dataset)
+        elif train_size == len(synthetic_dataset):
+             logger.warning("Calculated train set size equals dataset size. No synthetic validation set.")
+             train_set = list(synthetic_dataset)
+             val_synthetic_set = [] # Empty val set
+        else:
+            # Perform the random split
+            train_set, val_synthetic_set = torch.utils.data.random_split(
+                synthetic_dataset, [train_size, len(synthetic_dataset) - train_size], generator=generator
+            )
+            # Convert Subset objects from random_split back to lists for consistency
+            train_set = list(train_set)
+            val_synthetic_set = list(val_synthetic_set)
+
+    logger.info(f"Split base dataset: Train ({len(train_set)}), Synthetic Val ({len(val_synthetic_set)})")
+
+
+    # 6. Apply transform to all datasets (after loading/generating and splitting synthetic)
+    logger.info("==================================================") # **FIX:** Corrected logging message
+    logger.info("Start applying transform")
+    if transform:
+        # Check if datasets are not None and are lists before transforming
+        # The split ensures train_set and val_synthetic_set are lists, but check just in case
+        if train_set is not None and isinstance(train_set, list):
+             logger.info(f"Applying transform to {len(train_set)} train samples.")
+             train_set = [transform(data) for data in train_set]
+        else: logger.debug("Train set is None or not a list (or empty), skipping transform.")
+
+        if val_synthetic_set is not None and isinstance(val_synthetic_set, list):
+             logger.info(f"Applying transform to {len(val_synthetic_set)} synthetic validation samples.")
+             val_synthetic_set = [transform(data) for data in val_synthetic_set]
+        else: logger.debug("Synthetic validation set is None or not a list (or empty), skipping transform.")
+
+        # Only attempt secondary transforms if secondary_directory was originally provided AND datasets are lists
+        if secondary_directory:
+             if val_real_set is not None and isinstance(val_real_set, list):
+                  logger.info(f"Applying transform to {len(val_real_set)} real validation samples.")
+                  val_real_set = [transform(data) for data in val_real_set]
+             else: logger.debug("Real validation set is None or not a list (or empty), skipping transform.")
+
+             if test_set is not None and isinstance(test_set, list):
+                  logger.info(f"Applying transform to {len(test_set)} test samples.")
+                  test_set = [transform(data) for data in test_set]
+             else: logger.debug("Test set is None or not a list (or empty), skipping transform.")
+
+        logger.info("Transform application finished.")
+    else:
+        logger.info("No transform specified, skipping transform step.")
+
+
+    # 7. Create DataLoaders from the datasets
+    logger.info("==================================================") # **FIX:** Corrected logging message
+    logger.info("Start creating loaders")
+
+    # Initialize loaders to None
+    train_loader = None
+    val_synthetic_loader = None
+    val_real_loader = None
+    test_loader = None
+
+    # Create loaders only if the corresponding dataset list is not empty
+    # Dynamic and Standard Loaders expect a list of Data objects
+    if batching_type == "dynamic":
+        if train_set: # Check if list is not empty/None
+             train_loader = create_dynamic_loader(train_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=True, num_workers=num_workers)
+        else: logger.warning("Train dataset is empty, train_loader is None.")
+
+        if val_synthetic_set: # Check if list is not empty/None
+             val_synthetic_loader = create_dynamic_loader(val_synthetic_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
+        else: logger.warning("Synthetic validation dataset is empty, val_synthetic_loader is None.")
+
+        if secondary_directory:
+             if val_real_set: # Check if list is not empty/None
+                  val_real_loader = create_dynamic_loader(val_real_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
+             else: logger.warning("Real validation dataset is empty, val_real_loader is None.")
+
+             if test_set: # Check if list is not empty/None
+                  test_loader = create_dynamic_loader(test_set, max_nodes=max_nodes, max_edges=max_edges, shuffle=False, num_workers=num_workers)
+             else: logger.warning("Test dataset is empty, test_loader is None.")
+        else: logger.info("No secondary directory, val_real_loader and test_loader remain None.")
+
+
+    elif batching_type == "neighbor":
+         # **FIX:** NeighborLoader support for list[Data] is not standard. Keep as placeholder returning None.
+         logger.error("NeighborLoader batching_type not fully implemented for dataset lists. Loaders will be None.")
+         train_loader = None
+         val_synthetic_loader = None
+         val_real_loader = None
+         test_loader = None
+
+    else: # Use standard DataLoader
+        if train_set: # Check if list is not empty/None
+             train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        else: logger.warning("Train dataset is empty, train_loader is None.")
+
+        if val_synthetic_set: # Check if list is not empty/None
+             val_synthetic_loader = DataLoader(val_synthetic_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        else: logger.warning("Synthetic validation dataset is empty, val_synthetic_loader is None.")
+
+        if secondary_directory:
+             if val_real_set: # Check if list is not empty/None
+                  val_real_loader = DataLoader(val_real_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+             else: logger.warning("Real validation dataset is empty, val_real_loader is None.")
+
+             if test_set: # Check if list is not empty/None
+                  test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+             else: logger.warning("Test dataset is empty, test_loader is None.")
+        else: logger.info("No secondary directory, val_real_loader and test_loader remain None.")
+
+
+    # Print counts - handle potential None datasets gracefully
+    # Use the variables *after* they have been assigned
+    train_count = len(train_set) if train_set is not None and isinstance(train_set, list) else 0
+    val_synth_count = len(val_synthetic_set) if val_synthetic_set is not None and isinstance(val_synthetic_set, list) else 0
+    val_real_count = len(val_real_set) if val_real_set is not None and isinstance(val_real_set, list) else 0
+    test_count = len(test_set) if test_set is not None and isinstance(test_set, list) else 0
+
+
+    print(f"\nCreated data loaders with:")
+    print(f"  Training samples: {train_count}")
+    print(f"  Synthetic validation samples: {val_synth_count}")
+    print(f"  Real validation samples: {val_real_count}")
+    print(f"  Test samples: {test_count}")
+
+
     return train_loader, val_synthetic_loader, val_real_loader, test_loader
+
+def _collect_batch_stats(loader):
+    """Return list[(n_nodes, n_edges)] for *all* batches in loader."""
+    stats = []
+    for batch in loader:
+        if hasattr(batch, "num_graphs"):   # PyG Batch or NeighborSampler output
+            stats.append((batch.num_nodes, batch.num_edges))
+        elif isinstance(batch, list):      # DynamicBatchSampler → list[Data]
+            n = sum(d.num_nodes for d in batch)
+            e = sum(d.num_edges for d in batch)
+            stats.append((n, e))
+        else:                              # Fallback single‐graph batch
+            stats.append((batch.num_nodes, batch.num_edges))
+    return stats
+
+def _plot_hist(vals, title, fname):
+    plt.figure()
+    plt.hist(vals, bins=min(30, int(math.sqrt(len(vals))) + 2))
+    plt.title(title); plt.xlabel("count"); plt.ylabel("#batches")
+    plt.tight_layout(); plt.savefig(fname); plt.close()
+
+def run_loader_diagnostics(train_loader, val_synth_loader,
+                           val_real_loader=None, test_loader=None,
+                           out_dir="diagnostics"):
+    out_dir = Path(out_dir); out_dir.mkdir(exist_ok=True)
+    all_loaders = {
+        "train": train_loader,
+        "val_synth": val_synth_loader,
+        "val_real": val_real_loader,
+        "test": test_loader,
+    }
+
+    # ── iterate once through every loader ────────────────────────────────────
+    for name, loader in all_loaders.items():
+        if loader is None: continue
+        stats = _collect_batch_stats(loader)
+        if not stats: continue
+
+        n_nodes, n_edges = zip(*stats)
+        _plot_hist(n_nodes, f"{name}: nodes per batch", out_dir/f"{name}_nodes.png")
+        _plot_hist(n_edges, f"{name}: edges per batch", out_dir/f"{name}_edges.png")
+
+        print(f"\n[{name.upper()}]  batches={len(stats)}")
+        print(f"  nodes  :  min={min(n_nodes)}  max={max(n_nodes)}  mean={sum(n_nodes)/len(stats):.1f}")
+        print(f"  edges  :  min={min(n_edges)}  max={max(n_edges)}  mean={sum(n_edges)/len(stats):.1f}")
+
+        # ── attribute checks on first batch ────────────────────────────────
+        first = next(iter(loader))
+        msg = f"  attrs  : " + ", ".join(sorted(first.__dict__.keys()))
+        print(msg)
+
+        assert first.edge_index.size(1) == first.edge_attr.size(0), \
+            f"{name}: edge_index vs edge_attr mismatch"
+        if hasattr(first, "edge_y"):
+            assert first.edge_y.size(0) == first.edge_index.size(1), \
+                f"{name}: edge_y length mismatch"
+
+        for tensor_name, t in first.__dict__.items():
+            if torch.is_tensor(t):
+                assert torch.isfinite(t).all(), f"{name}: {tensor_name} contains NaN/Inf"
+
+        # extra matrices for GRAPHYR / PINN
+        for mat in ["conductance_matrix_index", "laplacian_matrix_index"]:
+            if hasattr(first, mat):
+                idx = getattr(first, mat)
+                assert idx.dim() == 2 and idx.size(0) == 2, f"{name}: {mat} malformed"
+
+    print(f"\nDiagnostic plots saved to: {out_dir.resolve()}\n")
 
 
 if __name__ == "__main__":
@@ -686,14 +821,20 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
-    parser.add_argument("--base_dir", type=str,default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test", help="Base directory containing the train/validation folders")
-    parser.add_argument("--secondary_dir", type=str, #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",
+    parser.add_argument("--base_dir", type=str,
+                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test", 
+                        #default=r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test",
+                        default = r"data\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\test",
+                        help="Base directory containing the train/validation folders")
+    parser.add_argument("--secondary_dir", type=str,
+                         #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",
+                        default=r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32",
                         help="Secondary directory containing the test/validation folders")
     parser.add_argument("--loader_type", type=str, default="default", 
                         choices=["default", "graphyr", "pinn",],
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="dynamic",
-                        choices =["standard", "dynamic"])
+                        choices =["standard", "dynamic", "neighbor"],)
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--max_nodes", type=int, default=1000, help="Maximum number of nodes in a batch (for dynamic batching)")
     parser.add_argument("--max_edges", type=int, default=5000, help="Maximum number of edges in a batch (for dynamic batching)")
@@ -711,6 +852,8 @@ if __name__ == "__main__":
     }
     loader_type = loader_type_map[args.loader_type]
     
+    print("base_dir:", args.base_dir)
+    print("secondary_dir:", args.secondary_dir)
     # Create data loaders
     train_loader, val_synthetic_loader,val_real_loader, test_loader = create_data_loaders(
         base_directory=args.base_dir,
@@ -760,3 +903,8 @@ if __name__ == "__main__":
             print(f"Test Batch size: {len(batch_test)}")
     
     logger.info("Data loaders created successfully.")
+
+    # Run the diagnostics on the loaders
+    run_loader_diagnostics(train_loader, val_synthetic_loader,
+                           val_real_loader=val_real_loader, test_loader=test_loader,
+                           out_dir="diagnostics")
