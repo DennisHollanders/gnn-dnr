@@ -24,14 +24,14 @@ if SRC_PATH not in sys.path:
     sys.path.append(SRC_PATH)
     
 from electrify_subgraph import transform_subgraphs
-from logger_setup import logger 
+from logger_setup import setup_logging
 
 def data_paths(data_dir):
     base = Path(data_dir)
     return {
         'cbs': base / "cbs_pc6_2023.gpkg",
         'buurt': base / 'buurt_to_postcodes.csv',
-        'cons': base / "aggregated_kleinverbruik_with_opwek.csv",
+        #'cons': base / "aggregated_kleinverbruik_with_opwek.csv",
         'std': base / "cleaned_energ_standard_energy_data.csv"
     }
 
@@ -40,16 +40,9 @@ def load_static_data(data_dir):
     paths = data_paths(data_dir)
     cbs = gpd.read_file(paths['cbs'])
     buurt = pd.read_csv(paths['buurt'])
-    cons = pd.read_csv(paths['cons'])
+    #cons = pd.read_csv(paths['cons'])
     std  = pd.read_csv(paths['std'])
-    return cbs, buurt, cons, std
-
-# try:
-#     import orjson
-#     json_dumps = lambda obj: orjson.dumps(obj)
-# except ImportError:
-#     import json
-#     json_dumps = lambda obj: json.dumps(obj).encode()
+    return cbs, buurt, None, std
 
 
 def parse_arguments():
@@ -65,7 +58,9 @@ def parse_arguments():
     # Subgraph options
     parser.add_argument('--subgraph_folder', type=str, 
     #default='filtered_complete_subgraphs_final.pkl',
-    default = r"/vast.mnt/home/20174047/gnn-dnr/data/cbs_buurts_nodes/",
+    
+    #default = r"/vast.mnt/home/20174047/gnn-dnr/data/cbs_buurts_nodes/",
+    default=r"data/cbs_buurts_small/",
                         help='Filename for subgraphs input ')
     parser.add_argument('--n_loadcase_time_intervals', type=int, default=1,
                         help='Number of time intervals per sample (default: 1)')
@@ -76,20 +71,20 @@ def parse_arguments():
     parser.add_argument('--iterate_all', action='store_true',
                         help='Iterate over all subgraphs')
     # if iterate_all == True:
-    parser.add_argument('--n_samples_per_graph', type=int, default=1,
+    parser.add_argument('--n_samples_per_graph', type=int, default=5,
                         help='Number of samples per subgraph')
     # if iteral_all == False:
     parser.add_argument('--num_subgraphs', type=int, default=3,
                         help='Number of subgraphs to sample if not iterating')
-    parser.add_argument('--target_busses', type=int, default=100,
+    parser.add_argument('--target_busses', type=int, default=130,
                         help='Target number of busses in sampled subgraphs')
     parser.add_argument('--bus_range', type=int, default=100,
                         help='Range around target number of busses (default: 5)')
     
     # Visualization options
-    parser.add_argument('--plot_subgraphs', default =True,
+    parser.add_argument('--plot_subgraphs', default =False,
                         help='Plot the transformed subgraphs')
-    parser.add_argument('--plot_added_edge',default=True,
+    parser.add_argument('--plot_added_edge',default=False,
                         help='Plot the added edge in subgraphs')
     parser.add_argument('--plot_distributions', action='store_true',
                         help='Plot the distributions')
@@ -103,15 +98,13 @@ def parse_arguments():
                         help='Always select the best switch edge instead of sampling')
     parser.add_argument('--top_x', type=int, default=5,
                         help='Number of top edges to consider for selection ')
-    parser.add_argument('--weight_factor', type=float, default=0.93,
+    parser.add_argument('--weight_factor', type=float, default=0.92,
                         help='Weight factor for distance in edge selection ')
     parser.add_argument('--within_layers', action='store_true', default=True,
                         help='Unconstrain edge selection within layers')
     parser.add_argument("--min_distance_threshold", type=float, default=1,)
     
     # Modification parameters
-    parser.add_argument('--modify_each_sample', default=True,
-                        help='Modify subgraph for each sample')
     parser.add_argument('--consumption_std', type=float, default=0.4,
                         help='Standard deviation for consumption variation (default: 0.4)')
     parser.add_argument('--production_std', type=float, default=0.6,
@@ -126,17 +119,17 @@ def parse_arguments():
                         help='Enable logging')
                         
     # Test and validation set options
-    parser.add_argument('--generate_train_data', default=False,
+    parser.add_argument('--generate_train_data', default=True,
                         help='Generate training data')
     parser.add_argument('--generate_test_val', default=True,
                         help='Generate test and validation sets')
-    parser.add_argument('--test_cases', type=int, default=1000,
+    parser.add_argument('--test_cases', type=int, default=10,
                         help='Number of test cases to generate')
-    parser.add_argument('--val_cases', type=int, default=1000,
+    parser.add_argument('--val_cases', type=int, default=10,
                         help='Number of validation cases to generate')
-    parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.8, 1.2],
+    parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.7, 1.3],
                         help='Range for load variation in test/val sets ')
-    parser.add_argument('--bus_range_test_val', type=int, nargs=2, default=[30, 150],
+    parser.add_argument('--bus_range_test_val', type=int, nargs=2, default=[30, 230],
                         help='Bus range for test/val sets ')
     parser.add_argument('--require_switches', action='store_true', default=True,
                         help='Require switches in test/val networks')
@@ -147,7 +140,19 @@ def parse_arguments():
 
 
 def main():
+    
     args = parse_arguments()
+
+    print("Arguments:")
+    for arg in vars(args):
+        print(f"{arg}: {getattr(args, arg)}")
+
+    #Initialize logging
+    queue_handler, queue_listener = setup_logging(run_tag=os.environ.get("SLURM_JOB_ID"))
+
+    # Start the listener in the main process
+    queue_listener.start()
+    logger = logging.getLogger(__name__)  # Get logger AFTER setup
 
     # timestamp & unique save path
     current_date = datetime.now()
@@ -165,6 +170,7 @@ def main():
     # Define distributions
     distributions = {
         'n_switches': {'type': 'normal', 'mean': 5, 'std': 5, 'min': 3, 'max': 20, 'is_integer': True},
+        #'n_switches': {'type': 'normal', 'mean': 0, 'std': 0.0001, 'min': 0, 'max': 1, 'is_integer': True},
         'n_busses': {'type': 'normal', 'mean': args.target_busses, 'std': 5, 'min': args.target_busses - args.bus_range, 
                     'max': args.target_busses + args.bus_range, 'is_integer': True},
         'layer_list': {'type': 'categorical', 'choices': [[0,1,2,3,4,5,6], [0,1,2,3,], [1,2,3], [0,2,3,4], [1,2],[0,1]], 
@@ -176,24 +182,28 @@ def main():
     
 
     if args.generate_train_data:
+        logger.info("\nGenerating training data...")
         # load static data 
         cbs_pc6_gdf, buurt_to_postcodes, consumption_df, standard_consumption_df = load_static_data(args.data_dir)
         cbs_pc6_gdf = cbs_pc6_gdf[["geometry", "postcode6"]]
         dataframes = [consumption_df, cbs_pc6_gdf, buurt_to_postcodes, standard_consumption_df]
 
         # Start transformation
-        print("Starting transformation")
-        transform_stats = transform_subgraphs(distributions, dataframes, args, logger)
+        logger.info("Starting transformation")
+        transform_stats = transform_subgraphs(distributions, dataframes, args)
 
     # Generate test and validation sets if requested
     if args.generate_test_val:
 
-        print("\nGenerating test and validation sets...")
+        logger.info("\nGenerating test and validation sets...")
         from create_testval import generate_combined_dataset
         
         # Generate test and validation sets
         test_dataset, val_dataset = generate_combined_dataset(args, max_workers =4)
+    
+    queue_listener.stop()
         
 if __name__ == "__main__":
+
     main()
 
