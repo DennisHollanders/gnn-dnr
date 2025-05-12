@@ -170,33 +170,6 @@ def apply_profile_timepoint(net, profiles, time_step):
             net[elm].loc[:, param] = profiles[elm_param].loc[time_step]
     return net
 
-def create_network_case(network_id, net, case_type, case_idx, load_variation_range=(0.5, 1.51)):
-    """Create a single network case with variations"""
-    try:
-        # Apply load variations (create a deep copy to avoid modifying the original)
-        net_case = copy.deepcopy(net)
-        
-        # Apply random load variations
-        for idx in net_case.load.index:
-            factor = np.random.uniform(load_variation_range[0], load_variation_range[1])
-            net_case.load.at[idx, "p_mw"] *= factor
-            net_case.load.at[idx, "q_mvar"] *= factor
-        
-        # Create case name
-        case_name = f"{network_id}_{case_type}_{case_idx}"
-        
-        # Create NetworkX graph respecting switches
-        nx_graph = top.create_nxgraph(net_case, respect_switches=True)
-
-        nx_graph.graph["nx_to_pp_bus_map"] = {bus_idx: bus_idx for bus_idx in net_case.bus.index}
-
-        switch_count = len(net_case.switch) if hasattr(net_case, 'switch') else 0
-        print(f"Added {case_type} case {case_name} with {switch_count} switches")
-        
-        return case_name, {"network": net_case, "nx_graph": nx_graph}
-    except Exception as e:
-        print(f"Failed to create case for {network_id}: {e}")
-        return None, None
 
 def generate_combined_dataset(
     args,
@@ -365,16 +338,17 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
         else:
             # For non-SimBench networks, always use random variations
             net_case = apply_random_load_variations(net_case, load_variation_range)
-        
+
+        nx_graph = top.create_nxgraph(net_case, respect_switches=True)
+        node_count = nx_graph.number_of_nodes()
+
         # Create case name - include timepoint in name if one was used
         if selected_timepoint is not None and used_profile:
-            case_name = f"{network_id}_{case_type}_{case_idx}_ts{selected_timepoint}"
+            case_name = f"{network_id}_{case_type}_{case_idx}_ts{selected_timepoint}_n{node_count}"
         else:
-            case_name = f"{network_id}_{case_type}_{case_idx}"
-        
-        # Create NetworkX graph respecting switches
-        nx_graph = top.create_nxgraph(net_case, respect_switches=True)
-        
+            case_name = f"{network_id}_{case_type}_{case_idx}_n{node_count}"
+
+
         switch_count = len(net_case.switch) if hasattr(net_case, 'switch') else 0
         print(f"Added {case_type} case {case_name} with {switch_count} switches")
         
@@ -479,8 +453,8 @@ def save_dataset(test_ds: Dict[str,Any],val_ds: Dict[str,Any],args, base_path: s
     min_bus_range = args.bus_range_test_val[0]
     max_bus_range = args.bus_range_test_val[1]
     bstr = f"{min_bus_range}-{max_bus_range}"
-    base_name = f"test_val_real__range-{bstr}_nTest-{args.test_cases}_nVal-{args.val_cases}_{day}{month}{year}"
-    base_path = Path(base_path) / base_name
+    #base_name = f"test_val_real__range-{bstr}_nTest-{args.test_cases}_nVal-{args.val_cases}_{day}{month}{year}"
+    base_path = Path(base_path) 
     os.makedirs(base_path, exist_ok=True)
     with open(os.path.join(base_path, 'metadata.txt'), 'w') as f:
         f.write(f"Created: {now}\nBus range: {args.bus_range}\nTest: {len(test_ds)}/{args.test_cases}\nVal: {len(val_ds)}/{args.val_cases}\n")
