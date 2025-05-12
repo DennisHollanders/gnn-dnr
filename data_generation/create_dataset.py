@@ -119,7 +119,7 @@ def parse_arguments():
                         help='Enable logging')
                         
     # Test and validation set options
-    parser.add_argument('--generate_train_data', default=True,
+    parser.add_argument('--generate_train_data', default=False,
                         help='Generate training data')
     parser.add_argument('--generate_test_val', default=True,
                         help='Generate test and validation sets')

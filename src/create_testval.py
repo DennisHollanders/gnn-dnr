@@ -15,9 +15,10 @@ import pandapower.networks as pn
 import simbench as sb
 import pandapower.topology as top
 import logging
+import networkx as nx
 
 logger = logging.getLogger(__name__)
-
+logging.getLogger("numba").setLevel(logging.WARNING)
 # Create a cache directory for networks
 CACHE_DIR = Path("network_cache")
 CACHE_DIR.mkdir(exist_ok=True)
@@ -27,7 +28,6 @@ network_timepoints: Dict[str, Dict[str, Any]] = {}
 
 def has_switches(net):
     return hasattr(net, 'switch') and not net.switch.empty and len(net.switch) > 0
-
 
 def load_and_cache_network(network_id, cache_dir=CACHE_DIR):
     # Create cache file path
@@ -224,7 +224,7 @@ def generate_combined_dataset(
             seq = max(nums) + 1
     save_path = os.path.join(base_abs, f"{base_name}_{seq}")
 
-    save_dataset( test_ds, val_ds,args,base_path=save_path )
+    save_dataset(test_ds, val_ds,args,base_path=save_path )
 
     return test_ds, val_ds
 
@@ -263,8 +263,8 @@ def save_test_data(test_dataset, val_dataset, args):
     print(f"Validation set size: {len(val_dataset)}")
     
     # Save datasets
-    save_combined_data(test_dataset, "test", test_val_save_location)
-    save_combined_data(val_dataset, "validation", test_val_save_location)
+    save_combined_data(test_dataset, "test","original", test_val_save_location)
+    save_combined_data(val_dataset, "validation", "original",  test_val_save_location)
     
     print(f"Test and validation datasets saved successfully at {test_val_save_location}")
     
@@ -339,20 +339,29 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
             # For non-SimBench networks, always use random variations
             net_case = apply_random_load_variations(net_case, load_variation_range)
 
-        nx_graph = top.create_nxgraph(net_case, respect_switches=True)
-        node_count = nx_graph.number_of_nodes()
+        G_nx = top.create_nxgraph(net_case, respect_switches=False)
+        components = list(nx.connected_components(G_nx))
 
+        # pick the largest
+        largest = max(components, key=len)
+        print(f"[DEBUG] keeping largest component: {len(largest)} buses of {G_nx.number_of_nodes()}")
+        
+        # now mask your net to that
+        subnet = pp.select_subnet(net_case, buses=list(largest), include_switch_buses=True, keep_everything_else =True)
+        
+        nx_graph_subnet = top.create_nxgraph(subnet, respect_switches=True)
+        node_count = len(subnet.bus)
+        print(f"[DEBUG] amount of nodes of created subnet: {node_count}")
         # Create case name - include timepoint in name if one was used
         if selected_timepoint is not None and used_profile:
             case_name = f"{network_id}_{case_type}_{case_idx}_ts{selected_timepoint}_n{node_count}"
         else:
             case_name = f"{network_id}_{case_type}_{case_idx}_n{node_count}"
 
-
-        switch_count = len(net_case.switch) if hasattr(net_case, 'switch') else 0
+        switch_count = len(subnet.switch) if hasattr(subnet, 'switch') else 0
         print(f"Added {case_type} case {case_name} with {switch_count} switches")
-        
-        return case_name, {"network": net_case, "nx_graph": nx_graph}
+
+        return case_name, {"network": subnet, "nx_graph": nx_graph_subnet}
     except Exception as e:
         print(f"Failed to create case for {network_id}: {e}")
         return None, None
@@ -418,12 +427,34 @@ def save_combined_data(dataset, set_name, base_dir):
         nx_graph = data["nx_graph"]
 
         # Run power flow analysis
+        net.switch["closed"] = True
+        
+
         try:
             pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
                     initialization="dc", calculate_voltage_angles=True)
         except Exception as e:
             print(f"Power flow did not converge for {case_name}: {e}")
-            
+        pp.set_isolated_areas_out_of_service(net, respect_switches=True)
+        pp.drop_out_of_service_elements(net)
+        print("second run")
+        try:
+            pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
+                    initialization="dc", calculate_voltage_angles=True)
+        except Exception as e:
+            print(f"Power flow did not converge for {case_name}: {e}")
+        print("second run done")
+        remaining = [b for b in net.bus.index
+             if not ((net.line.from_bus==b).any() or
+                     (net.line.to_bus  ==b).any() or
+                     ((net.switch.bus==b)&(net.switch.closed)).any())]
+        print("still isolated:", remaining)
+        from pandapower.pf.run import _init_runpp
+
+        # build the PPC and grab its branch‐bus counts
+        ppc, _ = _init_runpp(net, init="dc", calculate_voltage_angles=True)
+        isolated = [i for i, cnt in enumerate(ppc["branch_bus_count"]) if cnt == 0]
+        print("PPC buses with zero branches:", isolated)
         # Extract features
         node_feats = extract_node_features2(net, nx_graph) if nx_graph is not None else None
         edge_feats = extract_edge_features2(net, nx_graph) if nx_graph is not None else None
