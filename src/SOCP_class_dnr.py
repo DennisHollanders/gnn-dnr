@@ -6,6 +6,9 @@ import logging
 import networkx as nx
 import matplotlib.pyplot as plt
 import pandapower as pp
+from pathlib import Path
+import os 
+import sys
 
 from pyomo.environ import (
     ConcreteModel, Set, Param, Var, Constraint, NonNegativeReals, Reals,
@@ -15,43 +18,58 @@ from pyomo.opt import SolverFactory, check_optimal_termination
 from pyomo.util.model_size import build_model_size_report
 from pint import UnitRegistry
 
+
+# Add necessary source paths
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if src_path not in sys.path:
+    sys.path.append(src_path)
+
+from optimization_logging import get_logger
+
+
 ureg = UnitRegistry()
 
  
 class SOCP_class:
-    """
-    This class implements Second Order Conic Programming optimization for 
-    distribution network reconfiguration.
-    """
-
     def __init__(self, net, graph_id: str = "", *,
                  logger: Optional[logging.Logger] = None,
-                 switch_penalty: float = 1e2,
-                 slack_penalty: float = 1e3,
+                 switch_penalty: float = 0.01,
+                 slack_penalty: float = 1,
+                 load_shed_penalty: float = 10000,
                  toggles: Optional[Dict[str, bool]] = None,
+                 debug_level= 0,
                  active_bus_mask: Optional[pd.Series] = None) -> None:
-        print
         self.net = net
         self.id = graph_id or "unnamed"
-        self.logger = logger or logging.getLogger("SOCP‑RNC")
-
+        self.logger = logger or logging.getLogger("SOCP_optimizer")
+        self.debug_level = debug_level
         self.toggles = toggles or {
-            "voltage_drop": True,
-            "voltage_bounds": True,
-            "power_balance": True,
-            "radiality": True,
-            "radiality_spanning": True,   
-            "switch_cost": True,
-        }
+            "include_voltage_drop_constraint": True,
+            "include_voltage_bounds_constraint": True,
+            "include_power_balance_constraint": True,
+            "include_radiality_constraints": True,
+            "use_spanning_tree_radiality": False,   
+            "use_root_flow": False,
+            "include_switch_penalty": True,
+            "include_cone_constraint": True,
+            "all_lines_are_switches": True,
+            "allow_load_shed": False,}
+
+
+        self.logger.info(f"SOCP toggles: {self.toggles}")
         self.switch_penalty = switch_penalty
         self.slack_penalty = slack_penalty
+        self.load_shed_penalty = load_shed_penalty
         self.num_switches_changed = None
+
         # bus activity mask ------------------------------------------------
         if active_bus_mask is None:
             self.active_bus = pd.Series(True, index=net.bus.index)
         else:
             self.active_bus = pd.Series(active_bus_mask,
                                         index=net.bus.index).fillna(False).astype(bool)
+
+        self.logger.info(f"SOCP active buses: {self.active_bus.sum()} of {len(self.active_bus)}")
 
         # substations -------------------------------------------------------
         self.substations = set(net.ext_grid.bus.tolist())
@@ -63,45 +81,46 @@ class SOCP_class:
             raise ValueError("No reference / substation buses found in network")
 
         # switches ----------------------------------------------------------
-        self.initial_switch_status = net.switch.closed.copy()
+        self.switch_df = net.switch.copy()
+        self.initial_switch_status: Optional[pd.Series] = None 
+        self.initial_line_status: Optional[pd.Series] = None
+        if self.initial_line_status is not None:
+            num_initial_active_lines = sum(1 for l_idx in model.lines if self.initial_line_status.get(l_idx, 0) == 1)
+            self.logger.info(f"Number of initially active lines in model.lines: {num_initial_active_lines} (Expected for SpanConstraint: {len(model.buses) - 1})")
 
         # containers to be filled in `initialise()`
         self.bus_df: Optional[pd.DataFrame] = None
         self.line_df: Optional[pd.DataFrame] = None
-        self.switch_df: Optional[pd.DataFrame] = None
         self.lines_with_sw: Dict[int, List[int]] = {}
         self.lines_wo_sw: List[int] = []
         self.bus_p_inj: Dict[int, float] = {}
         self.bus_q_inj: Dict[int, float] = {}
         self.bigM: Dict[int, float] = {}
+        self.v_base_V: Dict[int, float] = {}
+        self.S_base_VA: Optional[float] = None
 
         # Pyomo model & results
         self.model: Optional[ConcreteModel] = None
-        self.solver_results = None  # SolverResults or raw obj value
+        self.solver_results = None  
         self.solve_time: Optional[float] = None
+
+        # debugging data containers
+        self.constraint_violations: Dict[str, Any] = {}
+        self.variable_values: Dict[str, Any] = {}
+        self.debug_logs = {}
+
+        # for progressive model building
+        self.enabled_constraints = { }
+        self.current_validation_step =None
 
 
     def initialize(self) -> None:
-        """
-        Prepare Pandapower → Pandas tables and convert all electrical
-        quantities to a uniform per-unit base.
-
-        Bases used
-        ----------
-        • S_base = 1 MVA  (constant for the whole network)
-        • V_base,b = vn_kv[bus]  (each voltage level keeps its own base)
-        • Z_base = V_base² / S_base   ⇒  R_pu = R_Ω / Z_base
-        """
-        S_base_MVA = 1.0          # <-- float
+        S_base_MVA = 1.0         
         self.S_base_VA = S_base_MVA * 1e6     # 1 MVA
         self.bus_df = self.net.bus.copy()
 
         # ------------------------------------------------ bus table
         self.bus_df["v_base_V"] = (self.bus_df.vn_kv * 1e3) 
-        # keep a dict for quick access later
-        self.bus_df = self.net.bus.copy()
-        # base-voltage in volts (numeric float, not a pint quantity)
-        self.bus_df["v_base_V"] = self.bus_df.vn_kv * 1e3
         self.v_base_V = self.bus_df.v_base_V.to_dict()
 
         # ------------------------------------------------ line table
@@ -110,9 +129,9 @@ class SOCP_class:
         line["r_ohm"] = line.r_ohm_per_km * line.length_km
         line["x_ohm"] = line.x_ohm_per_km * line.length_km
 
-        # per-unit impedances (own V_base)
+        # per-unit impedances 
         def _rz_pu(row):
-            # Z_base = V_base² / S_base   (all numeric)
+            # Z_base = V_base² / S_base   
             Z_base = (self.v_base_V[row.from_bus] ** 2) / self.S_base_VA
             return row.r_ohm / Z_base
 
@@ -121,350 +140,538 @@ class SOCP_class:
             return row.x_ohm / Z_base
 
         line["r_pu"] = line.apply(_rz_pu, axis=1)
-        line["x_pu"] = line.apply(_xz_pu, axis=1)
+        line["x_pu"] = line.apply(_xz_pu, axis=1)   
+
         self.line_df = line
 
         # ------------------------------------------------ switches
-        sw = self.net.switch.copy()
-        self.switch_df = sw
-        self.lines_with_sw = (
-            sw[sw.et == "l"].groupby("element").apply(lambda d: list(d.index)).to_dict()
-        )
+        sw = self.switch_df 
+        self.line_switches = sw[sw.et == "l"]
+        self.lines_with_sw = ( self.line_switches.groupby("element").apply(lambda d: list(d.index)).to_dict())
         self.lines_wo_sw = [l for l in line.index if l not in self.lines_with_sw]
 
-        # ------------------------------------------------ bus injections   (per-unit)
+        # Calculate initial effective status for all lines
+        initial_line_status_dict = {}
+        for l in line.index:
+            if l in self.lines_with_sw:
+                switch_indices = self.lines_with_sw[l]
+                initial_line_status_dict[l] = any(sw.loc[s, 'closed'] for s in switch_indices)
+            else:
+                initial_line_status_dict[l] = 1  
+        self.initial_line_status = pd.Series(initial_line_status_dict).astype(int)
+
+        # Store initial switch status only
+        if not self.toggles.get('all_lines_are_switches', False):
+            self.initial_switch_status = sw['closed'].copy()
+
+        # ------------------------------------------------ bus injections
         self.bus_p_inj = {}
         self.bus_q_inj = {}
         for b in self.bus_df.index:
-            p_mw = (
-                self.net.gen[self.net.gen.bus == b].p_mw.sum()
-                - self.net.load[self.net.load.bus == b].p_mw.sum()
-            )
-            q_mvar = (
-                get_reactive_injection(self.net.gen, b)
-                - get_reactive_injection(self.net.load, b)
-            )
-            self.bus_p_inj[b] = p_mw / S_base_MVA          # pu
-            self.bus_q_inj[b] = q_mvar / S_base_MVA        # pu
+            p_mw = (self.net.gen[self.net.gen.bus == b].p_mw.sum() - self.net.load[self.net.load.bus == b].p_mw.sum()    )
+            q_mvar = ( get_reactive_injection(self.net.gen, b)- get_reactive_injection(self.net.load, b))
+            self.bus_p_inj[b] = p_mw / S_base_MVA          
+            self.bus_q_inj[b] = q_mvar / S_base_MVA        
 
-        # ------------------------------------------------ Big-M (per-unit P-flow limit)
+        # Debug: log injection values
+        if self.debug_level >= 1:
+            self.logger.debug(f"Bus {b} injections - P: {self.bus_p_inj[b]:.4f} p.u., Q: {self.bus_q_inj[b]:.4f} p.u.")
+
+        # ------------------------------------------------ Big-M 
         self.bigM = {}
-        max_p_abs = max(abs(v) for v in self.bus_p_inj.values()) + 1e-3
-        for l in line.index:
-            self.bigM[l] = 2.0 * max_p_abs * max(1, self.line_df.length_km[l])   # generous – tune later
+        for l_idx, row in self.line_df.iterrows(): 
+            if 'max_i_ka' in row and pd.notna(row.max_i_ka) and row.max_i_ka > 0:
+                v_ln_kv = self.bus_df.loc[row.from_bus, 'vn_kv'] 
+                s_max_mva_thermal = v_ln_kv * row.max_i_ka # 
+                s_max_pu = s_max_mva_thermal / (self.S_base_VA / 1e6) 
+                self.bigM[l_idx] = s_max_pu 
+            else:
+                max_total_system_load_pu = sum(abs(p) for p in self.bus_p_inj.values()) 
+                self.bigM[l_idx] = max_total_system_load_pu if max_total_system_load_pu > 0 else 10.0 
+        self.logger.info(f"bigM values: max {max(self.bigM.values()):.3f}, min {min(self.bigM.values()):.3f}")
+        self.logger.info("Initialisation finished (%d buses, %d lines)",len(self.bus_df), len(self.line_df))
 
-        self.logger.info("Initialisation finished (%d buses, %d lines)",
-                        len(self.bus_df), len(self.line_df))
+        if self.debug_level >= 2:
+            self.logger.debug(f"Processed bus table: {len(self.bus_df)} buses")
+            self.logger.debug(f"Processed line table: {len(self.line_df)} lines")
+            self.logger.debug(f"Identified {len(self.lines_with_sw)} lines with switches")
+            self.logger.debug(f"Identified {len(self.lines_wo_sw)} lines without switches")
+            self.logger.debug(f"Big-M values: min={min(self.bigM.values()):.3f}, max={max(self.bigM.values()):.3f}")
+
+        self.debug_network_summary()    
+
+    def debug_network_summary(self):
+        """Create a comprehensive summary of network properties for debugging"""
+        if self.debug_level < 1:
+            return
+        
+        summary = {
+            "network_structure": {
+                "buses": len(self.bus_df),
+                "lines": len(self.line_df),
+                "substations": len(self.substations),
+                "active_buses": self.active_bus.sum(),
+                "lines_with_switches": len(self.lines_with_sw),
+                "lines_without_switches": len(self.lines_wo_sw),
+                "total_switches": len(self.switch_df)
+            },
+            "network_parameters": {
+                "voltage_base_min": min(self.v_base_V.values()),
+                "voltage_base_max": max(self.v_base_V.values()),
+                "S_base_VA": self.S_base_VA,
+                "bigM_min": min(self.bigM.values()),
+                "bigM_max": max(self.bigM.values()),
+                "total_p_injection": sum(self.bus_p_inj.values()),
+                "total_q_injection": sum(self.bus_q_inj.values()),
+                "substation_buses": list(self.substations)
+            }
+        }
+        
+        # Add per-substation injection info
+        summary["substation_injections"] = {}
+        for sub in self.substations:
+            summary["substation_injections"][sub] = {
+                "p_inj": self.bus_p_inj.get(sub, 0),
+                "q_inj": self.bus_q_inj.get(sub, 0),
+                "connected_lines": len([l for l in self.line_df.index if 
+                                       self.line_df.loc[l, "from_bus"] == sub or 
+                                       self.line_df.loc[l, "to_bus"] == sub])
+            }
+        
+        # Log key summary information
+        self.logger.info("Network summary:")
+        self.logger.info(f"  Buses: {summary['network_structure']['buses']} (active: {summary['network_structure']['active_buses']})")
+        self.logger.info(f"  Lines: {summary['network_structure']['lines']}")
+        self.logger.info(f"  Switches: {summary['network_structure']['total_switches']}")
+        self.logger.info(f"  Substations: {summary['network_structure']['substations']}")
+        self.logger.info(f"  Total P injection: {summary['network_parameters']['total_p_injection']:.4f} p.u.")
+        self.logger.info(f"  Total Q injection: {summary['network_parameters']['total_q_injection']:.4f} p.u.")
+        
+        # Store for debugging
+        self.debug_logs["network_summary"] = summary
+
     # ------------------------------------------------------------------------
-    # 2.  CREATE-MODEL   (full variable names, voltage-bound cons commented)
+    # 2.  CREATE-MODEL   
     # ------------------------------------------------------------------------
     def create_model(self) -> ConcreteModel:
-        """
-        Build the Pyomo ConcreteModel using the SOCP formulation
-        (eqns 25-36 in the reference PDF).
-        All quantities are **per-unit**.
-        """
-
         if self.bus_df is None:
             self.initialize()
-
+       
         model = ConcreteModel()
-
         # -------------------- index sets
         active_buses = list(self.bus_df.index[self.active_bus])
-        active_lines = [
+        active_lines = [l for l in self.line_df.index
+                        if self.active_bus[self.line_df.from_bus[l]]
+                        and self.active_bus[self.line_df.to_bus[l]]]
+        
+        self.logger.info(f"Active buses: {len(active_buses)} of {len(self.bus_df)}")
+        self.logger.info(f"Active lines: {len(active_lines)} of {len(self.line_df)}")
 
-            l for l in self.line_df.index
-            if self.active_bus[self.line_df.from_bus[l]]
-            and self.active_bus[self.line_df.to_bus[l]]
-        ]
         model.buses = Set(initialize=active_buses, ordered=True)
         model.lines = Set(initialize=active_lines, ordered=True)
         model.times = Set(initialize=[0])
-        model.partitionedbuses = Set(
-            initialize=[b for b in active_buses if b not in self.substations]
-        )
+        model.partitionedbuses = Set(initialize=[b for b in active_buses if b not in self.substations])
+
+        self.logger.info(f"Partitioned buses: {len(model.partitionedbuses)} of {len(model.buses)}")
 
         # -------------------- parameters
         v_upper_pu, v_lower_pu = 1.10, 0.90
-        model.voltage_upper_bound = Param(
-            model.buses, initialize=lambda m, b: v_upper_pu ** 2
-        )
-        model.voltage_lower_bound = Param(
-            model.buses, initialize=lambda m, b: v_lower_pu ** 2
-        )
-        model.line_resistance_pu = Param(
-            model.lines, initialize=lambda m, l: self.line_df.r_pu[l]
-        )
-        model.line_reactance_pu = Param(
-            model.lines, initialize=lambda m, l: self.line_df.x_pu[l]
-        )
+        model.voltage_upper_bound = Param( model.buses, initialize=lambda m, b: v_upper_pu ** 2)
+        model.voltage_lower_bound = Param(model.buses, initialize=lambda m, b: v_lower_pu ** 2)
+        model.line_resistance_pu = Param(model.lines, initialize=lambda m, l: self.line_df.r_pu[l])
+        model.line_reactance_pu = Param(model.lines, initialize=lambda m, l: self.line_df.x_pu[l])
         model.big_M_flow = Param(model.lines, initialize=lambda m, l: self.bigM[l])
 
-        # convenience maps from/to
+        self.logger.info(f"Big-M values: {self.bigM}")
+        def calculate_voltage_bigM():
+            v_upper_pu_squared = v_upper_pu ** 2
+            v_lower_pu_squared = v_lower_pu ** 2
+            max_voltage_deviation = v_upper_pu_squared - v_lower_pu_squared
+            return max_voltage_deviation * 5
+        voltage_bigM = calculate_voltage_bigM()
+        model.voltage_bigM = voltage_bigM
+        self.logger.info(f"Using voltage Big-M value: {voltage_bigM}")
+
         from_bus_map = {l: int(self.line_df.from_bus[l]) for l in model.lines}
         to_bus_map   = {l: int(self.line_df.to_bus[l])   for l in model.lines}
         model.from_bus = Param(model.lines, initialize=lambda m, l: from_bus_map[l])
         model.to_bus   = Param(model.lines, initialize=lambda m, l: to_bus_map[l])
 
         # ------------------------------------------------------------------
-        #  DECISION VARIABLES
+        #  Variables
         # ------------------------------------------------------------------
-        model.voltage_squared = Var(
-            model.buses, model.times, within=NonNegativeReals, initialize=1.0
-        )
-        model.active_power_flow = Var(model.lines, model.times, initialize=0)
-        model.reactive_power_flow = Var(model.lines, model.times, initialize=0)
-        model.squared_current_magnitude = Var(
-            model.lines, model.times, within=NonNegativeReals, initialize=0
-        )
-        model.line_closed = Var(model.lines, within=Binary, initialize=1)
+        model.voltage_squared = Var(model.buses, model.times, within=NonNegativeReals, initialize=1.0)
+        model.active_power_flow = Var(model.lines, model.times,within=Reals, initialize=0)
+        model.reactive_power_flow = Var(model.lines, model.times,within=Reals, initialize=0)
+        model.squared_current_magnitude = Var(model.lines, model.times, within=NonNegativeReals, initialize=0)
+        
         model.bus_energised = Var(model.partitionedbuses, within=Binary, initialize=1)
+        if not self.toggles.get("allow_load_shed", False):
+            self.logger.info("Load shedding is not allowed. Fixing bus_energised variables to 1.")	
+            for b in model.partitionedbuses:
+                 model.bus_energised[b].fix(1)
 
-        # feasibility slacks
-        model.active_power_slack    = Var(model.buses,  model.times,within=NonNegativeReals, initialize=0)
-        model.reactive_power_slack  = Var(model.buses,  model.times, within=NonNegativeReals,initialize=0)
-        model.voltage_drop_slack    = Var(model.lines,  model.times,
-                                        within=NonNegativeReals, initialize=0)
-
-        model.switches = Set(
-            initialize=list(self.switch_df[self.switch_df.et == "l"].index)
-        )
-        model.switch_status = Var(
-            model.switches,
-            within=Binary,
-            initialize=lambda m, s: 1 if self.switch_df.closed[s] else 0
-            )
-        model.switch_initial = Param(
-                model.switches,
-                within=Binary,
-                initialize=lambda m, s: 1 if self.initial_switch_status.at[s] else 0
-        )
-        self.primary_root_for_radiality = None
-        if model.buses: # Check if model.buses is populated
-            # Option 1: Prefer an ext_grid bus if available from the original logic, then a trafo, then a gen.
-            # This requires slightly more sophisticated selection if you mix data types.
-            # For now, let's assume for synthetic data, all substations are gens.
-
-            potential_roots = [bus_idx for bus_idx in model.buses if bus_idx in self.substations]
-            if potential_roots:
-                # You could sort them by bus_idx or pick the first one.
-                # Consistent picking is good. Let's pick the smallest index.
-                self.primary_root_for_radiality = min(potential_roots)
-                self.logger.info(f"Selected bus {self.primary_root_for_radiality} as the primary root for flow-based radiality from {potential_roots}.")
-            elif model.buses: # Fallback if no substations are in active model.buses (should not happen if active_bus_mask is sane)
-                self.logger.warning(f"No substations found among active model buses. Picking arbitrary bus {next(iter(model.buses))} as primary root for radiality.")
-                self.primary_root_for_radiality = next(iter(model.buses)) # First active bus
-            else:
-                self.logger.error("Cannot determine primary root: model.buses is empty.")
-                # This would be a critical failure.
-        else:
-            self.logger.error("Cannot determine primary root: model.buses is not initialized or empty before radiality constraint setup.")
-            raise ValueError("Model buses not defined before attempting to set up radiality constraints.")
-
+        # Expression to get energization status 
+        def is_up_rule(m, b):
+            return m.bus_energised[b] if b in m.partitionedbuses else 1
+        model.is_up = Expression(model.buses, rule=is_up_rule)
+        
         # --------------------------------------------
         # Initialize slack variables
         # ---------------------------------------------
-        
-        # link each switch to its host line
-        def _switch_line_link(m, s):
-            host = int(self.switch_df.element[s])
-            return m.switch_status[s] <= m.line_closed[host]
-        model.SwitchLineLink = Constraint(model.switches, rule=_switch_line_link)
-        
-        model.bus_upstream = Param(model.buses,
-                           initialize=lambda m,b: 1 if b in self.substations else 0,
-                           mutable=False)
+        model.active_power_slack    = Var(model.buses,  model.times,within=Reals, initialize=0)
+        model.reactive_power_slack  = Var(model.buses,  model.times,within=Reals,initialize=0)
+        model.voltage_drop_slack    = Var(model.lines,  model.times,within=NonNegativeReals, initialize=0)
 
-        def _is_up_rule(m, b):
-            return m.bus_energised[b] if b in m.partitionedbuses else 1
-        model.is_up = Expression(model.buses, rule=_is_up_rule)
+        # ---------------------------------------------
+        # Initialize line status variables
+        # ---------------------------------------------
+        model.line_status = Var(model.lines, within=Binary, initialize=lambda m, l: self.initial_line_status.get(l, 1))
 
-        # ------------------------------------------------------------------
-        #  CONSTRAINTS
-        # ------------------------------------------------------------------
-        # (26) voltage drop (SOCP relaxation with slack)
-        def voltage_drop_equation(m, l, t):
-            i = m.from_bus[l]
-            j = m.to_bus[l]
-            R = m.line_resistance_pu[l]
-            X = m.line_reactance_pu[l]
-            return (
-                m.voltage_squared[j, t] + m.voltage_drop_slack[l, t]
-                == m.voltage_squared[i, t]
-                - 2 * (R * m.active_power_flow[l, t] + X * m.reactive_power_flow[l, t])
-                + (R**2 + X**2) * m.squared_current_magnitude[l, t]
+        if self.toggles.get('all_lines_are_switches', False):
+            model.line_initial_status = Param(model.lines, within=Binary, mutable=False,initialize=lambda m, l: self.initial_line_status.get(l, 1))
+        else:
+            for l in self.lines_wo_sw:
+                model.line_status[l].fix(1)
+            controllable_switches = list(self.switch_df[self.switch_df.et == "l"].index)
+            model.switches = Set(initialize=controllable_switches)
+            
+            self.switches_for_line = self.line_switches["element"].to_dict()
+            model_switch_indices = [s for s in model.switches if self.switches_for_line.get(s) in model.lines]
+            model.model_switches = Set(initialize=model_switch_indices) 
+
+            model.switch_status = Var(model.model_switches, within=Binary,initialize=lambda m, s: 1 if self.initial_switch_status.get(s, False) else 0)
+            model.switch_initial = Param(model.model_switches, within=Binary, mutable=False,initialize=lambda m, s: 1 if self.initial_switch_status.get(s, False) else 0)
+        
+        if self.debug_level >= 1:
+            try: 
+                self.logger.debug(f"Initial line status: {self.initial_line_status}")
+                self.logger.debug(f"Initial switch status: {self.initial_switch_status}")
+            except:
+                self.logger.warning("Error printing initial line/switch status. Check if they are set correctly.")
+
+        # Add expression variables to track the flow at each bus for easy debugging
+        model.sum_inflow = Expression(model.buses, rule=lambda m, b: sum(m.active_power_flow[l, 0] for l in m.lines if m.to_bus[l] == b))
+        model.sum_outflow = Expression(model.buses,rule=lambda m, b: sum(m.active_power_flow[l, 0] for l in m.lines if m.from_bus[l] == b))
+        model.flow_balance = Expression(model.buses, rule=lambda m, b: m.sum_outflow[b] - m.sum_inflow[b])
+        
+        self.enabled_constraints = {name: False for name in [
+            "VoltageDropUp", "VoltageDropLo", "ActivePowerBalance", "ReactivePowerBalance",
+            "VoltageUpper", "VoltageLower", "PFlowUB", "PFlowLB", "QFlowUB", "QFlowLB",
+            "LineBusLinkFrom", "LineBusLinkTo", "BusConnectivity", "SpanConstraint",
+            "RootCap", "RootBalance"
+        ]}
+        # ----------------------------------------------
+        # Constraints
+        # ----------------------------------------------
+
+        def voltage_drop_upper(m, l, t):
+            i, j = m.from_bus[l], m.to_bus[l]
+            R, X = m.line_resistance_pu[l], m.line_reactance_pu[l]
+            Mv   = m.voltage_bigM
+            return (m.voltage_squared[j, t]- m.voltage_squared[i, t]+ 2*(R*m.active_power_flow[l, t] + X*m.reactive_power_flow[l, t])
+                - (R**2+X**2)*m.squared_current_magnitude[l, t] 
+                +m.voltage_drop_slack[l,t]
+                <= (1 - m.line_status[l]) * Mv
             )
+        def voltage_drop_lower(m, l, t):
+            i, j = m.from_bus[l], m.to_bus[l]
+            R, X = m.line_resistance_pu[l], m.line_reactance_pu[l]
+            Mv   = m.voltage_bigM
+            return (m.voltage_squared[j, t]- m.voltage_squared[i, t]+ 2*(R*m.active_power_flow[l, t] + X*m.reactive_power_flow[l, t])
+                - (R**2+X**2)*m.squared_current_magnitude[l, t]
+                - m.voltage_drop_slack[l,t]
+                >= -(1 - m.line_status[l]) * Mv)
 
-        if self.toggles["include_voltage_drop_constraint"]:
-            model.VoltageDropEq = Constraint(model.lines, model.times, rule=voltage_drop_equation)
+        if self.toggles.get("include_voltage_drop_constraint", True):
+            model.VoltageDropUp = Constraint(model.lines, model.times, rule=voltage_drop_upper)
+            self.enabled_constraints["VoltageDropUp"] = True
+            model.VoltageDropLo = Constraint(model.lines, model.times, rule=voltage_drop_lower)
+            self.enabled_constraints["VoltageDropLo"] = True
 
-        # (27) active-power balance + slack
         def active_power_balance(m, b, t):
             if b in self.substations:
                 return Constraint.Skip
-            out_p = sum(
-                m.active_power_flow[l, t] for l in m.lines if m.from_bus[l] == b
-            )
-            in_p = sum(
-                m.active_power_flow[l, t] for l in m.lines if m.to_bus[l] == b
-            )
-            return out_p - in_p == self.bus_p_inj[b] + m.active_power_slack[b, t]
-
-        # (28) reactive-power balance + slack
+            out_q = sum(m.active_power_flow[l, t] for l in m.lines if m.from_bus[l] == b)
+            in_q  = sum(m.active_power_flow[l, t] for l in m.lines if m.to_bus[l]   == b)
+            injection = self.bus_p_inj[b] * m.is_up[b]
+            return out_q - in_q ==injection * m.is_up[b] # + m.active_power_slack[b, t]
+        
         def reactive_power_balance(m, b, t):
-            if b in self.substations:
+            if b in self.substations: 
                 return Constraint.Skip
-            out_q = sum(
-                m.reactive_power_flow[l, t] for l in m.lines if m.from_bus[l] == b
-            )
-            in_q = sum(
-                m.reactive_power_flow[l, t] for l in m.lines if m.to_bus[l] == b
-            )
-            return out_q - in_q == self.bus_q_inj[b] + m.reactive_power_slack[b, t]
+            out_q = sum(m.reactive_power_flow[l, t] for l in m.lines if m.from_bus[l] == b)
+            in_q  = sum(m.reactive_power_flow[l, t] for l in m.lines if m.to_bus[l]   == b)
+            return out_q - in_q == self.bus_q_inj[b] * m.is_up[b] # + m.reactive_power_slack[b, t]
 
         if self.toggles["include_power_balance_constraint"]:
             model.ActivePowerBalance = Constraint(model.buses, model.times, rule=active_power_balance)
             model.ReactivePowerBalance = Constraint(model.buses, model.times, rule=reactive_power_balance)
+            self.enabled_constraints["ActivePowerBalance"] = True
+            self.enabled_constraints["ReactivePowerBalance"] = True
+
+        # def link_switch_line(m, l):
+        #     s = self.line_to_switch[l]
+        #     return m.line_status[l] == m.switch_status[s]
+        # model.LinkSwitch = Constraint(model.lines, rule=link_switch_line)
+
 
         # (29) second-order cone: ‖(2P,2Q,V_i-ℓ)‖₂ ≤ V_i+ℓ
         def socp_cone(m, l, t):
             i = m.from_bus[l]
-            return (
-                (2 * m.active_power_flow[l, t]) ** 2
-                + (2 * m.reactive_power_flow[l, t]) ** 2
-                + (m.voltage_squared[i, t] - m.squared_current_magnitude[l, t]) ** 2
-                <= (m.voltage_squared[i, t] + m.squared_current_magnitude[l, t]) ** 2
-            )
+            
+            #lhs = (2 * m.active_power_flow[l, t])**2 + (m.reactive_power_flow[l, t])**2
+            lhs = (m.active_power_flow[l, t])**2 + (m.reactive_power_flow[l, t])**2
+            
+            # Right-hand side: V_i * I_ij
+            rhs = m.voltage_squared[i, t] * m.squared_current_magnitude[l, t]
+            return lhs <= rhs + (1 - m.line_status[l]) * m.big_M_flow[l]**2
 
-        model.SOCP_Cone = Constraint(model.lines, model.times, rule=socp_cone)
+        if self.toggles["include_cone_constraint"]:
+            model.SOC_Cone = Constraint(model.lines, model.times, rule=socp_cone)
+            self.enabled_constraints["SOC_Cone"] = True
 
-        # -------- voltage bounds (relaxed with Big-M)  ----------------------
-        #  !!!  kept *commented* as requested
-        # def voltage_upper(m, b, t):
-        #     lim = m.voltage_upper_bound[b]
-        #     return m.voltage_squared[b, t] <= lim
-        #
-        # def voltage_lower(m, b, t):
-        #     lim = m.voltage_lower_bound[b]
-        #     return m.voltage_squared[b, t] >= lim
-        #
-        # if self.toggles["voltage_bounds"]:
-        #     model.VoltageUpper = Constraint(model.buses, model.times, rule=voltage_upper)
-        #     model.VoltageLower = Constraint(model.buses, model.times, rule=voltage_lower)
-                # (30)-(31) Voltage bounds with big‑M relaxation
-        def _flow_ub(m, l, t):
-            return  m.active_power_flow[l, t] <=  m.big_M_flow[l] * m.line_closed[l]
-        def _flow_lb(m, l, t):
-            return -m.active_power_flow[l, t] <=  m.big_M_flow[l] * m.line_closed[l]
-        model.FlowUB = Constraint(model.lines, model.times, rule=_flow_ub)
-        model.FlowLB = Constraint(model.lines, model.times, rule=_flow_lb)
+            def P_flow_ub(m, l, t):
+                return  m.active_power_flow[l, t] <=  m.big_M_flow[l] * m.line_status[l]
+            def P_flow_lb(m, l, t):
+                return -m.active_power_flow[l, t] <=  m.big_M_flow[l] * m.line_status[l]
+            def Q_flow_ub(m, l, t):
+                return  m.reactive_power_flow[l, t] <=  m.big_M_flow[l] * m.line_status[l]
+            def Q_flow_lb(m, l, t):
+                return -m.reactive_power_flow[l, t] <=  m.big_M_flow[l] * m.line_status[l]
+            model.PFlowUB = Constraint(model.lines, model.times, rule=P_flow_ub)
+            model.PFlowLB = Constraint(model.lines, model.times, rule=P_flow_lb)
+            model.QFlowUB = Constraint(model.lines, model.times, rule=Q_flow_ub)
+            model.QFlowLB = Constraint(model.lines, model.times, rule=Q_flow_lb)
+            self.enabled_constraints["PFlowUB"] = True
+            self.enabled_constraints["PFlowLB"] = True
+            self.enabled_constraints["QFlowUB"] = True
+            self.enabled_constraints["QFlowLB"] = True
 
-        def _line_bus_link_from(m, l):
-            j = m.from_bus[l]
-            if j in m.partitionedbuses:
-                return m.line_closed[l] <= m.is_up[j]
-            return Constraint.Skip
-        def _line_bus_link_to(m, l):
-            j = m.to_bus[l]
-            if j in m.partitionedbuses:
-                return m.line_closed[l] <= m.is_up[j]
-            return Constraint.Skip
-
-        def _bus_connectivity(m, b):
-            inc = [l for l in m.lines if m.from_bus[l] == b or m.to_bus[l] == b]
-            return sum(m.line_closed[l] for l in inc) >= m.is_up[b]
-        
-        def _spanning(m):
-            rhs = len(m.buses) - 1 - sum(1 - m.is_up[b] for b in m.partitionedbuses)
-            return sum(m.line_closed[l] for l in m.lines) == rhs
-        
-        def root_cap(m, l):
-            return m.root_flow[l] <= m.line_closed[l] * (len(m.buses)-1)        
-        
-        #def root_cap(m, l):
-        #    return m.root_flow[l] <=  m.line_closed[l] #(len(m.buses) - 1) *
-
-        # Flow balance:
-        #   – Each substation *sources* Σ y_k units (one per energised PQ-bus)
-        #   – Every energised PQ-bus *sinks* one unit
-        # def root_balance(m, b):
-        #     inflow  = sum(m.root_flow[l] for l in m.lines if m.to_bus[l]   == b)
-        #     outflow = sum(m.root_flow[l] for l in m.lines if m.from_bus[l] == b)
-
-        #     if b in self.substations:
-        #         # Source delivers demand of all energised partitioned buses
-        #         return outflow - inflow == sum(m.is_up[k] for k in m.partitionedbuses)
-        #     else:
-        #         # Demand is 1 pu when the bus is energised, 0 otherwise
-        #         return inflow - outflow == (m.is_up[b] if b in m.partitionedbuses else 0)
-        def root_balance(m, b): # Renamed to avoid conflict if you redefine
-            inflow  = sum(m.root_flow[l] for l in m.lines if m.to_bus[l]   == b)
-            outflow = sum(m.root_flow[l] for l in m.lines if m.from_bus[l] == b)
-
-            if self.primary_root_for_radiality is None:
-                # This case should ideally be prevented by checks above.
-                # If it occurs, perhaps skip the constraint or raise an error.
-                self.logger.error(f"Primary root for radiality is None when evaluating root_balance for bus {b}. Skipping constraint.")
-                return Constraint.Skip
-
-
-            if b == self.primary_root_for_radiality:
-                # The designated primary root supplies all artificial demand
-                return outflow - inflow == sum(m.is_up[k] for k in m.partitionedbuses)
-            elif b in self.substations:
-                # Other substations (slack gens) are neutral for artificial flow
-                return outflow - inflow == 0
-            else: # Partitioned buses
-                # Demand is 1 pu when the bus is energised, 0 otherwise
-                return inflow - outflow == (m.is_up[b] if b in m.partitionedbuses else 0)
-    
-        # (34)-(35) Bus‑line logical links (only needed if radiality on) ----
-        if self.toggles["include_radiality_constraints"]:
-            model.LineBusFrom = Constraint(model.lines, rule=_line_bus_link_from)
-            model.LineBusTo   = Constraint(model.lines, rule=_line_bus_link_to)
-            model.BusConnectivity = Constraint(model.partitionedbuses, rule=_bus_connectivity)
-            if self.toggles["use_spanning_tree_radiality"]:
-                model.SpanConstraint = Constraint(rule=_spanning)
+            
+        # -------- voltage bounds   ----------------------
+        # (30)-(31) Voltage bounds with big‑M relaxation
+        def voltage_upper(m, b, t):
+            if b in self.substations:
+                return m.voltage_squared[b, t] <= m.voltage_upper_bound[b]
             else:
-                model.root_flow = Var(model.lines, within=NonNegativeReals, initialize=0)
-                model.RootCap = Constraint(model.lines, rule=root_cap)
-                model.RootBalance = Constraint(model.buses, rule=root_balance)
+                return m.voltage_squared[b, t] <= m.voltage_upper_bound[b] + (1 - m.is_up[b]) * m.voltage_bigM
 
+        def voltage_lower(m, b, t):
+            if b in self.substations:
+                return m.voltage_squared[b, t] >= m.voltage_lower_bound[b] 
+            else:
+                return m.voltage_squared[b, t] >= m.voltage_lower_bound[b] - (1 - m.is_up[b]) * m.voltage_bigM
+        
+        if self.toggles["include_voltage_bounds_constraint"]:
+            model.VoltageUpper = Constraint(model.buses, model.times, rule=voltage_upper)
+            model.VoltageLower = Constraint(model.buses, model.times, rule=voltage_lower)
+            self.enabled_constraints["VoltageUpper"] = True
+            self.enabled_constraints["VoltageLower"] = True
+
+        # --- Line Status Linking Constraints ---
+        # 1. Line active only if connected buses are energized
+        def line_bus_link_from(m, l):
+             return m.line_status[l] <= m.is_up[m.from_bus[l]]
+        model.LineBusLinkFrom = Constraint(model.lines, rule=line_bus_link_from)
+        self.enabled_constraints["LineBusLinkFrom"] = True
+        def line_bus_link_to(m, l):
+             return m.line_status[l] <= m.is_up[m.to_bus[l]]
+        model.LineBusLinkTo = Constraint(model.lines, rule=line_bus_link_to)
+        self.enabled_constraints["LineBusLinkTo"] = True
+
+        # --- Radiality Constraints ---
+        if self.toggles["include_radiality_constraints"]:
+            def bus_connectivity_rule(m, b):
+                 if b in m.partitionedbuses: 
+                     inc = [l_idx for l_idx in m.lines if m.from_bus[l_idx] == b or m.to_bus[l_idx] == b]
+                     if not inc:
+                         self.logger.warning(f"BusConnectivity for Bus {b}: No incident lines. Constraint implies 0 >= 1.")
+                         return Constraint.Skip # 0 == m.is_up[b] 
+                     return sum(m.line_status[l_idx] for l_idx in inc) >= m.is_up[b]
+                 return Constraint.Skip
+            model.BusConnectivity = Constraint(model.partitionedbuses, rule=bus_connectivity_rule)
+            self.enabled_constraints["BusConnectivity"] = True
+            # 2. Spanning tree constraint
+            if self.toggles["use_spanning_tree_radiality"]:
+                def spanning_rule(m):
+                    active_edges = sum(m.line_status[l] for l in m.lines) 
+                    if self.toggles["allow_load_shed"]:
+                        required_edges = len(m.buses) - 1 - sum(m.is_up[b] for b in m.partitionedbuses)
+                    else:
+                        required_edges = len(m.buses) - 1 
+                    return active_edges == required_edges
+                model.SpanConstraint = Constraint(rule=spanning_rule)
+                self.enabled_constraints["SpanConstraint"] = True
+             
+            model.arcs = Set(initialize=[(i,j,l) for l in model.lines
+                                        for (i,j) in [(model.from_bus[l], model.to_bus[l]),
+                                                    (model.to_bus[l], model.from_bus[l])]],
+                                dimen=3)
+            if self.toggles["use_parent_child_radiality"]:
+                # :TODO not working 
+                # __------------------------------------------
+                # Parent Child Constraints
+
+                # --- Parent-Child Formulation ---
+                self.logger.info("Using parent-child formulation for radiality constraints")
+                
+                # First, identify a root node (pick the first substation)
+                root = next(iter(self.substations)) if self.substations else model.buses[1]
+
+                # Binary variable: arc is in the tree
+                model.arc_in_tree = Var(model.arcs, within=Binary, initialize=0)
+
+                # 1) Each bus ≠ root has exactly one incoming arc
+                def one_parent_rule(m, i):
+                    if i == root or i not in m.partitionedbuses: 
+                        return Constraint.Skip
+                    return sum(m.arc_in_tree[j,i,l] for (j,i2,l) in m.arcs if i2==i) == m.is_up[i]
+                model.OneParent = Constraint(model.buses, rule=one_parent_rule)
+                self.enabled_constraints["OneParent"] = True
+
+                # 2) Total arcs = number of energized buses - 1
+                def tree_size_rule(m):
+                    energized_count = sum(m.is_up[b] for b in m.buses)
+                    return sum(m.arc_in_tree[i,j,l] for (i,j,l) in m.arcs) == energized_count - 1
+                model.TreeSize = Constraint(rule=tree_size_rule)
+                self.enabled_constraints["TreeSize"] = True
+
+                # 3) Arc can only be chosen if the line is active
+                def arc_line_link(m, i, j, l):
+                    return m.arc_in_tree[i,j,l] <= m.line_status[l]
+                model.ArcLineLink = Constraint(model.arcs, rule=arc_line_link)
+                self.enabled_constraints["ArcLineLink"] = True
+                
+                # 4) No cycles allowed (at most one direction per line can be in the tree)
+                def no_cycles_rule(m, l):
+                    arcs_for_line = [(i,j,l2) for (i,j,l2) in m.arcs if l2 == l]
+                    if len(arcs_for_line) == 2:  # Should be exactly 2 arcs per line (from i→j and j→i)
+                        (i1,j1,_), (i2,j2,_) = arcs_for_line
+                        return m.arc_in_tree[i1,j1,l] + m.arc_in_tree[i2,j2,l] <= m.line_status[l]
+                    return Constraint.Skip
+                model.NoCycles = Constraint(model.lines, rule=no_cycles_rule)
+                self.enabled_constraints["NoCycles"] = True
+            elif self.toggles["use_root_flow"]:
+
+                self.logger.info("Using single commodity flow for radiality constraints")
+                
+                # --- SCF Flow Variable ---
+                # scf_flow_var[i,j,l] is the commodity flow from bus i to bus j over line l
+                model.scf_flow_var = Var(model.arcs, within=NonNegativeReals, initialize=0)
+
+                # --- Designate a Single Root for Commodity Flow ---
+                active_model_substations = [s for s in self.substations if s in model.buses]
+                
+                if not active_model_substations:
+                    if not list(model.buses): # Check if model.buses is empty
+                        self.logger.error("SCF Radiality: No buses in the model. Cannot designate a root.")
+                        designated_root = None 
+                    else:
+                        designated_root = model.buses.first() 
+                        self.logger.warning(f"SCF Radiality: No active substations in the model. Designated {designated_root} as root.")
+                else:
+                    designated_root = active_model_substations[0]
+                    self.logger.info(f"SCF Radiality: Designated root for commodity flow is {designated_root}")
+
+                if designated_root is not None:
+                    n_buses_total = len(model.buses) # Max possible demand
+                    def scf_capacity_rule(m, u, v, l):
+                        return m.scf_flow_var[u,v,l] <= (n_buses_total -1) * m.line_status[l]
+                    model.SCFCapacity = Constraint(model.arcs, rule=scf_capacity_rule)
+                    self.enabled_constraints["SCFCapacity"] = True
+
+                    # --- Flow Conservation Constraint ---
+                    def scf_flow_conservation_rule(m, b):
+                        inflow = sum(m.scf_flow_var[u,b_val,l_idx] for (u,b_val,l_idx) in m.arcs if b_val == b)
+                        outflow = sum(m.scf_flow_var[b_val,v,l_idx] for (b_val,v,l_idx) in m.arcs if b_val == b)
+
+                        if b == designated_root:
+                            num_other_energized_sinks = sum(m.is_up[n_bus] for n_bus in m.buses if n_bus != designated_root)
+                            return outflow - inflow == num_other_energized_sinks
+                        else:
+                            return inflow - outflow == 1 * m.is_up[b]
+                    
+                    model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
+                    self.enabled_constraints["SCFFlowConservation"] = True
+                else:
+                    self.logger.error("SCF Radiality: Could not run due to no designated root.")
+                def spanning_tree_rule_scf(m):
+                    # total number of energized buses (substations always count as 1)
+                    num_up = sum(m.is_up[b] for b in m.buses)
+                    # enforce exactly num_up−1 lines active (==0 when num_up==1)
+                    return sum(m.line_status[l] for l in m.lines) == num_up - 1
+                model.SpanningTreeSCF = Constraint(rule=spanning_tree_rule_scf)
+                self.enabled_constraints["SpanningTreeSCF"] = True
+                
+                # --- Ensure Energization if Not Allowing Load Shed ---
+                if not self.toggles.get("allow_load_shed", False):
+                    connected_buses_in_model = set()
+                    for l_idx in model.lines:
+                        connected_buses_in_model.add(model.from_bus[l_idx])
+                        connected_buses_in_model.add(model.to_bus[l_idx])
+                    
+                    def bus_forced_energization_rule(m,b):
+                        if b in m.partitionedbuses and b in connected_buses_in_model:
+                            return m.is_up[b] == 1
+                        return Constraint.Skip
+                    model.SCFBusForcedEnergization = Constraint(model.buses, rule=bus_forced_energization_rule)
+                    self.enabled_constraints["SCFBusForcedEnergization"] = True
+                    for s_bus in self.substations:
+                        if s_bus in model.buses:
+                            pass 
+                        
         # -------------------- objective (25) + penalties
-        loss_term = sum(
-            model.line_resistance_pu[l] * model.squared_current_magnitude[l, 0]
-            for l in model.lines
-        )
-        slack_term = self.slack_penalty * (
-            sum(model.voltage_drop_slack[l, 0] for l in model.lines)
-            + sum(
-                model.active_power_slack[b, 0] ** 2 + model.reactive_power_slack[b, 0] ** 2
-                for b in model.buses
-            )
-        )
-        obj_expr = loss_term + slack_term
+        # --- Objective Term Expressions ---
+        def loss_term_rule(m):
+            return sum(m.line_resistance_pu[l] * m.squared_current_magnitude[l, 0]
+                for l in m.lines)
+        model.loss_term_expr = Expression(rule=loss_term_rule)
 
-        # optional switch-move penalty (already quadratic-free)
+        def slack_term_rule(m):
+            return self.slack_penalty * sum(m.voltage_drop_slack[l, 0]**2 for l in m.lines)   
+        model.slack_term_expr = Expression(rule=slack_term_rule)
+      
+         # Default if not included
         if self.toggles["include_switch_penalty"]:
-            switch_pen = self.switch_penalty * sum(
-                model.switch_initial[s] * (1 - model.switch_status[s]) +
-                (1 - model.switch_initial[s]) *   model.switch_status[s]
-                for s in model.switches
-            )
-            obj_expr += switch_pen
+            if self.toggles.get('all_lines_are_switches', False):
+                def switch_term_rule(m):
+                    return self.switch_penalty * sum(
+                        m.line_initial_status[l] * (1 - m.line_status[l]) +
+                        (1 - m.line_initial_status[l]) * m.line_status[l]
+                        for l in m.lines
+                    )
+            else:
+                def switch_term_rule(m):
+                     if not hasattr(m,'model_switches'): return 0.0
+                     return self.switch_penalty * sum(
+                         m.switch_initial[s] * (1 - m.switch_status[s]) +
+                         (1 - m.switch_initial[s]) * m.switch_status[s]
+                         for sd in m.model_switches)
+            model.switch_pen_expr = Expression(rule=switch_term_rule)
+        else:
+            model.switch_pen_expr = Expression(initialize=0.0)
+        # --- Combine Terms for Objective ---
+        def objective_rule(m):
+            slack_penalty = m.root_flow_slack_penalty if hasattr(m, 'root_flow_slack_penalty') else 0
+            shed_load_cost = 0
+            if self.toggles.get("allow_load_shed", False):
+                # Load shedding penalty
+                shed_load_cost = self.load_shed_penalty * sum(
+                    abs(self.bus_p_inj[b]) * (1 - m.is_up[b]) 
+                    for b in m.partitionedbuses if self.bus_p_inj.get(b, 0) < 0 )
+            return m.loss_term_expr + m.slack_term_expr + m.switch_pen_expr + slack_penalty +shed_load_cost
+        model.objective = Objective(rule=objective_rule, sense=minimize)
 
-        model.objective = Objective(expr=obj_expr, sense=minimize)
-
-     
         self.model = model
-        self.logger.debug("\n%s", build_model_size_report(model))
+        if self.debug_level >= 1:
+            self.logger.debug("\n%s", build_model_size_report(model))
+        self.validate_network_connectivity()
         return model
-
     
 
     def solve(self, *, solver: str = "gurobi_persistent",
-              time_limit: int = 600, threads: int = 8,
+              time_limit: int = 6000, threads: int = 8,
               mip_gap: float = 1e-2, **solver_kw) -> Any:
         if self.model is None:
             self.create_model()
@@ -479,277 +686,1384 @@ class SOCP_class:
         # Gurobi specific tunes ------------------------------------------
         if solver.startswith("gurobi"):
             opt.options.update({"MIPGap": mip_gap, "NonConvex": 2})
+            if self.debug_level >= 2:
+                opt.options.update({"Presolve": 0, "OutputFlag": 1})
+        
         # user overrides
         opt.options.update(solver_kw)
 
-        self.solver_results = opt.solve(tee=False, load_solutions=True)
+        self.solver_results = opt.solve(tee=self.debug_level >1, load_solutions=True)
         self.solve_time = time.time() - start
-
-        if not check_optimal_termination(self.solver_results):
-            self.logger.warning("Solver finished with status %s",
-                             self.solver_results.solver.termination_condition)
 
         obj_val = pyo_val(self.model.objective)
         self.logger.info("Solved in %.2fs  (obj = %.3f)",
-                    self.solve_time, obj_val)
-        self._count_changed_switches()
+                self.solve_time, obj_val)
+        
+        if self.debug_level >= 1:
+            termination_condition = self.solver_results.solver.termination_condition
+            self.logger.info(f"Solver termination condition: {termination_condition}")
+            
+            if str(termination_condition) != "optimal":
+                self.logger.warning("Solution is not optimal.")
+                if self.debug_level >= 2:
+                    self.logger.debug("Running infeasibility diagnosis...")
+                    from pyomo.util.infeasible import log_infeasible_constraints
+                    log_infeasible_constraints(self.model, log_expression=True, log_variables=True)
+    
+
+        # Deep verification of solution 
+        self.verify_solution()
+        
+        # Verify constraint satisfaction
+        self.verify_constraint_satisfaction()
+        
+        # Track switch changes
+        self.track_switch_changes()
+        
+        # Process the solution for return
+        self.process_solution(update_network=False)
         return self.solver_results
-    
-    def _count_changed_switches(self):
-        return sum(int(round(pyo_val(self.model.switch_status[s]))) != int(self.initial_switch_status.at[s])
-        for s in self.model.switches)
 
+    def track_switch_changes(self):
+        """Track and analyze the changes in switch status from initial conditions."""
+        m = self.model
+        
+        switch_change_count = 0
+        total_switches = 0
+        
+        # Count energized buses
+        energized_count = sum(1 for b in m.buses if round(pyo_val(m.is_up[b])) == 1)
+        total_buses = len(m.buses)
+        self.logger.info(f"Energized buses: {energized_count} out of {total_buses}")
 
-    def _debug_obj(self):
-        print("loss :", pyo_val(sum(self.model.rl_mOhm[l] * self.model.l_squared[l,0] * 1e-3
-                                    for l in self.model.lines)))
-        print("switch :", pyo_val(sum(self.model.switch_initial[s] * (1 - self.model.switch_status[s])
-                                    + (1 - self.model.switch_initial[s]) * self.model.switch_status[s]
-                                    for s in self.model.switches)))
-    def verify_solution(self, tol: float = 1e-6,
-                    vmin: float = 0.90, vmax: float = 1.10,
-                    logger=None) -> list[dict]:
-        """
-        Post-solve sanity checker.
-        Returns a list of dictionaries; each dict describes one violation.
-        """
-        lg = logger or self.logger
-        viol = []
-        m    = self.model
-
-        # 0) solver termination ------------------------------------------------
-        if self.solver_results is not None \
-        and not check_optimal_termination(self.solver_results):
-            lg.warning(f"Solver finished with {self.solver_results.solver.termination_condition}")
-            viol.append({"type": "termination",
-                        "cond": str(self.solver_results.solver.termination_condition)})
-
-        # 1) bound & constraint violations -------------------------------------
-        for c in m.component_data_objects(Constraint, active=True):
-            lb = c.lower if c.has_lb() else None
-            ub = c.upper if c.has_ub() else None
-            lhs = pyo_val(c.body)
-            if (lb is not None and lhs < lb - tol) or \
-            (ub is not None and lhs > ub + tol):
-                viol.append({"type":"constraint",
-                            "name":c.name, "value":lhs,
-                            "lb":lb, "ub":ub})
-                lg.debug(f"{c.name}: {lhs:.3g} ∉ [{lb},{ub}]")
-
-        # 2) variable domain check (binary≃integer, non-neg etc.) -------------
-        for v in m.component_data_objects(Var, active=True):
-            if v.domain is Binary:
-                val = pyo_val(v)
-                if abs(val - round(val)) > tol:
-                    viol.append({"type":"domain","var":v.name,"value":val})
-                    lg.debug(f"Binary {v.name} = {val:.4g} not integral")
-
-        # 3) objective consistency --------------------------------------------
-        obj_py = pyo_val(m.objective.expr)
-        obj_m  = pyo_val(m.objective)
-        if abs(obj_py - obj_m) > tol:
-            viol.append({"type":"objective","py":obj_py,"model":obj_m})
-            lg.debug(f"Objective mismatch {obj_py} vs {obj_m}")
-
-        # 4) rebuild pandapower net & run PF -----------------------------------
-        net_chk = self.update_network()
-        try:
-            pp.runpp(net_chk, enforce_q_lims=False, calculate_voltage_angles=False)
-        except pp.powerflow.LoadflowNotConverged:
-            viol.append({"type":"powerflow","detail":"PF did not converge"})
-            lg.warning("Power-flow on optimised net did not converge")
-            return viol
-
-        # 5) radial & connected? ----------------------------------------------
-        rad, con = is_radial_and_connected(net_chk)          # your helper
-        if not rad or not con:
-            viol.append({"type":"topology","radial":rad,"connected":con})
-            lg.debug(f"Topol. rad={rad} conn={con}")
-
-        # 6) voltage band ------------------------------------------------------
-        vm = net_chk.res_bus.vm_pu
-        if vm.min() < vmin - tol or vm.max() > vmax + tol:
-            viol.append({"type":"voltage",
-                        "min":vm.min(), "max":vm.max(),
-                        "band":(vmin,vmax)})
-            lg.debug(f"Voltage out of band [{vmin},{vmax}]: "
-                    f"min={vm.min():.3f}, max={vm.max():.3f}")
-
-        # 7) line current loading ---------------------------------------------
-        loading = net_chk.res_line.i_ka / net_chk.line.max_i_ka
-        over = loading[loading > 1 + tol]
-        for idx, val in over.items():
-            viol.append({"type":"thermal","line":int(idx),"loading":float(val)})
-            lg.debug(f"Line {idx} overloaded to {val*100:.1f}%")
-
-        # 8) summary -----------------------------------------------------------
-        if viol:
-            lg.warning(f"{len(viol)} verification issues found")
+        # List de-energized buses if any
+        if energized_count < total_buses:
+            de_energized = [b for b in m.buses if round(pyo_val(m.is_up[b])) == 0]
+            self.logger.warning(f"De-energized buses: {de_energized}")
+        
+        # Track switch changes based on model configuration
+        switch_changes = []
+        
+        if not self.toggles.get('all_lines_are_switches', False) and hasattr(m, 'model_switches'):
+            # Using explicit switch model
+            self.logger.info("Using explicit switch model - checking switch status changes:")
+            
+            try:
+                for s_idx in m.model_switches:
+                    original_status = bool(pyo_val(m.switch_initial[s_idx]))
+                    optimized_status = bool(round(pyo_val(m.switch_status[s_idx])))
+                    
+                    status_changed = original_status != optimized_status
+                    if status_changed:
+                        switch_change_count += 1
+                        switch_changes.append({
+                            'switch_id': s_idx,
+                            'original': original_status,
+                            'optimized': optimized_status
+                        })
+                    
+                    if status_changed or self.debug_level >= 2:
+                        # Print all changes, or all switches in verbose debug mode
+                        self.logger.info(f"  Switch {s_idx}: {original_status} → {optimized_status}" + 
+                                        (" (CHANGED)" if status_changed else ""))
+                    
+                    total_switches += 1
+            except Exception as e:
+                self.logger.error(f"Error comparing switch statuses: {e}")
+        
         else:
-            lg.info("verify_solution: all checks passed")
-
-        return viol
-
-    # def extract_results(self):
-    #     if not hasattr(self.model, "P_loss"):
-    #         raise RuntimeError("Model is infeasible or was not solved correctly; 'P_loss' does not exist.")
-
-    #     if self.model is None:
-    #         return
-    #     results = {
-    #         "optimization_time": self.optimization_time,
-    #         "num_switches": len(self.model.switches) if self.include_switches else 0,
-    #         "num_switches_changed": self.num_switches_changed if self.include_switches else 0,
-    #         "objective_value": pyo_value(self.model.objective),
-    #         "power_loss": sum(pyo_value(self.model.P_loss[l, 0]) for l in self.model.lines),
-    #     }
-    #     if self.include_switches:
-    #         switch_results = {}
-    #         for s in self.model.switches:
-    #             try:
-    #                 initial = bool(self.initial_switch_status.at[s])
-    #                 optimized = bool(round(pyo_value(self.model.switch_status[s])))
-    #                 switch_results[s] = {
-    #                     "initial": initial,
-    #                     "optimized": optimized,
-    #                     "changed": initial != optimized
-    #                 }
-    #             except:
-    #                 pass
-    #         results["switches"] = switch_results
-    #     voltage_profiles = {}
-    #     for b in self.model.buses:
-    #         try:
-    #             voltage_profiles[b] = np.sqrt(pyo_value(self.model.V_m_sqr[b, 0]))
-    #         except:
-    #             pass
-    #     results["voltage_profiles"] = voltage_profiles
-    #     self.optimized_results = results
-    #     return results
+            # Using all_lines_are_switches model
+            self.logger.info("Using all_lines_are_switches model - checking line status changes:")
+            
+            try:
+                for l_idx in m.lines:
+                    if l_idx in self.lines_with_sw:  # Only check lines with switches
+                        original_status = bool(pyo_val(m.line_initial_status[l_idx]))
+                        optimized_status = bool(round(pyo_val(m.line_status[l_idx])))
+                        
+                        status_changed = original_status != optimized_status
+                        if status_changed:
+                            switch_change_count += 1
+                            switch_changes.append({
+                                'line_id': l_idx,
+                                'original': original_status,
+                                'optimized': optimized_status
+                            })
+                            
+                        if status_changed or self.debug_level >= 2:
+                            # Print all changes, or all switchable lines in verbose debug mode
+                            self.logger.info(f"  Line {l_idx}: {original_status} → {optimized_status}" + 
+                                            (" (CHANGED)" if status_changed else ""))
+                        
+                        total_switches += 1
+            except Exception as e:
+                self.logger.error(f"Error comparing line statuses: {e}")
+        
+        # Summary 
+        self.logger.info(f"Total switches/switchable lines: {total_switches}")
+        percentage = (switch_change_count/total_switches*100) if total_switches > 0 else 0
+        self.logger.info(f"Switches/lines changed by optimization: {switch_change_count} ({percentage:.1f}%)")
+        
+        # Store for later reference
+        self.num_switches_changed = switch_change_count
+        self.debug_logs["switch_changes"] = switch_changes
+        
+        # Detect potential issues with the solution
+        if switch_change_count == 0 and total_switches > 0:
+            self.logger.warning("WARNING: NO SWITCHES CHANGED IN OPTIMIZATION SOLUTION!")
+            self.logger.warning("This likely indicates an issue with the radiality constraints or the optimization formulation.")
+            
+            # Additional diagnostics for radiality
+            if self.toggles.get("use_spanning_tree_radiality", False) and hasattr(m, "SpanConstraint"):
+                active_lines = sum(1 for l in m.lines if round(pyo_val(m.line_status[l])) == 1)
+                expected_active = len(m.buses) - 1
+                lhs = sum(pyo_val(m.line_status[l]) for l in m.lines)
+                rhs = len(m.buses) - 1
+                self.logger.warning(f"Spanning tree check: Active lines = {active_lines}, Expected = {expected_active}")
+                self.logger.warning(f"SpanConstraint: sum(line_status) = {lhs} == {rhs} ?: {abs(lhs-rhs) < 1e-6}")
+        else:
+            self.logger.info(f"SUCCESS: Optimization changed {switch_change_count} switches")
     
-    def active_mask(self):
-        "Return pd.Series 1/0 of the buses that were optimised."
-        return self.active_bus.astype(int)
+    def verify_solution(self):
+        """Perform deep verification of the solution to identify issues."""
+        if not self.model:
+            self.logger.warning("No model exists. Call create_model() and solve() first.")
+            return
+            
+        m = self.model
+        
+        # Store key variable values for debugging
+        self.variable_values = {}
+        
+        # 1. Voltage squared values
+        v_squared = {}
+        for b in m.buses:
+            for t in m.times:
+                v_squared[(b, t)] = pyo_val(m.voltage_squared[b, t])
+        self.variable_values["voltage_squared"] = v_squared
+        
+        # 2. Power flows
+        p_flows = {}
+        q_flows = {}
+        for l in m.lines:
+            for t in m.times:
+                p_flows[(l, t)] = pyo_val(m.active_power_flow[l, t])
+                q_flows[(l, t)] = pyo_val(m.reactive_power_flow[l, t])
+        self.variable_values["p_flows"] = p_flows
+        self.variable_values["q_flows"] = q_flows
+        
+        # 3. Line status
+        line_status = {}
+        for l in m.lines:
+            line_status[l] = round(pyo_val(m.line_status[l]))
+        self.variable_values["line_status"] = line_status
+        
+        # 4. Slack variables if used
+        if self.toggles.get("use_slack_variables", False):
+            p_slack = {}
+            q_slack = {}
+            v_slack = {}
+            
+            for b in m.buses:
+                for t in m.times:
+                    p_slack[(b, t)] = pyo_val(m.active_power_slack[b, t])
+                    q_slack[(b, t)] = pyo_val(m.reactive_power_slack[b, t])
+            
+            for l in m.lines:
+                for t in m.times:
+                    v_slack[(l, t)] = pyo_val(m.voltage_drop_slack[l, t])
+                    
+            self.variable_values["p_slack"] = p_slack
+            self.variable_values["q_slack"] = q_slack
+            self.variable_values["v_slack"] = v_slack
+            
+            # Report on significant slack values
+            significant_p_slack = [(k, v) for k, v in p_slack.items() if abs(v) > 1e-4]
+            significant_q_slack = [(k, v) for k, v in q_slack.items() if abs(v) > 1e-4]
+            significant_v_slack = [(k, v) for k, v in v_slack.items() if abs(v) > 1e-4]
+            
+            if significant_p_slack:
+                self.logger.warning(f"Significant active power slack values detected: {len(significant_p_slack)}")
+                for (b, t), val in significant_p_slack[:5]:  # Show first 5
+                    self.logger.warning(f"  Bus {b}, t={t}: P-slack = {val:.6g}")
+            
+            if significant_q_slack:
+                self.logger.warning(f"Significant reactive power slack values detected: {len(significant_q_slack)}")
+                for (b, t), val in significant_q_slack[:5]:  # Show first 5
+                    self.logger.warning(f"  Bus {b}, t={t}: Q-slack = {val:.6g}")
+            
+            if significant_v_slack:
+                self.logger.warning(f"Significant voltage drop slack values detected: {len(significant_v_slack)}")
+                for (l, t), val in significant_v_slack[:5]:  # Show first 5
+                    self.logger.warning(f"  Line {l}, t={t}: V-slack = {val:.6g}")
+        
+        # 5. Check objective components
+        self.logger.info("Objective function breakdown:")
+        self.logger.info(f"  Loss term: {pyo_val(m.loss_term_expr):.6g}")
+        self.logger.info(f"  Slack penalty term: {pyo_val(m.slack_term_expr):.6g}")
+        self.logger.info(f"  Switch penalty term: {pyo_val(m.switch_pen_expr):.6g}")
+        self.logger.info(f"  Total objective: {pyo_val(m.objective):.6g}")
+        
+        # 6. Verify network structure
+        active_lines = sum(1 for l in m.lines if line_status[l] > 0.5)
+        self.logger.info(f"Active lines in solution: {active_lines} of {len(m.lines)}")
+        
+        # 7. Check radiality condition
+        if self.toggles.get("use_spanning_tree_radiality", False):
+            nbuses = len(m.buses)
+            self.logger.info(f"Spanning tree check: {active_lines} active lines, {nbuses-1} expected for a tree")
+            
+            if active_lines != nbuses - 1:
+                self.logger.warning("Solution might not form a proper spanning tree!")
+    
+    def verify_constraint_satisfaction(self):
+        """Verify if all model constraints are satisfied by the solution."""
+        if not self.model:
+            self.logger.warning("No model exists. Call create_model() and solve() first.")
+            return
+            
+        m = self.model
+        tolerance = 1e-5
+        
+        # Store constraint violations
+        self.constraint_violations = {}
+        
+        # Check all constraints in the model
+        for c in m.component_data_objects(Constraint, active=True):
+            try:
+                # Get constraint bounds
+                lb = c.lower if c.has_lb() else None
+                ub = c.upper if c.has_ub() else None
+                
+                # Calculate constraint body value
+                body_val = pyo_val(c.body)
+                
+                # Check for violation
+                if (lb is not None and body_val < lb - tolerance) or (ub is not None and body_val > ub + tolerance):
+                    # Record violation
+                    violation = {
+                        "constraint_name": c.name,
+                        "body_value": body_val,
+                        "lower_bound": lb,
+                        "upper_bound": ub,
+                        "violation": max(lb - body_val if lb is not None else 0, 
+                                       body_val - ub if ub is not None else 0)
+                    }
+                    
+                    # Group violations by constraint type
+                    constraint_type = c.name.split('[')[0]
+                    if constraint_type not in self.constraint_violations:
+                        self.constraint_violations[constraint_type] = []
+                    
+                    self.constraint_violations[constraint_type].append(violation)
+                    
+                    # Log major violations
+                    if violation["violation"] > 1e-3:
+                        self.logger.warning(f"Constraint violation: {c.name} = {body_val:.6g}")
+                        if lb is not None and body_val < lb - tolerance:
+                            self.logger.warning(f"  Value {body_val:.6g} < {lb} (lower bound) by {lb - body_val:.6g}")
+                        if ub is not None and body_val > ub + tolerance:
+                            self.logger.warning(f"  Value {body_val:.6g} > {ub} (upper bound) by {body_val - ub:.6g}")
+                        
+            except Exception as e:
+                self.logger.error(f"Error checking constraint {c.name}: {e}")
+        
+        # Summarize violations
+        total_violations = sum(len(violations) for violations in self.constraint_violations.values())
+        if total_violations > 0:
+            self.logger.warning(f"Found {total_violations} constraint violations")
+            
+            # Show violations by constraint type
+            for constraint_type, violations in self.constraint_violations.items():
+                worst_violation = max(violations, key=lambda v: v["violation"])
+                self.logger.warning(f"  {constraint_type}: {len(violations)} violations, worst: {worst_violation['violation']:.6g}")
+        else:
+            self.logger.info("All constraints satisfied within tolerance.")
+        
+        # Focus on key constraints if violations exist
+        if "ActivePowerBalance" in self.constraint_violations or "ReactivePowerBalance" in self.constraint_violations:
+            self.logger.warning("Power balance constraints violated. Checking power balance in detail...")
+            self.verify_power_balance_constraints()
 
     def update_network(self):
+        """Update the network with the optimization results."""
         net_updated = self.net.deepcopy()
-        # 1) collect what Pyomo thinks the optimized statuses are
-        optimized_statuses = {
-            s: bool(round(pyo_val(self.model.switch_status[s])))
-            for s in self.model.switches
-        }
-        # 2) log initial vs optimized
-        self.logger.debug("Switch status summary before update:")
-        for s in self.model.switches:
-            init = bool(self.initial_switch_status.at[s])
-            opt  = optimized_statuses[s]
-            self.logger.debug(f"  switch {s:3d}: {init!r} → {opt!r}")
-
-        # 3) apply back into pandapower net
-        for s, status in optimized_statuses.items():
-            net_updated.switch.at[s, 'closed'] = status
-
-        # 4) log the net.switch dataframe after update
-        self.logger.debug(
-            "pandapower net.switch['closed'] after update:\n"
-            + net_updated.switch[net_updated.switch.et=='l'][['element','closed']].to_string()
-        )
-
+        
+        # Update switch statuses based on optimization results
+        if hasattr(self.model, 'model_switches'):
+            for s_idx in self.model.model_switches:
+                # Get optimized status (0 or 1)
+                switch_closed = bool(round(pyo_val(self.model.switch_status[s_idx])))
+                # Apply to network
+                if s_idx in net_updated.switch.index:
+                    net_updated.switch.at[s_idx, 'closed'] = switch_closed
+        elif self.toggles.get('all_lines_are_switches', False):
+            # If using the all_lines_are_switches mode
+            for l_idx in self.model.lines:
+                if l_idx in self.lines_with_sw:
+                    # Get line status
+                    line_active = bool(round(pyo_val(self.model.line_status[l_idx])))
+                    # Update all switches associated with this line
+                    for s_idx in self.lines_with_sw[l_idx]:
+                        if s_idx in net_updated.switch.index:
+                            net_updated.switch.at[s_idx, 'closed'] = line_active
+        
+        # Log switch changes
+        if self.debug_level >= 1:
+            self.logger.debug("Network updated with optimization results")
+            self.logger.debug(f"Total switches changed: {self.num_switches_changed}")
+        
         return net_updated
-    def print_results(self):
-        if self.optimized_results is None:
-            print("No optimization results available.")
-            return
-        results = self.optimized_results
-        print("\n" + "="*50)
-        print(f"NETWORK RECONFIGURATION RESULTS: {self.net_name}")
-        print("="*50)
-        print(f"Optimization time: {results['optimization_time']:.2f} seconds")
-        print(f"Objective value: {results['objective_value']:.4f}")
-        print(f"Power loss: {results['power_loss']:.4f} kW")
 
-        print(f"\nSwitch changes: {results['num_switches_changed']} of {results['num_switches']}")
-        if results['num_switches_changed'] > 0:
-            print("\nSwitches changed:")
-            print(f"{'Switch ID':10} {'Initial':10} {'Optimized':10}")
-            print("-" * 35)
-            for s, switch_info in results['switches'].items():
-                if switch_info['changed']:
-                    print(f"{s:10} {'Closed' if switch_info['initial'] else 'Open':10} {'Closed' if switch_info['optimized'] else 'Open':10}")
-        print("\nVoltage profile summary:")
-        voltages = list(results['voltage_profiles'].values())
-        if voltages:
-            print(f"Min voltage: {min(voltages):.4f} p.u.")
-            print(f"Max voltage: {max(voltages):.4f} p.u.")
-            print(f"Avg voltage: {sum(voltages)/len(voltages):.4f} p.u.")
-        print("="*50)
-
-    def plot_network(self):
-        if not hasattr(self.net, 'bus_geodata') or self.net.bus_geodata.empty:
-            print("Bus geodata not available for plotting.")
-            return
-        plt.figure(figsize=(12, 10))
-        for idx, line in self.net.line.iterrows():
-            from_bus = line.from_bus
-            to_bus = line.to_bus
-            try:
-                from_x, from_y = self.net.bus_geodata.loc[from_bus, ['x', 'y']]
-                to_x, to_y = self.net.bus_geodata.loc[to_bus, ['x', 'y']]
-                line_switches = self.net.switch[(self.net.switch.et == 'l') & (self.net.switch.element == idx)].index
-                switches_changed = any(
-                    self.optimized_results['switches'].get(s, {}).get('changed', False) for s in line_switches
-                )
-                if any(line_switches) and not all(self.net.switch.at[s, 'closed'] for s in line_switches):
-                    plt.plot([from_x, to_x], [from_y, to_y], 'r--', linewidth=1.5)
-                elif switches_changed:
-                    plt.plot([from_x, to_x], [from_y, to_y], 'g-', linewidth=2.5)
+    # Validate network connectivity for flow modeling
+    def validate_network_connectivity(self):
+        """Validate the network connectivity to ensure flow modeling is possible."""
+        self.logger.info("Validating network connectivity for flow modeling...")
+        
+        # Check for isolated buses
+        isolated_buses = []
+        for b in self.model.buses:
+            incident_lines = [l for l in self.model.lines 
+                            if self.model.from_bus[l] == b or self.model.to_bus[l] == b]
+            if not incident_lines:
+                isolated_buses.append(b)
+                self.logger.warning(f"Bus {b} is isolated with no incident lines!")
+        
+        if isolated_buses:
+            self.logger.warning(f"Found {len(isolated_buses)} isolated buses: {isolated_buses}")
+        else:
+            self.logger.info("No isolated buses found - good!")
+        
+        # Verify substations have connections
+        for b in self.substations:
+            if b in self.model.buses:  # Only check active substations
+                incident_lines = [l for l in self.model.lines 
+                                if self.model.from_bus[l] == b or self.model.to_bus[l] == b]
+                if not incident_lines:
+                    self.logger.error(f"Substation bus {b} has no incident lines but is expected to inject power!")
                 else:
-                    plt.plot([from_x, to_x], [from_y, to_y], 'k-', linewidth=1.5)
-                for s in line_switches:
-                    switch_x = from_x + 0.3 * (to_x - from_x)
-                    switch_y = from_y + 0.3 * (to_y - from_y)
-                    switch_changed = self.optimized_results['switches'].get(s, {}).get('changed', False)
-                    switch_closed = self.net.switch.at[s, 'closed']
-                    if switch_changed:
-                        if switch_closed:
-                            plt.plot(switch_x, switch_y, 'gs', markersize=10, markeredgecolor='m', markeredgewidth=2)
-                        else:
-                            plt.plot(switch_x, switch_y, 'ro', markersize=10, markeredgecolor='m', markeredgewidth=2)
-                    else:
-                        if switch_closed:
-                            plt.plot(switch_x, switch_y, 'gs', markersize=8)
-                        else:
-                            plt.plot(switch_x, switch_y, 'ro', markersize=8)
-            except:
-                pass
-        plt.scatter(self.net.bus_geodata.x, self.net.bus_geodata.y, c='blue', marker='o', s=50)
-        for idx, row in self.net.bus_geodata.iterrows():
-            plt.text(row.x, row.y + 0.1, f"Bus {idx}", fontsize=8, ha='center')
-        plt.title(f"Network Reconfiguration Results: {self.net_name}")
-        plt.axis('equal')
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Line2D([0], [0], color='k', linewidth=1.5, label='Active Line'),
-            Line2D([0], [0], color='r', linestyle='--', linewidth=1.5, label='Inactive Line'),
-            Line2D([0], [0], color='g', linewidth=2.5, label='Line with Switch Change'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markersize=8, label='Bus'),
-            Line2D([0], [0], marker='s', color='w', markerfacecolor='g', markersize=8, label='Closed Switch'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='r', markersize=8, label='Open Switch'),
-            Line2D([0], [0], marker='s', color='w', markerfacecolor='g', markeredgecolor='m', markeredgewidth=2, markersize=10, label='Changed to Closed'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='r', markeredgecolor='m', markeredgewidth=2, markersize=10, label='Changed to Open')
-        ]
-        plt.legend(handles=legend_elements, loc='best')
-        plt.grid(False)
-        plt.tight_layout()
-        plt.show()
+                    self.logger.info(f"Substation bus {b} has {len(incident_lines)} incident lines.")
+        
+        # Check injection values
+        zero_injection_buses = 0
+        for b in self.model.buses:
+            if b not in self.substations and abs(self.bus_p_inj[b]) < 1e-6:
+                zero_injection_buses += 1
+        
+        self.logger.info(f"Found {zero_injection_buses} buses with approximately zero active power injection.")
+        
+        # Check radiality if spanning tree is used
+        if self.toggles.get("use_spanning_tree_radiality", False):
+            num_buses = len(self.model.buses)
+            num_lines = len(self.model.lines)
+            if num_lines != num_buses - 1:
+                self.logger.warning(f"Network has {num_lines} lines and {num_buses} buses. " 
+                                f"For a radial network, expected {num_buses - 1} lines.")
+        
+        # Store connectivity information for debugging
+        self.debug_logs["network_connectivity"] = {
+            "isolated_buses": isolated_buses,
+            "zero_injection_buses": zero_injection_buses,
+            "substation_connections": {
+                b: len([l for l in self.model.lines 
+                        if self.model.from_bus[l] == b or self.model.to_bus[l] == b])
+                for b in self.substations if b in self.model.buses
+            }
+        }
+
+    def verify_power_balance_constraints(self):
+        """
+        Detailed verification of power balance constraints to identify issues.
+        """
+        self.logger.info("Verifying power balance constraints...")
+        
+        # Track violations
+        active_power_violations = []
+        reactive_power_violations = []
+        
+        # Checking each bus for active power balance
+        for b in self.model.buses:
+            # Get flows, injections and balance values
+            outflow = pyo_val(self.model.sum_outflow[b])
+            inflow = pyo_val(self.model.sum_inflow[b])
+            balance = outflow - inflow
             
-    def _print_model_summary(self, max_constraint_rows=0):
+            # For non-substation buses
+            if b not in self.substations:
+                injection = self.bus_p_inj[b] * pyo_val(self.model.is_up[b])
+                p_slack = pyo_val(self.model.active_power_slack[b, 0]) if hasattr(self.model, "active_power_slack") else 0
+                expected = injection + p_slack
+                
+                error = abs(balance - expected)
+                if error > 1e-4:  # Tolerance for numerical issues
+                    active_power_violations.append({
+                        "bus": b,
+                        "outflow": outflow,
+                        "inflow": inflow,
+                        "balance": balance,
+                        "injection": injection, 
+                        "slack": p_slack,
+                        "expected": expected,
+                        "error": error
+                    })
+            
+            # For reactive power (skip substations)
+            if b not in self.substations:
+                # Calculate reactive flows
+                q_outflow = sum(pyo_val(self.model.reactive_power_flow[l, 0]) 
+                               for l in self.model.lines if self.model.from_bus[l] == b)
+                q_inflow = sum(pyo_val(self.model.reactive_power_flow[l, 0]) 
+                              for l in self.model.lines if self.model.to_bus[l] == b)
+                q_balance = q_outflow - q_inflow
+                
+                q_injection = self.bus_q_inj[b] * pyo_val(self.model.is_up[b])
+                q_slack = pyo_val(self.model.reactive_power_slack[b, 0]) if hasattr(self.model, "reactive_power_slack") else 0
+                q_expected = q_injection + q_slack
+                
+                q_error = abs(q_balance - q_expected)
+                if q_error > 1e-4:  # Tolerance for numerical issues
+                    reactive_power_violations.append({
+                        "bus": b,
+                        "outflow": q_outflow,
+                        "inflow": q_inflow,
+                        "balance": q_balance,
+                        "injection": q_injection,
+                        "slack": q_slack,
+                        "expected": q_expected,
+                        "error": q_error
+                    })
+        
+        # Log results
+        if active_power_violations:
+            worst_active = max(active_power_violations, key=lambda v: v["error"])
+            self.logger.warning(f"Found {len(active_power_violations)} active power balance violations")
+            self.logger.warning(f"Worst active power violation at bus {worst_active['bus']}: error = {worst_active['error']:.6g}")
+            
+            # Log details of first few violations
+            for violation in active_power_violations[:5]:
+                b = violation["bus"]
+                self.logger.warning(f"  Bus {b}: outflow={violation['outflow']:.6g}, inflow={violation['inflow']:.6g}")
+                self.logger.warning(f"    balance={violation['balance']:.6g}, injection={violation['injection']:.6g}")
+                if violation["slack"] != 0:
+                    self.logger.warning(f"    slack={violation['slack']:.6g}")
+                self.logger.warning(f"    expected={violation['expected']:.6g}, error={violation['error']:.6g}")
+        else:
+            self.logger.info("No active power balance violations found!")
+            
+        if reactive_power_violations:
+            worst_reactive = max(reactive_power_violations, key=lambda v: v["error"])
+            self.logger.warning(f"Found {len(reactive_power_violations)} reactive power balance violations")
+            self.logger.warning(f"Worst reactive power violation at bus {worst_reactive['bus']}: error = {worst_reactive['error']:.6g}")
+            
+            # Log details of first few violations
+            for violation in reactive_power_violations[:5]:
+                b = violation["bus"]
+                self.logger.warning(f"  Bus {b}: outflow={violation['outflow']:.6g}, inflow={violation['inflow']:.6g}")
+                self.logger.warning(f"    balance={violation['balance']:.6g}, injection={violation['injection']:.6g}")
+                if violation["slack"] != 0:
+                    self.logger.warning(f"    slack={violation['slack']:.6g}")
+                self.logger.warning(f"    expected={violation['expected']:.6g}, error={violation['error']:.6g}")
+        else:
+            self.logger.info("No reactive power balance violations found!")
+            
+        # Store violations for debugging
+        self.debug_logs["power_balance_violations"] = {
+            "active": active_power_violations,
+            "reactive": reactive_power_violations
+        }
+        
+        # Check special case: zero-injection buses with non-zero flows
+        zero_injection_with_flow = []
+        for b in self.model.buses:
+            if b not in self.substations and abs(self.bus_p_inj[b]) < 1e-6:
+                flow_balance = pyo_val(self.model.flow_balance[b])
+                if abs(flow_balance) > 1e-4:
+                    zero_injection_with_flow.append({
+                        "bus": b,
+                        "p_injection": self.bus_p_inj[b],
+                        "flow_balance": flow_balance
+                    })
+        
+        if zero_injection_with_flow:
+            self.logger.warning(f"Found {len(zero_injection_with_flow)} zero-injection buses with non-zero flow balance")
+            for item in zero_injection_with_flow[:5]:
+                self.logger.warning(f"  Bus {item['bus']}: p_injection={item['p_injection']:.6g}, flow_balance={item['flow_balance']:.6g}")
+            
+            self.debug_logs["zero_injection_flow_issues"] = zero_injection_with_flow
+    
+    def verify_voltage_drop_constraints(self):
         """
-        Quick overview: counts of vars/cons + (optionally) a full pprint.
+        Verify the voltage drop constraints for all active lines.
+        This helps identify issues with the voltage drop formulation.
         """
-        from pyomo.util.model_size import build_model_size_report
-        rep = build_model_size_report(self.model)          # aggregated counts
-        self.logger.info("\nMODEL SIZE SUMMARY\n" + rep)
+        self.logger.info("Verifying voltage drop constraints...")
+        
+        # Track violations
+        voltage_drop_violations = []
+        
+        # Check each line
+        for l in self.model.lines:
+            # Only check active lines
+            if pyo_val(self.model.line_status[l]) < 0.5:
+                continue
+                
+            # Get parameters
+            i, j = self.model.from_bus[l], self.model.to_bus[l]
+            R, X = self.model.line_resistance_pu[l], self.model.line_reactance_pu[l]
+            
+            # Get variable values
+            vi = pyo_val(self.model.voltage_squared[i, 0])
+            vj = pyo_val(self.model.voltage_squared[j, 0])
+            p = pyo_val(self.model.active_power_flow[l, 0])
+            q = pyo_val(self.model.reactive_power_flow[l, 0])
+            i_sq = pyo_val(self.model.squared_current_magnitude[l, 0])
+            
+            # Calculate expected voltage drop
+            lhs = vj
+            rhs = vi - 2*(R*p + X*q) + (R**2 + X**2)*i_sq
+            error = abs(lhs - rhs)
+            
+            if error > 1e-4:  # Tolerance for numerical issues
+                voltage_drop_violations.append({
+                    "line": l,
+                    "from_bus": i,
+                    "to_bus": j,
+                    "v_i_squared": vi,
+                    "v_j_squared": vj,
+                    "p_flow": p,
+                    "q_flow": q,
+                    "i_squared": i_sq,
+                    "lhs": lhs,
+                    "rhs": rhs,
+                    "error": error
+                })
+        
+        # Log results
+        if voltage_drop_violations:
+            worst = max(voltage_drop_violations, key=lambda v: v["error"])
+            self.logger.warning(f"Found {len(voltage_drop_violations)} voltage drop constraint violations")
+            self.logger.warning(f"Worst violation on line {worst['line']} ({worst['from_bus']}->{worst['to_bus']}): error = {worst['error']:.6g}")
+            
+            # Log details of first few violations
+            for violation in voltage_drop_violations[:5]:
+                l = violation["line"]
+                i, j = violation["from_bus"], violation["to_bus"]
+                self.logger.warning(f"  Line {l} ({i}->{j}):")
+                self.logger.warning(f"    vi²={violation['v_i_squared']:.6g}, vj²={violation['v_j_squared']:.6g}")
+                self.logger.warning(f"    p={violation['p_flow']:.6g}, q={violation['q_flow']:.6g}, i²={violation['i_squared']:.6g}")
+                self.logger.warning(f"    lhs={violation['lhs']:.6g}, rhs={violation['rhs']:.6g}, error={violation['error']:.6g}")
+        else:
+            self.logger.info("No voltage drop constraint violations found!")
+            
+        # Store violations for debugging
+        self.debug_logs["voltage_drop_violations"] = voltage_drop_violations
+    
+    def verify_socp_cone_constraints(self):
+        """
+        Verify second-order cone constraints to ensure the model is working correctly.
+        """
+        self.logger.info("Verifying second-order cone constraints...")
+        
+        # Track violations
+        socp_violations = []
+        
+        # Check each line
+        for l in self.model.lines:
+            # Only check active lines
+            if pyo_val(self.model.line_status[l]) < 0.5:
+                continue
+                
+            # Get bus index
+            i = self.model.from_bus[l]
+            
+            # Get variable values for time 0
+            p = pyo_val(self.model.active_power_flow[l, 0])
+            q = pyo_val(self.model.reactive_power_flow[l, 0])
+            vi = pyo_val(self.model.voltage_squared[i, 0])
+            i_sq = pyo_val(self.model.squared_current_magnitude[l, 0])
+            
+            # Calculate norm squared
+            norm_squared = (2*p)**2 + (2*q)**2 + (vi - i_sq)**2
+            
+            # Calculate right-hand side
+            rhs_squared = (vi + i_sq)**2
+            
+            # Check if constraint is satisfied
+            if norm_squared > rhs_squared * (1 + 1e-4):  # Allow small tolerance
+                violation = {
+                    "line": l,
+                    "from_bus": i,
+                    "p_flow": p,
+                    "q_flow": q,
+                    "v_i_squared": vi,
+                    "i_squared": i_sq,
+                    "norm_squared": norm_squared,
+                    "rhs_squared": rhs_squared,
+                    "violation": norm_squared - rhs_squared
+                }
+                socp_violations.append(violation)
+        
+        # Log results
+        if socp_violations:
+            worst = max(socp_violations, key=lambda v: v["violation"])
+            self.logger.warning(f"Found {len(socp_violations)} SOC constraint violations")
+            self.logger.warning(f"Worst violation on line {worst['line']}: violation = {worst['violation']:.6g}")
+            
+            # Log details for worst violations
+            for violation in socp_violations[:5]:
+                l = violation["line"]
+                self.logger.warning(f"  Line {l} from bus {violation['from_bus']}:")
+                self.logger.warning(f"    p={violation['p_flow']:.6g}, q={violation['q_flow']:.6g}")
+                self.logger.warning(f"    vi²={violation['v_i_squared']:.6g}, i²={violation['i_squared']:.6g}")
+                self.logger.warning(f"    ||.||²={violation['norm_squared']:.6g}, rhs²={violation['rhs_squared']:.6g}")
+                self.logger.warning(f"    violation={violation['violation']:.6g}")
+        else:
+            self.logger.info("All SOC constraints satisfied within tolerance!")
+            
+        # Store violations for debugging
+        self.debug_logs["socp_violations"] = socp_violations
+    
+    def verify_line_flow_bounds(self):
+        """
+        Verify line flow bound constraints to ensure the big-M constraints are working correctly.
+        """
+        self.logger.info("Verifying line flow bound constraints...")
+        
+        # Track violations
+        flow_bound_violations = []
+        
+        # Check each line
+        for l in self.model.lines:
+            # Get line status
+            status = pyo_val(self.model.line_status[l])
+            
+            # Get flow values
+            p = pyo_val(self.model.active_power_flow[l, 0])
+            q = pyo_val(self.model.reactive_power_flow[l, 0])
+            
+            # Get big-M
+            big_M = pyo_val(self.model.big_M_flow[l])
+            
+            # Check active power upper/lower bounds
+            if abs(p) > big_M * status + 1e-4:
+                violation = {
+                    "line": l,
+                    "status": status,
+                    "p_flow": p,
+                    "q_flow": q,
+                    "big_M": big_M,
+                    "p_bound": big_M * status,
+                    "violation": abs(p) - big_M * status,
+                    "type": "active power"
+                }
+                flow_bound_violations.append(violation)
+                
+            # Check reactive power upper/lower bounds
+            if abs(q) > big_M * status + 1e-4:
+                violation = {
+                    "line": l,
+                    "status": status,
+                    "p_flow": p,
+                    "q_flow": q,
+                    "big_M": big_M,
+                    "q_bound": big_M * status,
+                    "violation": abs(q) - big_M * status,
+                    "type": "reactive power"
+                }
+                flow_bound_violations.append(violation)
+        
+        # Log results
+        if flow_bound_violations:
+            self.logger.warning(f"Found {len(flow_bound_violations)} flow bound violations")
+            
+            # Group by violation type
+            p_violations = [v for v in flow_bound_violations if v["type"] == "active power"]
+            q_violations = [v for v in flow_bound_violations if v["type"] == "reactive power"]
+            
+            if p_violations:
+                worst_p = max(p_violations, key=lambda v: v["violation"])
+                self.logger.warning(f"Worst active power bound violation on line {worst_p['line']}: {worst_p['violation']:.6g}")
+                
+            if q_violations:
+                worst_q = max(q_violations, key=lambda v: v["violation"])
+                self.logger.warning(f"Worst reactive power bound violation on line {worst_q['line']}: {worst_q['violation']:.6g}")
+                
+            # Log details for selected violations
+            for violation in flow_bound_violations[:5]:
+                l = violation["line"]
+                self.logger.warning(f"  Line {l} ({violation['type']} violation):")
+                if violation["type"] == "active power":
+                    self.logger.warning(f"    |p|={abs(violation['p_flow']):.6g} > {violation['p_bound']:.6g} = M·status")
+                else:
+                    self.logger.warning(f"    |q|={abs(violation['q_flow']):.6g} > {violation['q_bound']:.6g} = M·status")
+                self.logger.warning(f"    violation={violation['violation']:.6g}, status={violation['status']}")
+        else:
+            self.logger.info("All flow bound constraints satisfied within tolerance!")
+            
+        # Store violations for debugging
+        self.debug_logs["flow_bound_violations"] = flow_bound_violations
+    def verify_radiality_topology(optimizer, net_opt):
+        """Verify if the resulting network topology is radial by checking graph properties"""
+        import networkx as nx
+        
+        self.logger.info("Verifying radiality of resulting network topology...")
+        
+        # Create a graph from the optimized network
+        G = nx.Graph()
+        
+        # Add all buses as nodes
+        for b in net_opt.bus.index:
+            G.add_node(b)
+        
+        # Add active lines as edges
+        line_status = {}
+        if hasattr(optimizer.model, 'line_status'):
+            for l in optimizer.model.lines:
+                status = round(pyo_val(optimizer.model.line_status[l]))
+                line_status[l] = status
+                
+                # Add edge if line is active
+                if status > 0.5:
+                    from_bus = optimizer.model.from_bus[l]
+                    to_bus = optimizer.model.to_bus[l]
+                    G.add_edge(from_bus, to_bus)
+        
+        # Identify substations
+        substations = list(optimizer.substations)
+        
+        # Check for cycles (a radial network shouldn't have any)
+        has_cycles = False
+        cycles = []
+        try:
+            # Get all cycles in the graph
+            cycle_basis = list(nx.cycle_basis(G))
+            if cycle_basis:
+                has_cycles = True
+                cycles = cycle_basis
+                self.logger.warning(f"Found {len(cycles)} cycles in the network: {cycles}")
+            else:
+                self.logger.info("Network has no cycles - good!")
+        except Exception as e:
+            self.logger.warning(f"Error while checking for cycles: {e}")
+        
+        # Check connectivity (should be connected if we have one substation, 
+        # or potentially multiple components if multiple substations)
+        components = list(nx.connected_components(G))
+        self.logger.info(f"Network has {len(components)} connected components")
+        
+        # Check if components match substations
+        has_correct_components = False
+        if len(components) == 1:
+            self.logger.info("Network is fully connected - appropriate for single substation")
+            has_correct_components = True
+        elif len(components) <= len(substations):
+            self.logger.info(f"Network has {len(components)} components - appropriate for {len(substations)} substations")
+            has_correct_components = True
+        else:
+            self.logger.warning(f"Network has {len(components)} components, more than the {len(substations)} substations")
+        
+        # Check for tree structure - a radial network should have n nodes and n-1 edges
+        total_nodes = G.number_of_nodes()
+        total_edges = G.number_of_edges()
+        expected_edges = total_nodes - len(components)  # One less than nodes for each component
+        
+        self.logger.info(f"Graph has {total_nodes} nodes and {total_edges} edges. Expected {expected_edges} edges for a forest.")
+        
+        is_tree_structure = total_edges == expected_edges
+        if is_tree_structure:
+            self.logger.info("Network forms a proper tree/forest structure!")
+        else:
+            self.logger.warning(f"Network does not form a tree/forest structure. Expected {expected_edges} edges, got {total_edges}.")
+        
+        # Final radiality assessment
+        is_radial = (not has_cycles) and is_tree_structure and has_correct_components
+        
+        self.logger.info(f"Radiality assessment: {'Radial' if is_radial else 'Not Radial'}")
+        
+        return {
+            "is_radial": is_radial,
+            "has_cycles": has_cycles, 
+            "is_tree_structure": is_tree_structure,
+            "has_correct_components": has_correct_components,
+            "num_components": len(components),
+            "num_nodes": total_nodes,
+            "num_edges": total_edges,
+            "expected_edges": expected_edges
+        }
+    def progressively_build_model(self):
+        """
+        Progressively build the optimization model, adding constraints step by step
+        to identify which constraint causes infeasibility.
+        """
+        self.logger.info("Starting progressive model building to identify infeasibility...")
+        
+        # Define the constraints to add progressively
+        constraint_steps = [
+            ("PowerFlowBounds", ["PFlowUB", "PFlowLB", "QFlowUB", "QFlowLB"]),
+            ("VoltageConstraints", ["VoltageUpper", "VoltageLower"]),
+            ("VoltageDropConstraints", ["VoltageDropUp", "VoltageDropLo"]),
+            ("PowerBalanceConstraints", ["ActivePowerBalance", "ReactivePowerBalance"]),
+            ("LineBusLinkConstraints", ["LineBusLinkFrom", "LineBusLinkTo"]),
+            ("RadialityConstraints", ["BusConnectivity", "SpanConstraint", "RootCap", "RootBalance"])
+        ]
+        
+        # Enable slack variables for debugging
+        self.toggles["use_slack_variables"] = True
+        self.toggles["active_power_balance_slack"] = True
+        self.toggles["reactive_power_balance_slack"] = True
+        self.toggles["voltage_drop_slack"] = True
+        
+        # Store results for each step
+        step_results = []
+        
+        # Initialize first with minimal constraints
+        self.logger.info("Step 0: Initialize minimal model with only power flow bounds")
+        
+        # Reset enabled constraints
+        self.enabled_constraints = {name: False for name in [
+            "VoltageDropUp", "VoltageDropLo", "ActivePowerBalance", "ReactivePowerBalance",
+            "VoltageUpper", "VoltageLower", "PFlowUB", "PFlowLB", "QFlowUB", "QFlowLB",
+            "LineBusLinkFrom", "LineBusLinkTo", "BusConnectivity", "SpanConstraint",
+            "RootCap", "RootBalance"
+        ]}
+        
+        # Create minimal model
+        self.create_model()
+        
+        # Add constraints progressively
+        for step_idx, (step_name, constraints) in enumerate(constraint_steps):
+            self.logger.info(f"Step {step_idx + 1}: Adding {step_name}")
+            self.current_validation_step = step_name
+            
+            # Store current model state before adding new constraints
+            model_copy = self.model.clone()
+            
+            # Add constraints for this step
+            for constraint in constraints:
+                # Check if constraint is already enabled
+                if not self.enabled_constraints.get(constraint, False):
+                    # Enable constraint
+                    self.logger.info(f"  Enabling constraint: {constraint}")
+                    self.enabled_constraints[constraint] = True
+            
+            # Recreate model with new constraints
+            self.create_model()
+            
+            # Solve model
+            try:
+                self.solve()
+                
+                # Record results
+                step_results.append({
+                    "step": step_idx + 1,
+                    "name": step_name,
+                    "constraints_added": constraints,
+                    "feasible": True,
+                    "obj_value": pyo_val(self.model.objective),
+                    "slack_values": {
+                        "p_slack_max": max(abs(pyo_val(self.model.active_power_slack[b, 0])) for b in self.model.buses),
+                        "q_slack_max": max(abs(pyo_val(self.model.reactive_power_slack[b, 0])) for b in self.model.buses),
+                        "v_slack_max": max(abs(pyo_val(self.model.voltage_drop_slack[l, 0])) for l in self.model.lines)
+                    }
+                })
+                
+                self.logger.info(f"  Step {step_idx + 1} ({step_name}): Feasible, obj={pyo_val(self.model.objective):.6g}")
+                
+                # Analyze slack values
+                p_slack_max = step_results[-1]["slack_values"]["p_slack_max"]
+                q_slack_max = step_results[-1]["slack_values"]["q_slack_max"]
+                v_slack_max = step_results[-1]["slack_values"]["v_slack_max"]
+                
+                self.logger.info(f"  Max slack values - P: {p_slack_max:.6g}, Q: {q_slack_max:.6g}, V: {v_slack_max:.6g}")
+                
+                # Check if adding these constraints increased slack usage significantly
+                if p_slack_max > 1e-3 or q_slack_max > 1e-3 or v_slack_max > 1e-3:
+                    self.logger.warning(f"  Adding {step_name} required significant slack values.")
+                    self.logger.warning(f"  This indicates {step_name} may be problematic.")
+                    
+                    # Verify constraints that were just added
+                    if "ActivePowerBalance" in constraints or "ReactivePowerBalance" in constraints:
+                        self.verify_power_balance_constraints()
+                    if "VoltageDropUp" in constraints or "VoltageDropLo" in constraints:
+                        self.verify_voltage_drop_constraints()
+                
+            except Exception as e:
+                self.logger.error(f"  Step {step_idx + 1} ({step_name}): Infeasible or error - {e}")
+                
+                # Record failure
+                step_results.append({
+                    "step": step_idx + 1,
+                    "name": step_name,
+                    "constraints_added": constraints,
+                    "feasible": False,
+                    "error": str(e)
+                })
+                
+                # Restore previous model state
+                self.model = model_copy
+                
+                # Update enabled constraints to reflect actual model
+                for constraint in constraints:
+                    self.enabled_constraints[constraint] = False
+        
+        # Summarize results
+        self.logger.info("Progressive model building summary:")
+        for result in step_results:
+            status = "✓ Feasible" if result["feasible"] else "✗ Infeasible"
+            self.logger.info(f"  Step {result['step']} ({result['name']}): {status}")
+            
+            if result["feasible"]:
+                self.logger.info(f"    Objective: {result['obj_value']:.6g}")
+                
+                # Report significant slack values
+                p_slack = result["slack_values"]["p_slack_max"]
+                q_slack = result["slack_values"]["q_slack_max"]
+                v_slack = result["slack_values"]["v_slack_max"]
+                
+                if p_slack > 1e-3:
+                    self.logger.info(f"    P-slack: {p_slack:.6g}")
+                if q_slack > 1e-3:
+                    self.logger.info(f"    Q-slack: {q_slack:.6g}")
+                if v_slack > 1e-3:
+                    self.logger.info(f"    V-slack: {v_slack:.6g}")
+        
+        # Store results
+        self.debug_logs["progressive_build_results"] = step_results
+        
+        # Reset toggles
+        self.toggles["use_slack_variables"] = False
+        self.toggles["active_power_balance_slack"] = False
+        self.toggles["reactive_power_balance_slack"] = False
+        self.toggles["voltage_drop_slack"] = False
+        
+        # Return the step that caused infeasibility if any
+        infeasible_steps = [result for result in step_results if not result["feasible"]]
+        if infeasible_steps:
+            return infeasible_steps[0]["name"]
+        else:
+            return None
+
+
+    def process_solution(self, update_network=True, tolerance=1e-5, output_dir=None):
+        # after solve
+        #for b in  self.model.buses:
+        #    print(f"Bus {b}: inj={self.bus_p_inj[b]:.4f}, out-in={pyo_val(self.sum_outflow[b]-self.sum_inflow[b]):.4f}, slack={pyo_val(self.active_power_slack[b,0]):.4f}")
+        # Set default output directory
+        if output_dir is None:
+            output_dir = Path("data_generation") / "logs" / "lp_files"
+        else:
+            output_dir = Path(output_dir)
+        
+        # Create directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        lg = self.logger
+        result = {
+            'feasible': True,
+            'obj_value': None,
+            'solve_time': self.solve_time,
+            'violations': [],
+            'switches_changed': 0,
+            'network_properties': {}
+        }
+        
+        # Initialize list to collect all infeasibility messages
+        infeasibility_messages = []
+        
+        # Check if model and solver results exist
+        if self.model is None:
+            msg = "No model exists. Call create_model() and solve() first."
+            lg.error(msg)
+            infeasibility_messages.append(msg)
+            result['feasible'] = False
+            return result
+        
+        if self.solver_results is None:
+            msg = "No solver results. Call solve() first."
+            lg.error(msg)
+            infeasibility_messages.append(msg)
+            result['feasible'] = False
+            return result
+        
+        # Check termination status
+        from pyomo.opt import check_optimal_termination
+        is_optimal = check_optimal_termination(self.solver_results)
+        if not is_optimal:
+            termination_status = str(self.solver_results.solver.termination_condition)
+            msg = f"Solver terminated with non-optimal status: {termination_status}"
+            lg.warning(msg)
+            infeasibility_messages.append(msg)
+            result['feasible'] = False
+            result['violations'].append({
+                "type": "termination",
+                "cond": termination_status
+            })
+        
+        # Get objective value
+        try:
+            result['obj_value'] = pyo_val(self.model.objective)
+            
+            # Print objective breakdown for debugging
+            lg.info("Objective breakdown:")
+            lg.info(f"  Loss Term Value : {pyo_val(self.model.loss_term_expr):.6f}")
+            lg.info(f"  Slack Term Value: {pyo_val(self.model.slack_term_expr):.6f}")
+            if self.toggles.get("include_switch_penalty", False):
+                lg.info(f"  Switch Penalty Term Value: {pyo_val(self.model.switch_pen_expr):.6f}")
+            lg.info(f"  Total Objective Value: {result['obj_value']:.6f}")
+        except Exception as e:
+            msg = f"Error retrieving objective value: {e}"
+            lg.error(msg)
+            infeasibility_messages.append(msg)
+            result['feasible'] = False
+        
+        # Check constraint violations
+        constraint_violations = []
+        for c in self.model.component_data_objects(Constraint, active=True):
+            try:
+                lb = c.lower if c.has_lb() else None
+                ub = c.upper if c.has_ub() else None
+                lhs = pyo_val(c.body)
+                if (lb is not None and lhs < lb - tolerance) or (ub is not None and lhs > ub + tolerance):
+                    violation = {
+                        "type": "constraint",
+                        "name": c.name,
+                        "value": lhs,
+                        "lb": lb,
+                        "ub": ub
+                    }
+                    result['violations'].append(violation)
+                    
+                    if lb is not None and lhs < lb - tolerance:
+                        violation_msg = f"Constraint violation: {c.name} = {lhs:.6g} < {lb} (lower bound) by {lb - lhs:.6g}"
+                    else:
+                        violation_msg = f"Constraint violation: {c.name} = {lhs:.6g} > {ub} (upper bound) by {lhs - ub:.6g}"
+                    
+                    constraint_violations.append(violation_msg)
+                    lg.debug(violation_msg)
+            except Exception as e:
+                msg = f"Error checking constraint {c.name}: {e}"
+                lg.warning(msg)
+                constraint_violations.append(msg)
+        
+        if constraint_violations:
+            infeasibility_messages.append("\n=== CONSTRAINT VIOLATIONS ===")
+            infeasibility_messages.extend(constraint_violations)
+        
+        # Check variable domain violations (binary variables, bounds)
+        binary_violations = []
+        for v in self.model.component_data_objects(Var, active=True):
+            try:
+                val = pyo_val(v)
+                if v.domain is Binary and abs(val - round(val)) > tolerance:
+                    violation = {
+                        "type": "domain",
+                        "var": v.name,
+                        "value": val
+                    }
+                    result['violations'].append(violation)
+                    
+                    violation_msg = f"Binary variable violation: {v.name} = {val:.6g} (not binary)"
+                    binary_violations.append(violation_msg)
+                    lg.debug(violation_msg)
+            except Exception as e:
+                msg = f"Error checking variable {v.name}: {e}"
+                lg.warning(msg)
+                binary_violations.append(msg)
+        
+        if binary_violations:
+            infeasibility_messages.append("\n=== BINARY VARIABLE VIOLATIONS ===")
+            infeasibility_messages.extend(binary_violations)
+        
+        # Update network if requested
+        if update_network:
+            updated_network = self.net.deepcopy()
+            switches_changed = self._update_switch_status(updated_network)
+            result['switches_changed'] = switches_changed
+            
+            # Apply voltage results directly
+            if hasattr(self.model, 'voltage_squared'):
+                # Create res_bus if it doesn't exist
+                if not hasattr(updated_network, 'res_bus') or updated_network.res_bus.empty:
+                    updated_network.res_bus = pd.DataFrame(index=updated_network.bus.index)
+                    updated_network.res_bus['vm_pu'] = np.nan
+                    updated_network.res_bus['va_degree'] = 0.0
+                
+                # Update voltage magnitudes
+                for b in self.model.buses:
+                    try:
+                        v_squared = pyo_val(self.model.voltage_squared[b, 0])
+                        updated_network.res_bus.at[b, 'vm_pu'] = np.sqrt(max(0, v_squared))  # Ensure positive
+                    except Exception as e:
+                        msg = f"Could not apply voltage result for bus {b}: {e}"
+                        lg.warning(msg)
+                        infeasibility_messages.append(msg)
+            
+            # Check network topology
+            rad, con = is_radial_and_connected(updated_network, y_mask=self.active_bus)
+            result['network_properties']['radial'] = rad
+            result['network_properties']['connected'] = con
+            
+            if not rad or not con:
+                result['feasible'] = False
+                result['violations'].append({
+                    "type": "topology",
+                    "radial": rad,
+                    "connected": con
+                })
+                
+                topology_msg = f"Network topology issues: radial={rad}, connected={con}"
+                lg.warning(topology_msg)
+                infeasibility_messages.append("\n=== TOPOLOGY VIOLATIONS ===")
+                infeasibility_messages.append(topology_msg)
+                
+                # Additional topology analysis to identify specific issues
+                import networkx as nx
+                
+                G = nx.Graph()
+                for i, line in updated_network.line[updated_network.line.in_service].iterrows():
+                    G.add_edge(line.from_bus, line.to_bus)
+                
+                # Add edges for closed switches
+                for i, sw in updated_network.switch[(updated_network.switch.et == 'l') & (updated_network.switch.closed)].iterrows():
+                    line = updated_network.line.loc[sw.element]
+                    G.add_edge(line.from_bus, line.to_bus)
+                
+                # Check components
+                components = list(nx.connected_components(G))
+                num_components = len(components)
+                infeasibility_messages.append(f"Number of connected components: {num_components}")
+                
+                if num_components > 1:
+                    comp_sizes = sorted([len(c) for c in components], reverse=True)
+                    infeasibility_messages.append(f"Component sizes: {comp_sizes}")
+                
+                # Check for cycles
+                cycles = []
+                for component in components:
+                    subgraph = G.subgraph(component)
+                    try:
+                        cycle = nx.find_cycle(subgraph)
+                        if cycle:
+                            cycles.append(cycle)
+                            infeasibility_messages.append(f"Cycle found in component: {cycle}")
+                    except nx.NetworkXNoCycle:
+                        pass
+                
+                if cycles:
+                    infeasibility_messages.append(f"Total cycles found: {len(cycles)}")
+            
+            # Apply line flows and check for overloads
+            if hasattr(self.model, 'active_power_flow') and hasattr(self.model, 'squared_current_magnitude'):
+                # Create results tables if they don't exist
+                if not hasattr(updated_network, 'res_line') or updated_network.res_line.empty:
+                    updated_network.res_line = pd.DataFrame(index=updated_network.line.index)
+                    for col in ['p_from_mw', 'q_from_mvar', 'p_to_mw', 'q_to_mvar', 'pl_mw', 'i_ka']:
+                        updated_network.res_line[col] = 0.0
+                
+                # Update line flows and check for overloads
+                thermal_violations = []
+                loss_mw = 0
+                for l in self.model.lines:
+                    try:
+                        # Active and reactive power flows
+                        p_val = pyo_val(self.model.active_power_flow[l, 0]) * self.S_base_VA / 1e6  # Convert to MW
+                        q_val = pyo_val(self.model.reactive_power_flow[l, 0]) * self.S_base_VA / 1e6  # Convert to MVar
+                        i_squared = pyo_val(self.model.squared_current_magnitude[l, 0])
+                        r_pu = pyo_val(self.model.line_resistance_pu[l])
+                        
+                        # Calculate loss
+                        loss = r_pu * i_squared * self.S_base_VA / 1e6  # Convert to MW
+                        
+                        # Apply to network results
+                        updated_network.res_line.at[l, 'p_from_mw'] = p_val
+                        updated_network.res_line.at[l, 'q_from_mvar'] = q_val
+                        updated_network.res_line.at[l, 'p_to_mw'] = -p_val + loss
+                        updated_network.res_line.at[l, 'q_to_mvar'] = -q_val
+                        updated_network.res_line.at[l, 'pl_mw'] = loss
+                        
+                        # Calculate current in kA if possible
+                        i_ka = None
+                        if 'max_i_ka' in updated_network.line.columns and l in updated_network.line.index:
+                            max_i_ka = updated_network.line.at[l, 'max_i_ka']
+                            vn_kv = updated_network.line.at[l, 'vn_kv'] if 'vn_kv' in updated_network.line.columns else None
+                            if vn_kv is not None and vn_kv > 0:
+                                s_mva = np.sqrt(p_val**2 + q_val**2)
+                                i_ka = s_mva / (np.sqrt(3) * vn_kv)
+                                updated_network.res_line.at[l, 'i_ka'] = i_ka
+                                
+                                # Check for thermal overload
+                                if max_i_ka > 0 and i_ka > max_i_ka * (1 + tolerance):
+                                    loading_pct = 100 * i_ka / max_i_ka
+                                    violation_msg = f"Thermal overload: Line {l} at {loading_pct:.1f}% of rating (I={i_ka:.4f} kA, Max={max_i_ka:.4f} kA)"
+                                    thermal_violations.append(violation_msg)
+                                    result['violations'].append({
+                                        "type": "thermal",
+                                        "line": int(l),
+                                        "loading": float(i_ka / max_i_ka)
+                                    })
+                        
+                        loss_mw += loss
+                    except Exception as e:
+                        msg = f"Could not apply line flow results for line {l}: {e}"
+                        lg.warning(msg)
+                        infeasibility_messages.append(msg)
+                
+                if thermal_violations:
+                    infeasibility_messages.append("\n=== THERMAL OVERLOAD VIOLATIONS ===")
+                    infeasibility_messages.extend(thermal_violations)
+                
+                result['network_properties']['loss_mw'] = loss_mw
+            
+            # Check voltage limits
+            voltage_violations = []
+            vmin, vmax = 0.90, 1.10  # Standard voltage limits
+            
+            if hasattr(updated_network, 'res_bus') and 'vm_pu' in updated_network.res_bus.columns:
+                vm = updated_network.res_bus['vm_pu']
+                v_min_actual = vm.min() if not vm.empty else None
+                v_max_actual = vm.max() if not vm.empty else None
+                
+                if v_min_actual is not None and v_max_actual is not None:
+                    result['network_properties']['voltage_range'] = (v_min_actual, v_max_actual)
+                    
+                    # Check under-voltage buses
+                    under_voltage_buses = updated_network.res_bus[vm < vmin - tolerance]
+                    if not under_voltage_buses.empty:
+                        for b, v in under_voltage_buses['vm_pu'].items():
+                            violation_msg = f"Under-voltage: Bus {b} at {v:.4f} p.u. (min={vmin})"
+                            voltage_violations.append(violation_msg)
+                    
+                    # Check over-voltage buses
+                    over_voltage_buses = updated_network.res_bus[vm > vmax + tolerance]
+                    if not over_voltage_buses.empty:
+                        for b, v in over_voltage_buses['vm_pu'].items():
+                            violation_msg = f"Over-voltage: Bus {b} at {v:.4f} p.u. (max={vmax})"
+                            voltage_violations.append(violation_msg)
+                    
+                    if under_voltage_buses.shape[0] > 0 or over_voltage_buses.shape[0] > 0:
+                        result['feasible'] = False
+                        result['violations'].append({
+                            "type": "voltage",
+                            "min": v_min_actual,
+                            "max": v_max_actual,
+                            "band": (vmin, vmax),
+                            "under_voltage_count": under_voltage_buses.shape[0],
+                            "over_voltage_count": over_voltage_buses.shape[0]
+                        })
+                        infeasibility_messages.append("\n=== VOLTAGE VIOLATIONS ===")
+                        infeasibility_messages.extend(voltage_violations)
+            
+            # Store the updated network
+            self.net_result = updated_network
+        self.logger.info("Power flow balance at each bus:")
+        for b in self.model.buses:
+            try:
+                inflow = pyo_val(self.model.sum_inflow[b])
+                outflow = pyo_val(self.model.sum_outflow[b])
+                p_inj = self.bus_p_inj[b]
+                flow_value = outflow - inflow
+                
+                if b in self.substations:
+                    expected = len(self.model.partitionedbuses) * pyo_val(self.model.is_up[b])
+                    self.logger.info(f"Bus {b} (SUBSTATION): inj=N/A, out-in={flow_value:.4f}, expected={expected:.4f}")
+                else:
+                    expected = p_inj * pyo_val(self.model.is_up[b])
+                    slack = pyo_val(self.model.active_power_slack[b,0]) if hasattr(self.model, 'active_power_slack') else 0
+                    self.logger.info(f"Bus {b}: inj={p_inj:.4f}, out-in={flow_value:.4f}, expected={expected:.4f}, slack={slack:.4f}")
+            except Exception as e:
+                self.logger.error(f"Error calculating flow for bus {b}: {e}")
+        # Check radiality flows specifically
+    
+        if self.toggles.get("include_radiality_constraints", False):
+            if self.toggles.get("use_root_flow", False) and hasattr(self.model, 'branch_flow'):
+                self.logger.info("Checking radiality flow constraints for single commodity flow model...")
+                
+                # Track which buses are reachable from substations
+                reachable_buses = set()
+                
+                # Check flow from substations
+                for b in self.substations:
+                    if b in self.model.buses:
+                        # For the single commodity flow model
+                        outgoing_lines = [l for l in self.model.lines if self.model.from_bus[l] == b and pyo_val(self.model.line_status[l]) > 0.5]
+                        incoming_lines = [l for l in self.model.lines if self.model.to_bus[l] == b and pyo_val(self.model.line_status[l]) > 0.5]
+                        
+                        outflow = sum(pyo_val(self.model.branch_flow[l]) for l in outgoing_lines if hasattr(self.model, 'branch_flow'))
+                        inflow = sum(pyo_val(self.model.branch_flow[l]) for l in incoming_lines if hasattr(self.model, 'branch_flow'))
+                        
+                        net_outflow = outflow - inflow
+                        self.logger.info(f"Substation {b} net flow outbound: {net_outflow:.4f}")
+            
+            elif self.toggles.get("use_parent_child_radiality", False) and hasattr(self.model, 'arc_in_tree'):
+                self.logger.info("Checking parent-child radiality constraints...")
+                
+                # Check if arcs are defined
+                if hasattr(self.model, 'arcs'):
+                    # Count active arcs
+                    active_arcs = sum(1 for (i,j,l) in self.model.arcs 
+                                    if pyo_val(self.model.arc_in_tree[i,j,l]) > 0.5)
+                    
+                    # Count active buses
+                    active_buses = sum(1 for b in self.model.buses 
+                                    if b in self.model.partitionedbuses and pyo_val(self.model.is_up[b]) > 0.5)
+                    
+                    self.logger.info(f"Parent-child radiality check: {active_arcs} active arcs, {active_buses} active buses")
+                else:
+                    self.logger.warning("Parent-child formulation is enabled but 'arcs' not found in model")
+            
+            else:
+                self.logger.info("Basic radiality checking: using total line and bus counts")
+            
+            # Always do basic radiality check by counting lines and buses
+            active_lines = sum(1 for l in self.model.lines if pyo_val(self.model.line_status[l]) > 0.5)
+            energized_buses = sum(1 for b in self.model.buses 
+                                if b in self.model.partitionedbuses and pyo_val(self.model.is_up[b]) > 0.5)
+            active_substations = sum(1 for b in self.substations if b in self.model.buses)
+            
+            self.logger.info(f"Basic radiality check: {active_lines} active lines, {energized_buses + active_substations} energized buses")
+            expected_lines = energized_buses + active_substations - 1
+            
+            if active_lines == expected_lines:
+                self.logger.info(f"Network forms a proper tree structure (n-1 lines)")
+            else:
+                self.logger.warning(f"Network structure issue: expected {expected_lines} lines for a tree, found {active_lines}")
+        # Always do basic radiality check by counting lines and buses
+        active_lines = sum(1 for l in self.model.lines if pyo_val(self.model.line_status[l]) > 0.5)
+        energized_buses = sum(1 for b in self.model.buses if b in self.model.partitionedbuses 
+                            and pyo_val(self.model.is_up[b]) > 0.5)
+        active_substations = sum(1 for b in self.substations if b in self.model.buses)
+        
+        self.logger.info(f"Basic radiality check: {active_lines} active lines, {energized_buses + active_substations} energized buses")
+        expected_lines = energized_buses + active_substations - 1
+        
+        if active_lines == expected_lines:
+            self.logger.info(f"Network forms a proper tree structure (n-1 lines)")
+        else:
+            self.logger.warning(f"Network structure issue: expected {expected_lines} lines for a tree, found {active_lines}")
+        # Continue with the rest of the method...
+        # Overall assessment
+        if result['violations']:
+            lg.warning(f"Found {len(result['violations'])} violations in solution")
+            result['feasible'] = False
+        else:
+            lg.info("Solution is feasible with no violations detected")
+        
+        # Write infeasibility log file if there are any issues
+        if infeasibility_messages:
+            graph_id = self.id or "unknown"
+            infeas_file = output_dir / f"{graph_id}_infeasibilities.txt"
+            
+            with open(infeas_file, 'w') as f:
+                f.write(f"{graph_id}: Infeasibilities\n")
+                f.write("="*50 + "\n")
+                f.write(f"Solution time: {self.solve_time:.2f} seconds\n")
+                f.write(f"Objective value: {result.get('obj_value', 'N/A')}\n")
+                f.write("="*50 + "\n\n")
+                f.write("\n".join(infeasibility_messages))
+            
+            lg.info(f"Infeasibilities log written to: {infeas_file}")
+        
+        return result
 
 
 def get_reactive_injection(df, bus, assumed_pf=0.9):
@@ -780,69 +2094,3 @@ def get_reactive_injection(df, bus, assumed_pf=0.9):
     else:
         # q_mvar column does not exist; derive reactive power from p_mw
         return (sub["p_mw"] * np.tan(np.arccos(assumed_pf))).sum()
-
-
-def is_radial_and_connected(net, y_mask=None, require_single_ref=False):
-    """
-    Returns (is_radial, is_connected) **on the energised sub-graph**.
-    A network is radial if each connected component is a tree with exactly one reference bus.
-    
-    y_mask : 1/0 per bus (Series / dict / ndarray).  None ⇒ all 1.
-    """
-    if y_mask is None:
-        active_bus = pd.Series(1, index=net.bus.index)
-    else:
-        active_bus = pd.Series(y_mask, index=net.bus.index).fillna(0).astype(bool)
-
-    # Build graph of *closed* lines between active buses
-    G = nx.Graph()
-    G.add_nodes_from(net.bus.index[active_bus])
-
-    for _, sw in net.switch.query("et=='l' and closed").iterrows():
-        ln = net.line.loc[sw.element]
-        if active_bus[ln.from_bus] and active_bus[ln.to_bus]:
-            G.add_edge(ln.from_bus, ln.to_bus)
-
-    if G.number_of_nodes() == 0:
-        return True, True       # vacuously radial & connected
-
-    # Get reference buses (both ext_grid and slack generators)
-    ref_buses = set(net.ext_grid.bus.tolist())
-    if "slack" in net.gen.columns:
-        ref_buses |= set(net.gen[net.gen.slack].bus)
-    
-    # Filter reference buses to only include active ones
-    ref_buses = ref_buses & set(G.nodes())
-    
-    components = list(nx.connected_components(G))
-    if not components:
-        return True, True
-    largest_component = max(components, key=len)
-    G_largest = G.subgraph(largest_component)
-
-    # # Now perform the radial and connected check on G_largest
-    # is_connected = nx.is_connected(G_largest)
-    # is_radial = True
-    # for component in nx.connected_components(G_largest):
-    #     comp_graph = G_largest.subgraph(component)
-    #     comp_refs = ref_buses & component
-    #     if len(comp_refs) != 1 or not nx.is_tree(comp_graph):
-    #         is_radial = False
-    #         break
-    # return is_radial, is_connected
-    components = list(nx.connected_components(G))
-    if not components:
-        return True, True
-
-    # Connectedness is always evaluated on the largest energised component
-    is_connected = nx.is_connected(G.subgraph(max(components, key=len)))
-
-    if require_single_ref:          # original strict version
-        for comp in components:
-            comp_refs = ref_buses & comp
-            if len(comp_refs) != 1 or not nx.is_tree(G.subgraph(comp)):
-                return False, is_connected
-        return True, is_connected
-
-    # ← default: ignore how many reference buses live in each tree
-    return all(nx.is_tree(G.subgraph(comp)) for comp in components), is_connected
