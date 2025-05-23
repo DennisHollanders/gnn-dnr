@@ -33,12 +33,15 @@ ureg = UnitRegistry()
 class SOCP_class:
     def __init__(self, net, graph_id: str = "", *,
                  logger: Optional[logging.Logger] = None,
-                 switch_penalty: float = 0.01,
-                 slack_penalty: float = 1,
-                 load_shed_penalty: float = 10000,
+                 switch_penalty: float = 0.0001,                     #0.001
+                 slack_penalty: float = 0.1,
+                 load_shed_penalty: float = 100,
                  toggles: Optional[Dict[str, bool]] = None,
                  debug_level= 0,
                  active_bus_mask: Optional[pd.Series] = None) -> None:
+        self.voltage_bigM_factor =1
+        self.bigM_factor = 1
+
         self.net = net
         self.id = graph_id or "unnamed"
         self.logger = logger or logging.getLogger("SOCP_optimizer")
@@ -280,14 +283,14 @@ class SOCP_class:
         model.voltage_lower_bound = Param(model.buses, initialize=lambda m, b: v_lower_pu ** 2)
         model.line_resistance_pu = Param(model.lines, initialize=lambda m, l: self.line_df.r_pu[l])
         model.line_reactance_pu = Param(model.lines, initialize=lambda m, l: self.line_df.x_pu[l])
-        model.big_M_flow = Param(model.lines, initialize=lambda m, l: self.bigM[l])
+        model.big_M_flow = Param(model.lines, initialize=lambda m, l: self.bigM[l] * self.bigM_factor)
 
         self.logger.info(f"Big-M values: {self.bigM}")
         def calculate_voltage_bigM():
             v_upper_pu_squared = v_upper_pu ** 2
             v_lower_pu_squared = v_lower_pu ** 2
             max_voltage_deviation = v_upper_pu_squared - v_lower_pu_squared
-            return max_voltage_deviation * 5
+            return max_voltage_deviation *self.voltage_bigM_factor
         voltage_bigM = calculate_voltage_bigM()
         model.voltage_bigM = voltage_bigM
         self.logger.info(f"Using voltage Big-M value: {voltage_bigM}")
@@ -425,7 +428,7 @@ class SOCP_class:
             
             # Right-hand side: V_i * I_ij
             rhs = m.voltage_squared[i, t] * m.squared_current_magnitude[l, t]
-            return lhs <= rhs + (1 - m.line_status[l]) * m.big_M_flow[l]**2
+            return lhs <= rhs + (1 - m.line_status[l]) * m.big_M_flow[l] #**2
 
         if self.toggles["include_cone_constraint"]:
             model.SOC_Cone = Constraint(model.lines, model.times, rule=socp_cone)
@@ -509,49 +512,176 @@ class SOCP_class:
                                                     (model.to_bus[l], model.from_bus[l])]],
                                 dimen=3)
             if self.toggles["use_parent_child_radiality"]:
-                # :TODO not working 
-                # __------------------------------------------
-                # Parent Child Constraints
-
-                # --- Parent-Child Formulation ---
-                self.logger.info("Using parent-child formulation for radiality constraints")
+                self.logger.info("Using enhanced parent-child formulation for radiality constraints")
                 
-                # First, identify a root node (pick the first substation)
-                root = next(iter(self.substations)) if self.substations else model.buses[1]
-
-                # Binary variable: arc is in the tree
-                model.arc_in_tree = Var(model.arcs, within=Binary, initialize=0)
-
-                # 1) Each bus ≠ root has exactly one incoming arc
-                def one_parent_rule(m, i):
-                    if i == root or i not in m.partitionedbuses: 
-                        return Constraint.Skip
-                    return sum(m.arc_in_tree[j,i,l] for (j,i2,l) in m.arcs if i2==i) == m.is_up[i]
-                model.OneParent = Constraint(model.buses, rule=one_parent_rule)
-                self.enabled_constraints["OneParent"] = True
-
-                # 2) Total arcs = number of energized buses - 1
-                def tree_size_rule(m):
-                    energized_count = sum(m.is_up[b] for b in m.buses)
-                    return sum(m.arc_in_tree[i,j,l] for (i,j,l) in m.arcs) == energized_count - 1
-                model.TreeSize = Constraint(rule=tree_size_rule)
-                self.enabled_constraints["TreeSize"] = True
-
-                # 3) Arc can only be chosen if the line is active
-                def arc_line_link(m, i, j, l):
-                    return m.arc_in_tree[i,j,l] <= m.line_status[l]
-                model.ArcLineLink = Constraint(model.arcs, rule=arc_line_link)
-                self.enabled_constraints["ArcLineLink"] = True
+                # --- Designate Root Node ---
+                active_substations = [s for s in self.substations if s in model.buses]
+                if not active_substations:
+                    root_node = model.buses.first() if model.buses else None
+                    self.logger.warning(f"No substations found, using {root_node} as root")
+                else:
+                    root_node = active_substations[0]
+                    self.logger.info(f"Using substation {root_node} as root for parent-child formulation")
                 
-                # 4) No cycles allowed (at most one direction per line can be in the tree)
-                def no_cycles_rule(m, l):
-                    arcs_for_line = [(i,j,l2) for (i,j,l2) in m.arcs if l2 == l]
-                    if len(arcs_for_line) == 2:  # Should be exactly 2 arcs per line (from i→j and j→i)
-                        (i1,j1,_), (i2,j2,_) = arcs_for_line
-                        return m.arc_in_tree[i1,j1,l] + m.arc_in_tree[i2,j2,l] <= m.line_status[l]
+                if root_node is None:
+                    self.logger.error("Cannot establish root node for parent-child formulation")
+                    return model
+                
+                # --- Parent-Child Variables ---
+                # Binary variable: bus j is a child of bus i (i is parent of j)
+                model.parent_child = Var(model.buses, model.buses, within=Binary, initialize=0)
+                
+                # Binary variable: line l connects parent i to child j in the tree
+                model.tree_edge = Var(model.lines, within=Binary, initialize=0)
+                
+                # --- Constraint 1: Each non-root energized bus has exactly one parent ---
+                def one_parent_rule(m, j):
+                    if j == root_node:
+                        # Root has no parent
+                        return sum(m.parent_child[i, j] for i in m.buses if i != j) == 0
+                    elif j in m.partitionedbuses:
+                        # Non-root energized buses have exactly one parent
+                        return sum(m.parent_child[i, j] for i in m.buses if i != j) == m.is_up[j]
+                    else:
+                        # Substations (other than root) are always energized
+                        return sum(m.parent_child[i, j] for i in m.buses if i != j) == 1
+                
+                model.OneParentRule = Constraint(model.buses, rule=one_parent_rule)
+                self.enabled_constraints["OneParentRule"] = True
+                
+                # --- Constraint 2: Parent-child relationships require both buses to be energized ---
+                def parent_energized_rule(m, i, j):
+                    if i != j:
+                        if i in m.partitionedbuses:
+                            return m.parent_child[i, j] <= m.is_up[i]
+                        else:
+                            return m.parent_child[i, j] <= 1  # Substations always energized
                     return Constraint.Skip
-                model.NoCycles = Constraint(model.lines, rule=no_cycles_rule)
-                self.enabled_constraints["NoCycles"] = True
+                
+                model.ParentEnergizedRule = Constraint(model.buses, model.buses, rule=parent_energized_rule)
+                self.enabled_constraints["ParentEnergizedRule"] = True
+                
+                def child_energized_rule(m, i, j):
+                    if i != j and j in m.partitionedbuses:
+                        return m.parent_child[i, j] <= m.is_up[j]
+                    return Constraint.Skip
+                
+                model.ChildEnergizedRule = Constraint(model.buses, model.buses, rule=child_energized_rule)
+                self.enabled_constraints["ChildEnergizedRule"] = True
+                
+                # --- Constraint 3: Link parent-child relationships to tree edges ---
+                def tree_edge_parent_child_rule(m, l):
+                    i, j = m.from_bus[l], m.to_bus[l]
+                    # A tree edge is active if there's a parent-child relationship in either direction
+                    return m.tree_edge[l] == m.parent_child[i, j] + m.parent_child[j, i]
+                
+                model.TreeEdgeParentChildRule = Constraint(model.lines, rule=tree_edge_parent_child_rule)
+                self.enabled_constraints["TreeEdgeParentChildRule"] = True
+                
+                # --- Constraint 4: Tree edges must correspond to active lines ---
+                def tree_edge_line_status_rule(m, l):
+                    return m.tree_edge[l] <= m.line_status[l]
+                
+                model.TreeEdgeLineStatusRule = Constraint(model.lines, rule=tree_edge_line_status_rule)
+                self.enabled_constraints["TreeEdgeLineStatusRule"] = True
+                
+                # --- Constraint 5: Total tree edges equals energized buses minus 1 ---
+                def tree_size_rule(m):
+                    total_energized = sum(m.is_up[b] for b in m.buses)
+                    return sum(m.tree_edge[l] for l in m.lines) == total_energized - 1
+                
+                model.TreeSizeRule = Constraint(rule=tree_size_rule)
+                self.enabled_constraints["TreeSizeRule"] = True
+                
+                # --- Constraint 6: Prevent multiple parents through line constraints ---
+                def line_single_direction_rule(m, l):
+                    i, j = m.from_bus[l], m.to_bus[l]
+                    # At most one direction can be used in the tree
+                    return m.parent_child[i, j] + m.parent_child[j, i] <= 1
+                
+                model.LineSingleDirectionRule = Constraint(model.lines, rule=line_single_direction_rule)
+                self.enabled_constraints["LineSingleDirectionRule"] = True
+                
+                # --- Constraint 7: Connectivity requirement ---
+                # Each energized bus must be connected to an energized bus or be the root
+                def connectivity_rule(m, j):
+                    if j == root_node:
+                        return Constraint.Skip
+                    elif j in m.partitionedbuses:
+                        # Bus j is connected if it has a parent or is de-energized
+                        has_parent = sum(m.parent_child[i, j] for i in m.buses if i != j)
+                        return has_parent >= m.is_up[j]
+                    else:
+                        # Other substations must have a parent (connected to main grid)
+                        return sum(m.parent_child[i, j] for i in m.buses if i != j) >= 1
+                
+                model.ConnectivityRule = Constraint(model.buses, rule=connectivity_rule)
+                self.enabled_constraints["ConnectivityRule"] = True
+                
+                # --- Constraint 8: Strengthen formulation with path constraints ---
+                # This helps eliminate subtours and improves the LP relaxation
+                def path_strengthening_rule(m, i, j):
+                    if i != j and i != root_node and j != root_node:
+                        # If i is parent of j, then i must have a path to root
+                        has_parent_i = sum(m.parent_child[k, i] for k in m.buses if k != i)
+                        return m.parent_child[i, j] <= has_parent_i
+                    return Constraint.Skip
+                
+                model.PathStrengtheningRule = Constraint(model.buses, model.buses, rule=path_strengthening_rule)
+                self.enabled_constraints["PathStrengtheningRule"] = True
+                
+                # --- Bus energization constraints for load shedding ---
+                if not self.toggles.get("allow_load_shed", False):
+                    def force_bus_energization_rule(m, b):
+                        if b in m.partitionedbuses:
+                            return m.is_up[b] == 1
+                        return Constraint.Skip
+                    
+                    model.ForceBusEnergizationRule = Constraint(model.buses, rule=force_bus_energization_rule)
+                    self.enabled_constraints["ForceBusEnergizationRule"] = True
+                # # :TODO not working 
+                # # __------------------------------------------
+                # # Parent Child Constraints
+
+                # # --- Parent-Child Formulation ---
+                # self.logger.info("Using parent-child formulation for radiality constraints")
+                
+                # # First, identify a root node (pick the first substation)
+                # root = next(iter(self.substations)) if self.substations else model.buses[1]
+
+                # # Binary variable: arc is in the tree
+                # model.arc_in_tree = Var(model.arcs, within=Binary, initialize=0)
+
+                # # 1) Each bus ≠ root has exactly one incoming arc
+                # def one_parent_rule(m, i):
+                #     if i == root or i not in m.partitionedbuses: 
+                #         return Constraint.Skip
+                #     return sum(m.arc_in_tree[j,i,l] for (j,i2,l) in m.arcs if i2==i) == m.is_up[i]
+                # model.OneParent = Constraint(model.buses, rule=one_parent_rule)
+                # self.enabled_constraints["OneParent"] = True
+
+                # # 2) Total arcs = number of energized buses - 1
+                # def tree_size_rule(m):
+                #     energized_count = sum(m.is_up[b] for b in m.buses)
+                #     return sum(m.arc_in_tree[i,j,l] for (i,j,l) in m.arcs) == energized_count - 1
+                # model.TreeSize = Constraint(rule=tree_size_rule)
+                # self.enabled_constraints["TreeSize"] = True
+
+                # # 3) Arc can only be chosen if the line is active
+                # def arc_line_link(m, i, j, l):
+                #     return m.arc_in_tree[i,j,l] <= m.line_status[l]
+                # model.ArcLineLink = Constraint(model.arcs, rule=arc_line_link)
+                # self.enabled_constraints["ArcLineLink"] = True
+                
+                # # 4) No cycles allowed (at most one direction per line can be in the tree)
+                # def no_cycles_rule(m, l):
+                #     arcs_for_line = [(i,j,l2) for (i,j,l2) in m.arcs if l2 == l]
+                #     if len(arcs_for_line) == 2:  # Should be exactly 2 arcs per line (from i→j and j→i)
+                #         (i1,j1,_), (i2,j2,_) = arcs_for_line
+                #         return m.arc_in_tree[i1,j1,l] + m.arc_in_tree[i2,j2,l] <= m.line_status[l]
+                #     return Constraint.Skip
+                # model.NoCycles = Constraint(model.lines, rule=no_cycles_rule)
+                # self.enabled_constraints["NoCycles"] = True
             elif self.toggles["use_root_flow"]:
 
                 self.logger.info("Using single commodity flow for radiality constraints")
@@ -575,6 +705,64 @@ class SOCP_class:
                     self.logger.info(f"SCF Radiality: Designated root for commodity flow is {designated_root}")
 
                 if designated_root is not None:
+                    #     # Pre-calculate maximum possible downstream loads for each arc
+                    #     arc_max_flows = self._calculate_arc_max_flows(model, designated_root)
+                        
+                    #     # --- Enhanced Flow Capacity Constraints ---
+                    #     def enhanced_scf_capacity_rule(m, u, v, l):
+                    #         # Use pre-calculated maximum flow for this arc
+                    #         max_flow = arc_max_flows.get((u, v, l), len(m.buses) - 1)
+                    #         return m.scf_flow_var[u,v,l] <= max_flow * m.line_status[l]
+                        
+                    #     model.EnhancedSCFCapacity = Constraint(model.arcs, rule=enhanced_scf_capacity_rule)
+                    #     self.enabled_constraints["EnhancedSCFCapacity"] = True
+
+                    #     # --- Flow Conservation with Improved Bounds ---
+                    #     def enhanced_scf_flow_conservation_rule(m, b):
+                    #         inflow = sum(m.scf_flow_var[u,b_val,l_idx] for (u,b_val,l_idx) in m.arcs if b_val == b)
+                    #         outflow = sum(m.scf_flow_var[b_val,v,l_idx] for (b_val,v,l_idx) in m.arcs if b_val == b)
+
+                    #         if b == designated_root:
+                    #             # Root supplies exactly the number of energized non-root buses
+                    #             num_other_energized = sum(m.is_up[n_bus] for n_bus in m.buses if n_bus != designated_root)
+                    #             return outflow - inflow == num_other_energized
+                    #         else:
+                    #             # Non-root buses consume 1 unit if energized, 0 if de-energized
+                    #             return inflow - outflow == m.is_up[b]
+                        
+                    #     model.EnhancedSCFFlowConservation = Constraint(model.buses, rule=enhanced_scf_flow_conservation_rule)
+                    #     self.enabled_constraints["EnhancedSCFFlowConservation"] = True
+                        
+                    #     # --- Spanning Tree Constraint with Load Shedding Support ---
+                    #     def enhanced_spanning_tree_rule(m):
+                    #         total_energized_buses = sum(m.is_up[b] for b in m.buses)
+                    #         return sum(m.line_status[l] for l in m.lines) == total_energized_buses - 1
+                        
+                    #     model.EnhancedSpanningTree = Constraint(rule=enhanced_spanning_tree_rule)
+                    #     self.enabled_constraints["EnhancedSpanningTree"] = True
+
+                    #     # --- Flow Ordering Constraints for Better LP Relaxation ---
+                    #     def flow_ordering_rule(m, u, v, l):
+                    #         # Flow on an arc should be proportional to the line status
+                    #         max_possible_flow = arc_max_flows.get((u, v, l), len(m.buses) - 1)
+                    #         return m.scf_flow_var[u,v,l] >= 0.01 * m.line_status[l] * max_possible_flow
+                        
+                    #     model.SCFFlowOrdering = Constraint(model.arcs, rule=flow_ordering_rule)
+                    #     self.enabled_constraints["SCFFlowOrdering"] = True
+
+                    #     # --- Bus Energization Logic ---
+                    #     if not self.toggles.get("allow_load_shed", False):
+                    #         # Force energization of all reachable buses
+                    #         def bus_forced_energization_rule(m, b):
+                    #             if b in m.partitionedbuses:
+                    #                 return m.is_up[b] == 1
+                    #             return Constraint.Skip
+                            
+                    #         model.SCFBusForcedEnergization = Constraint(model.buses, rule=bus_forced_energization_rule)
+                    #         self.enabled_constraints["SCFBusForcedEnergization"] = True
+                    # else:
+                    #     self.logger.error("SCF Radiality: Could not establish root bus - skipping radiality constraints")
+                    
                     n_buses_total = len(model.buses) # Max possible demand
                     def scf_capacity_rule(m, u, v, l):
                         return m.scf_flow_var[u,v,l] <= (n_buses_total -1) * m.line_status[l]
@@ -594,32 +782,34 @@ class SOCP_class:
                     
                     model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
                     self.enabled_constraints["SCFFlowConservation"] = True
+
+                    def spanning_tree_rule_scf(m):
+                        # total number of energized buses (substations always count as 1)
+                        num_up = sum(m.is_up[b] for b in m.buses)
+                        # enforce exactly num_up−1 lines active (==0 when num_up==1)
+                        return sum(m.line_status[l] for l in m.lines) == num_up - 1
+                    model.SpanningTreeSCF = Constraint(rule=spanning_tree_rule_scf)
+                    self.enabled_constraints["SpanningTreeSCF"] = True
                 else:
                     self.logger.error("SCF Radiality: Could not run due to no designated root.")
-                def spanning_tree_rule_scf(m):
-                    # total number of energized buses (substations always count as 1)
-                    num_up = sum(m.is_up[b] for b in m.buses)
-                    # enforce exactly num_up−1 lines active (==0 when num_up==1)
-                    return sum(m.line_status[l] for l in m.lines) == num_up - 1
-                model.SpanningTreeSCF = Constraint(rule=spanning_tree_rule_scf)
-                self.enabled_constraints["SpanningTreeSCF"] = True
+
+            
+            # --- Ensure Energization if Not Allowing Load Shed ---
+            if not self.toggles.get("allow_load_shed", False):
+                connected_buses_in_model = set()
+                for l_idx in model.lines:
+                    connected_buses_in_model.add(model.from_bus[l_idx])
+                    connected_buses_in_model.add(model.to_bus[l_idx])
                 
-                # --- Ensure Energization if Not Allowing Load Shed ---
-                if not self.toggles.get("allow_load_shed", False):
-                    connected_buses_in_model = set()
-                    for l_idx in model.lines:
-                        connected_buses_in_model.add(model.from_bus[l_idx])
-                        connected_buses_in_model.add(model.to_bus[l_idx])
-                    
-                    def bus_forced_energization_rule(m,b):
-                        if b in m.partitionedbuses and b in connected_buses_in_model:
-                            return m.is_up[b] == 1
-                        return Constraint.Skip
-                    model.SCFBusForcedEnergization = Constraint(model.buses, rule=bus_forced_energization_rule)
-                    self.enabled_constraints["SCFBusForcedEnergization"] = True
-                    for s_bus in self.substations:
-                        if s_bus in model.buses:
-                            pass 
+                def bus_forced_energization_rule(m,b):
+                    if b in m.partitionedbuses and b in connected_buses_in_model:
+                        return m.is_up[b] == 1
+                    return Constraint.Skip
+                model.SCFBusForcedEnergization = Constraint(model.buses, rule=bus_forced_energization_rule)
+                self.enabled_constraints["SCFBusForcedEnergization"] = True
+                for s_bus in self.substations:
+                    if s_bus in model.buses:
+                        pass 
                         
         # -------------------- objective (25) + penalties
         # --- Objective Term Expressions ---
@@ -1014,6 +1204,56 @@ class SOCP_class:
             self.logger.debug(f"Total switches changed: {self.num_switches_changed}")
         
         return net_updated
+
+    def _calculate_arc_max_flows(self, model, root_bus):
+        """Pre-calculate maximum possible flow on each arc based on network topology"""
+        import networkx as nx
+        
+        # Build a graph representation
+        G = nx.Graph()
+        for l in model.lines:
+            from_bus = model.from_bus[l]
+            to_bus = model.to_bus[l]
+            G.add_edge(from_bus, to_bus, line_id=l)
+        
+        arc_max_flows = {}
+        
+        for u, v, l in model.arcs:
+            # Calculate maximum possible downstream demand from this arc
+            try:
+                # Remove this edge temporarily to find downstream buses
+                G_temp = G.copy()
+                if G_temp.has_edge(u, v):
+                    G_temp.remove_edge(u, v)
+                
+                # Find connected components
+                components = list(nx.connected_components(G_temp))
+                
+                # Identify which component contains the root
+                root_component = None
+                downstream_component = None
+                
+                for comp in components:
+                    if root_bus in comp:
+                        root_component = comp
+                    elif v in comp:  # The 'to' node of the arc
+                        downstream_component = comp
+                
+                if downstream_component:
+                    # Count buses in downstream component that are in partitioned buses
+                    downstream_demand = len([b for b in downstream_component if b in model.partitionedbuses])
+                    arc_max_flows[(u, v, l)] = max(1, downstream_demand)
+                else:
+                    # Default conservative estimate
+                    arc_max_flows[(u, v, l)] = len(model.buses) // 2
+                    
+            except Exception as e:
+                # Fallback to conservative estimate
+                self.logger.warning(f"Could not calculate max flow for arc ({u},{v},{l}): {e}")
+                arc_max_flows[(u, v, l)] = len(model.buses) - 1
+        
+        self.logger.debug(f"Calculated arc max flows: {len(arc_max_flows)} arcs processed")
+        return arc_max_flows
 
     # Validate network connectivity for flow modeling
     def validate_network_connectivity(self):
@@ -2067,12 +2307,7 @@ class SOCP_class:
 
 
 def get_reactive_injection(df, bus, assumed_pf=0.9):
-    """
-    Computes the reactive power injection for entries in df associated with a given bus.
-    If the "q_mvar" column exists and at least 50% of the entries for that bus are non-null,
-    it uses those values (filling missing ones with a derived estimate). Otherwise, it derives
-    the reactive power from p_mw and the assumed power factor.
-    """
+
     # Filter entries for this bus
     sub = df.loc[df.bus == bus]
     if sub.empty:

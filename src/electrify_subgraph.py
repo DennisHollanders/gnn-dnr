@@ -875,33 +875,33 @@ def transform_subgraphs(
 
     counter = itertools.count()
     # parallel execution
-    # with ProcessPoolExecutor(max_workers=get_n_workers(), initializer=setup_logging, initargs=()) as ex:
-    #     while processed["total"] < total_required:
-    #         to_do = raw_subgraphs[: min(len(raw_subgraphs), total_required - processed["total"])]
-    #         futures = [
-    #             ex.submit(_worker,next(counter), sg, dfs, args, dist_callables, save_location)
-    #             for sg in to_do
-    #         ]
+    with ProcessPoolExecutor(max_workers=get_n_workers(), initializer=setup_logging, initargs=()) as ex:
+        while processed["total"] < total_required:
+            to_do = raw_subgraphs[: min(len(raw_subgraphs), total_required - processed["total"])]
+            futures = [
+                ex.submit(_worker,next(counter), sg, dfs, args, dist_callables, save_location)
+                for sg in to_do
+            ]
 
-    #         for fut in as_completed(futures):
-    #             suc, fl = fut.result()
-    #             processed["successful"] += suc
-    #             processed["failed"]     += fl
-    #             processed["total"]      += (suc + fl)
-    #             pbar.update(suc + fl)
-    with ProcessPoolExecutor(max_workers=get_n_workers(),
-                         initializer=setup_logging,
-                         initargs=()) as ex:
+            for fut in as_completed(futures):
+                suc, fl = fut.result()
+                processed["successful"] += suc
+                processed["failed"]     += fl
+                processed["total"]      += (suc + fl)
+                pbar.update(suc + fl)
+    # with ProcessPoolExecutor(max_workers=get_n_workers(),
+    #                      initializer=setup_logging,
+    #                      initargs=()) as ex:
 
-        work_iter = ((gid, sg, dfs, args, dist_callables, save_location)
-                    for gid, sg in enumerate(raw_subgraphs))
+    #     work_iter = ((gid, sg, dfs, args, dist_callables, save_location)
+    #                 for gid, sg in enumerate(raw_subgraphs))
 
-        for suc, fl in tqdm(ex.map(_worker, *zip(*work_iter)),
-                            total=len(raw_subgraphs),
-                            desc="Subgraphs", unit="sg"):
-            processed["successful"] += suc
-            processed["failed"]     += fl
-            processed["total"]      += (suc + fl)
+    #     for suc, fl in tqdm(ex.map(_worker, *zip(*work_iter)),
+    #                         total=len(raw_subgraphs),
+    #                         desc="Subgraphs", unit="sg"):
+    #         processed["successful"] += suc
+    #         processed["failed"]     += fl
+    #         processed["total"]      += (suc + fl)
 
     pbar.close()
     logger.info(f"Finished: {processed}")
@@ -1074,6 +1074,7 @@ def build_clean_graph(nx_graph, node_feats, edge_feats):
     assert missing_node_attrs_count == 0, f"Missing node attributes: {missing_node_attrs_count}"
     assert missing_edge_attrs_count == 0, f"Missing edge attributes: {missing_edge_attrs_count}"
     return clean_graph
+    
 
 def save_single_graph(graph_name, nx_graph, pp_network, info, save_location):
     

@@ -429,7 +429,6 @@ def save_combined_data(dataset, set_name, base_dir):
         # Run power flow analysis
         net.switch["closed"] = True
         
-
         try:
             pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
                     initialization="dc", calculate_voltage_angles=True)

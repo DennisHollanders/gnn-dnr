@@ -74,7 +74,7 @@ def parse_arguments():
     parser.add_argument('--n_samples_per_graph', type=int, default=5,
                         help='Number of samples per subgraph')
     # if iteral_all == False:
-    parser.add_argument('--num_subgraphs', type=int, default=3,
+    parser.add_argument('--num_subgraphs', type=int, default=10,
                         help='Number of subgraphs to sample if not iterating')
     parser.add_argument('--target_busses', type=int, default=130,
                         help='Target number of busses in sampled subgraphs')
@@ -105,11 +105,11 @@ def parse_arguments():
     parser.add_argument("--min_distance_threshold", type=float, default=1,)
     
     # Modification parameters
-    parser.add_argument('--consumption_std', type=float, default=0.4,
+    parser.add_argument('--consumption_std', type=float, default=1,
                         help='Standard deviation for consumption variation (default: 0.4)')
-    parser.add_argument('--production_std', type=float, default=0.6,
+    parser.add_argument('--production_std', type=float, default=1,
                         help='Standard deviation for production variation (default: 0.6)')
-    parser.add_argument('--net_load_std', type=float, default=0.5,
+    parser.add_argument('--net_load_std', type=float, default=1,
                         help='Standard deviation for net load variation (default: 0.5)')
     
     # Save options
@@ -119,9 +119,9 @@ def parse_arguments():
                         help='Enable logging')
                         
     # Test and validation set options
-    parser.add_argument('--generate_train_data', default=False,
+    parser.add_argument('--generate_train_data', default=True,
                         help='Generate training data')
-    parser.add_argument('--generate_test_val', default=True,
+    parser.add_argument('--generate_test_val', default=False,
                         help='Generate test and validation sets')
     parser.add_argument('--test_cases', type=int, default=10,
                         help='Number of test cases to generate')
