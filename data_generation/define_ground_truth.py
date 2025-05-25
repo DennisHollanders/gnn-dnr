@@ -36,13 +36,13 @@ from optimization_logging import setup_logging, get_logger
 
 SHARED_LOG_PATH = Path(__file__).parent / "logs"/ "define_ground_truth.log"
 
-def init_application_logging(method="SOCP", debug=True):
+def init_application_logging(debug=True):
     """Initialize application-wide logging."""
     log_level = logging.DEBUG if debug else logging.INFO
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     
-    log_file = log_dir / f"{method.upper()}_logs.txt"
+    log_file = log_dir / f"SOCP_logs.txt"
     return setup_logging(log_level=log_level, log_file=log_file)
 
 def init_worker_logging():
@@ -54,45 +54,526 @@ def get_n_workers():
     workers =int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
     print(f"Number of workers: {workers}")
     return workers
-
-def build_nx_graph(net, include_lines=False, include_trafos=False, include_switches=False):
+def build_nx_graph(net, include_switches=False, include_trafos=False):
     G = nx.Graph()
     G.add_nodes_from(net.bus.index)
     
-    if include_lines:
-        for _, ln in net.line.iterrows():
-            G.add_edge(int(ln.from_bus), int(ln.to_bus),
-                       type='line', closed=True)
+    # Always start with all lines (base topology)
+    for idx, ln in net.line.iterrows():
+        G.add_edge(int(ln.from_bus), int(ln.to_bus),
+                   type='line', closed=True, line_id=int(idx))
     
     if include_switches:
-        # Handle line switches
+        # Replace line connections with switch representations
         for s, sw in net.switch.iterrows():
-            if sw.et == 'l':  # Line switch
-                ln = net.line.loc[sw.element]
-                fb, tb = int(ln.from_bus), int(ln.to_bus)
-                # Update existing edge or create new one
-                if G.has_edge(fb, tb):
-                    G.edges[fb, tb]['closed'] = bool(sw.closed)
-                    G.edges[fb, tb]['switch_id'] = int(s)
-                else:
-                    G.add_edge(fb, tb, type='switch', closed=bool(sw.closed), switch_id=int(s))
-            elif sw.et == 'b':  # Bus switch
-                fb, tb = int(sw.bus), int(sw.element)
-                G.add_edge(fb, tb, type='bus_switch', closed=bool(sw.closed), switch_id=int(s))
+            if sw.et == 'l':  # Line switch only (ignore bus switches)
+                # Get the line this switch controls
+                line_idx = sw.element
+                if line_idx in net.line.index:
+                    ln = net.line.loc[line_idx]
+                    fb, tb = int(ln.from_bus), int(ln.to_bus)
+                    
+                    # Remove the original line edge
+                    if G.has_edge(fb, tb):
+                        G.remove_edge(fb, tb)
+                    
+                    # Add the switch edge with its state
+                    G.add_edge(fb, tb, 
+                              type='switch', 
+                              closed=bool(sw.closed),
+                              switch_id=int(s),
+                              line_id=int(line_idx))
     
     if include_trafos:
-        for _, tr in net.trafo.iterrows():
-            G.add_edge(int(tr.hv_bus), int(tr.lv_bus), element=int(tr.name))
-        for _, tr in net.trafo3w.iterrows():
-            G.add_edge(int(tr.hv_bus), int(tr.lv_bus))
-            G.add_edge(int(tr.hv_bus), int(tr.mv_bus))
-            G.add_edge(int(tr.lv_bus), int(tr.mv_bus))
+        # Add transformer connections
+        for idx, tr in net.trafo.iterrows():
+            if idx in net.trafo.index:  # Ensure valid index
+                G.add_edge(int(tr.hv_bus), int(tr.lv_bus), 
+                          type='trafo', trafo_id=int(idx))
+        
+        # Add 3-winding transformer connections
+        for idx, tr in net.trafo3w.iterrows():
+            if idx in net.trafo3w.index:  # Ensure valid index
+                G.add_edge(int(tr.hv_bus), int(tr.lv_bus), 
+                          type='trafo3w', trafo3w_id=int(idx))
+                G.add_edge(int(tr.hv_bus), int(tr.mv_bus), 
+                          type='trafo3w', trafo3w_id=int(idx))  
+                G.add_edge(int(tr.lv_bus), int(tr.mv_bus), 
+                          type='trafo3w', trafo3w_id=int(idx))
     
     return G
+def plot_grid_component(net, ax):
+    # Build operational graph (only closed connections for component analysis)
+    G_operational = build_nx_graph(net, include_switches=True)
+    
+    # Build full switch graph (includes both open and closed switches for visualization)
+    G_full = nx.Graph()
+    G_full.add_nodes_from(net.bus.index)
+    
+    # Add all lines first
+    for idx, ln in net.line.iterrows():
+        G_full.add_edge(int(ln.from_bus), int(ln.to_bus),
+                       type='line', closed=True, line_id=int(idx))
+    
+    # Replace lines with switches where applicable
+    for s, sw in net.switch.iterrows():
+        if sw.et == 'l':  # Line switch only
+            line_idx = sw.element
+            if line_idx in net.line.index:
+                ln = net.line.loc[line_idx]
+                fb, tb = int(ln.from_bus), int(ln.to_bus)
+                
+                # Remove the original line edge
+                if G_full.has_edge(fb, tb):
+                    G_full.remove_edge(fb, tb)
+                
+                # Add switch edge (both open and closed)
+                G_full.add_edge(fb, tb, 
+                              type='switch', 
+                              closed=bool(sw.closed),
+                              switch_id=int(s),
+                              line_id=int(line_idx))
+    
+    # Get positions
+    if not net.bus_geodata.empty:
+        pos = {int(b): (r.x, r.y) for b, r in net.bus_geodata.iterrows()}
+    else:
+        pos = nx.kamada_kawai_layout(G_full)
 
-def preprocess_network_for_optimization(net, logger=None, debug=False, graph_id=None, output_dir=None):
-    if logger is None:
-        logger = logging.getLogger(f"preprocess.{graph_id}")
+    # Find connected components based on operational graph (closed connections only)
+    components = list(nx.connected_components(G_operational))
+    
+    # Sort components by size (largest first) for better visibility
+    components = sorted(components, key=len, reverse=True)
+    
+    import matplotlib.cm as cm
+ 
+    # Use tab10 for consistent colors across plots
+    if len(components) > 1:
+        colors = cm.tab10(np.arange(len(components)) % 10)
+    else:
+        colors = ['lightblue']
+    
+    # Create component color mapping
+    node_colors = {}
+    component_colors = {}
+    for i, component in enumerate(components):
+        color = colors[i] if len(components) > 1 else colors[0]
+        component_colors[i] = color
+        for node in component:
+            node_colors[node] = color
+    
+    # Separate edges by type and state
+    regular_edges = []
+    closed_switch_edges = []
+    open_switch_edges = []
+    
+    for u, v, data in G_full.edges(data=True):
+        edge_type = data.get('type', 'line')
+        if edge_type == 'switch':
+            if data.get('closed', True):
+                closed_switch_edges.append((u, v))
+            else:
+                open_switch_edges.append((u, v))
+        else:
+            regular_edges.append((u, v))
+
+    # Draw regular edges (lines without switches) colored by component
+    for u, v in regular_edges:
+        # Determine component color (both nodes should be in same component if connected)
+        edge_color = node_colors.get(u, 'lightgrey')
+        nx.draw_networkx_edges(G_full, pos, edgelist=[(u, v)], 
+                              edge_color=[edge_color], ax=ax, width=2.0, alpha=0.8)
+    
+    # Draw closed switches in component colors
+    for u, v in closed_switch_edges:
+        # Use component color for closed switches
+        edge_color = node_colors.get(u, 'lightgrey')
+        nx.draw_networkx_edges(G_full, pos, edgelist=[(u, v)], 
+                              edge_color=[edge_color], ax=ax, width=2.0, alpha=0.8)
+    
+    # Draw ONLY open switches as dotted black lines
+    if open_switch_edges:
+        nx.draw_networkx_edges(G_full, pos, edgelist=open_switch_edges, 
+                              edge_color="black", ax=ax, width=1.5, 
+                              style='dotted', alpha=0.9)
+
+    # Draw nodes colored by component
+    for i, component in enumerate(components):
+        component_nodes = list(component)
+        if component_nodes:
+            nx.draw_networkx_nodes(G_full, pos, nodelist=component_nodes,
+                                  node_size=40, node_color=[component_colors[i]], 
+                                  edgecolors="black", linewidths=0.5, ax=ax)
+
+    ax.axis("off")
+
+    # Add legend for components if multiple
+    if len(components) > 1:
+        legend_elements = []
+        for i, comp in enumerate(components):
+            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                            markerfacecolor=component_colors[i], 
+                                            markersize=8, alpha=0.8,
+                                            label=f'Comp {i+1} ({len(comp)} buses)'))
+        
+        # Add open switch legend only if there are open switches
+        if open_switch_edges:
+            legend_elements.append(plt.Line2D([0], [0], color='black', 
+                                            linestyle='dotted', linewidth=1.5,
+                                            label='Open Switches'))
+        
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=8, 
+                 frameon=True, fancybox=True, shadow=True)
+
+def plot_grid(net, ax, title=""):
+    #G   = create_nxgraph(net, include_lines=True, include_switches=True)
+    G = build_nx_graph(net,include_switches=True)
+    G_top = build_nx_graph(net, include_switches=False, include_trafos=True)
+    isolated = [n for n, d in G.degree() if d == 0]
+    
+    if not net.bus_geodata.empty:
+        pos = {int(b): (r.x, r.y) for b, r in net.bus_geodata.iterrows()}
+    else:
+        pos = nx.kamada_kawai_layout(G)
+
+    # Find disconnected buses and cycles
+    disconnected_buses = find_disconnected_buses(G)
+    disconnected_buses_ful_top = find_disconnected_buses(G_top)
+
+    cycle_edges = find_cycles(G)
+    logger.info(f"Disconnected buses: {disconnected_buses}")
+    logger.info(f"Disconnected buses in full topology: {disconnected_buses_ful_top}")   
+    logger.info(f"Cycle edges: {cycle_edges}")
+    # Separate edges by type
+    regular_edges = []
+    open_edges = []
+    cycle_edges_list = []
+    
+    for u, v, data in G.edges(data=True):
+        edge_tuple = (min(u,v), max(u,v))
+        if 'closed' in data and not data['closed']:
+            open_edges.append((u, v))
+        elif edge_tuple in cycle_edges:
+            cycle_edges_list.append((u, v))
+        else:
+            regular_edges.append((u, v))
+
+    # all edges / nodes
+    nx.draw_networkx_edges(G, pos, edgelist=regular_edges, edge_color="lightgrey", ax=ax, width=1.0)
+    nx.draw_networkx_nodes(G, pos, node_size=25, node_color="lightgrey", edgecolors="lightgrey", ax=ax)
+    
+    if cycle_edges_list:
+        nx.draw_networkx_edges(G, pos, edgelist=cycle_edges_list,edge_color="blue", ax=ax, width=0.1, alpha=0.8)
+        cycle_nodes = {n for edge in cycle_edges_list for n in edge}
+        nx.draw_networkx_nodes(G, pos, nodelist=list(cycle_nodes),
+                              node_size=10, node_color="blue", ax=ax)
+
+    
+    # open switches
+    open_edges = [(u, v) for u, v, d in G.edges(data=True)
+              if not d.get("closed", True)]
+    if open_edges:
+        nx.draw_networkx_edges(G, pos, edgelist=open_edges, edge_color="limegreen", ax=ax, width=2.0)
+        nx.draw_networkx_edges(G, pos, edgelist=open_edges,
+                               edge_color="limegreen", width=2.0, ax=ax)
+        incident = {n for e in open_edges for n in e}
+        nx.draw_networkx_nodes(G, pos, nodelist=list(incident),
+                               node_size=35, node_color="limegreen",
+                               edgecolors="black", linewidths=1.5, ax=ax)
+    if disconnected_buses in disconnected_buses_ful_top:
+        # Draw disconnected buses
+        nx.draw_networkx_nodes(G, pos, nodelist=list(disconnected_buses_ful_top),
+                               node_size=50, node_color="red",
+                               edgecolors="red", linewidths=1, ax=ax)
+    else:
+        nx.draw_networkx_nodes(G, pos, nodelist=list(disconnected_buses), node_size=50,
+                            node_color="yellow", edgecolors="yellow",node_shape="*", linewidths=1, ax=ax)
+
+    ax.set_title(title+ "open switches: " + str(len(open_edges)))
+    subtitle = f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}"
+    ax.text(0.5, 0.95, subtitle, transform=ax.transAxes, ha="center", va="top", 
+            fontsize=8, style='italic', color='gray')
+    ax.axis("off")
+
+
+def plot_voltage_profile(voltage_data, ax, bus_labels=None, title="Voltage profile"):
+    voltage_data = np.asarray(voltage_data, dtype=float)
+    
+    num_phases = 0
+    if voltage_data.ndim > 1:
+        num_phases = voltage_data.shape[1]
+    elif voltage_data.ndim == 1 and voltage_data.size > 0 :
+        num_phases = 1 
+        voltage_data = voltage_data[:, np.newaxis] 
+    else: # Empty data
+        ax.text(0.5, 0.5, "No voltage data available", ha='center', va='center')
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("Bus index / Label")
+        ax.set_ylabel("Voltage (p.u.)")
+        return
+
+    default_labels = ["Original", "Processed", "MST", "SOCP Optimized", "Original Optimized"]
+    phase_labels = default_labels[:num_phases]
+    if num_phases > len(default_labels):
+        phase_labels.extend([f"Snapshot {i+1}" for i in range(len(default_labels), num_phases)])
+
+    x_ticks = np.arange(voltage_data.shape[0])
+    for col in range(voltage_data.shape[1]):
+        ax.plot(x_ticks, voltage_data[:, col], label=phase_labels[col], marker='.', linestyle='-', markersize=4, linewidth=1.2)
+
+    ax.axhline(1.05, linestyle="--", linewidth=0.8, color="grey")
+    ax.axhline(0.95, linestyle="--", linewidth=0.8, color="grey")
+    
+    if bus_labels is not None and len(bus_labels) == len(x_ticks):
+        if len(x_ticks) > 20: 
+             step = len(x_ticks) // 10
+             ax.set_xticks(x_ticks[::step])
+             ax.set_xticklabels(bus_labels[::step], rotation=45, ha="right")
+        else:
+            ax.set_xticks(x_ticks)
+            ax.set_xticklabels(bus_labels, rotation=45, ha="right")
+    else:
+        ax.set_xlabel("Bus index")
+
+    ax.set_ylabel("Voltage (p.u.)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    if voltage_data.shape[1] > 1 or len(phase_labels) == 1 : 
+        ax.legend(frameon=False)
+
+
+def find_disconnected_buses(G):
+    disconnected_buses = set()
+    # Find isolated nodes and very small components
+    for component in nx.connected_components(G):
+        if len(component) <= 2:  # Isolated or very small components
+            disconnected_buses.update(component)
+        # Also check for nodes with degree 0 (completely isolated)
+        for node in component:
+            if G.degree(node) == 0:
+                disconnected_buses.add(node)
+    
+    return disconnected_buses
+
+def loss_improvement(net_before, net_after, include_trafos=True):
+    pp.runpp(net_before, enforce_q_lims=False)
+    pp.runpp(net_after,  enforce_q_lims=False)
+
+    def active_loss(net):
+        loss = net.res_line["pl_mw"].abs().sum()
+        if include_trafos and "res_trafo" in net:
+            loss += net.res_trafo["pl_mw"].abs().sum()
+        return float(loss)
+
+    l0 = active_loss(net_before)
+    l1 = active_loss(net_after)
+    logger.info(f"Loss before: {l0:.2f} MW, Loss after: {l1:.2f} MW")
+    
+
+    return {
+        "loss_before":       l0,
+        "loss_after":        l1,
+        "loss_improvement":  100.0 * (l0 - l1) / l0 if l0 > 0 else np.nan
+    }
+
+
+def count_switch_changes(net_a, net_b):
+    sa = net_a.switch[(net_a.switch.et=='l')]['closed']
+    sb = net_b.switch[(net_b.switch.et=='l')]['closed']
+    common = sa.index.intersection(sb.index)
+    return int((sa.loc[common] != sb.loc[common]).sum())
+
+def find_cycles(G):
+    G_closed = nx.Graph()
+    G_closed.add_nodes_from(G.nodes())
+
+    # Add only closed edges (for cycle detection)
+    for u, v, data in G.edges(data=True):
+        if data.get('closed', True):  # Include closed switches and regular lines
+            G_closed.add_edge(u, v, **data)
+    cycle_edges = set()
+    
+    # Check each connected component for cycles
+    for component in nx.connected_components(G_closed):
+        if len(component) <= 2:
+            continue
+            
+        subgraph = G_closed.subgraph(component)
+        if not nx.is_tree(subgraph):
+            # Find all cycles in this component
+            try:
+                cycles = nx.cycle_basis(subgraph)
+                for cycle in cycles:
+                    # Add all edges in the cycle
+                    for i in range(len(cycle)):
+                        u, v = cycle[i], cycle[(i + 1) % len(cycle)]
+                        cycle_edges.add((min(u, v), max(u, v)))
+            except:
+                # Fallback: just mark that there are cycles
+                for u, v in subgraph.edges():
+                    cycle_edges.add((min(u, v), max(u, v)))
+    
+    return cycle_edges
+def is_radial_and_connected(net, y_mask=None, include_switches=False, include_trafos=False):
+    G = build_nx_graph(net, include_switches=include_switches, include_trafos=include_trafos)
+    
+    # Apply mask by removing nodes if provided
+    if y_mask is not None:
+        if isinstance(y_mask, pd.Series):
+            active_buses = set(net.bus.index[y_mask])
+        else:
+            active_buses = set(y_mask)
+        
+        nodes_to_remove = [n for n in G.nodes() if n not in active_buses]
+        G.remove_nodes_from(nodes_to_remove)
+    
+    cycles = find_cycles(G)
+    disconnected_buses = find_disconnected_buses(G)
+    
+    radial = len(cycles) == 0
+    connected = len(disconnected_buses) == 0
+    
+    return radial, connected
+def visualize_network_states(snapshots, active_bus_mask, graph_id, output_dir=None, debug=False):
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    nets_to_visualize = []
+    labels = []
+    
+    snapshot_keys_ordered = ["original", "processed", "mst", "optimised_mst"]
+    if debug:
+        snapshot_keys_ordered.append("optimised_orig")
+
+    for key in snapshot_keys_ordered:
+        if key in snapshots and snapshots[key] is not None:
+            nets_to_visualize.append(snapshots[key])
+            labels.append(key.replace("_", " ").title())
+    n_nets = len(nets_to_visualize)
+    
+    if n_nets == 0:
+        print(f"No networks to visualize for graph {graph_id}")
+        return
+    
+    # Create 2-row subplot: top row for regular plots, bottom row for component plots
+    fig, axes = plt.subplots(2, n_nets + 1, figsize=(4 * (n_nets + 1), 10))  # Increased height for 2 rows
+    
+    # Handle case where n_nets + 1 = 1 (axes becomes 1D)
+    if n_nets + 1 == 1:
+        axes = axes.reshape(2, 1)
+
+    common_ref_bus = None
+    processed_snapshot = snapshots.get("processed") 
+    
+    if processed_snapshot and hasattr(processed_snapshot, 'ext_grid') and not processed_snapshot.ext_grid.empty:
+        common_ref_bus = processed_snapshot.ext_grid.bus.iloc[0]
+        logger.info(f"Primary common reference bus for voltage profiles: {common_ref_bus} (from processed_net ext_grid).")
+    else:
+        logger.warning("Could not determine common_ref_bus from 'processed' network. Voltage profiles might be inconsistent if 'processed' net is missing or has no slack.")
+
+    all_bus_indices = set()
+    for net_key in snapshot_keys_ordered: # Iterate through expected keys to build all_bus_indices
+        net_val = snapshots.get(net_key)
+        if net_val and hasattr(net_val, "bus"):
+            all_bus_indices.update(net_val.bus.index.tolist())
+    reference_bus_index = pd.Index(sorted(list(all_bus_indices)))
+    if not reference_bus_index.empty:
+        logger.debug(f"Voltage profile x-axis (reference_bus_index) created with {len(reference_bus_index)} buses.")
+    else:
+        logger.warning("Reference bus index for voltage profile is empty. Plot may not generate correctly.")
+        # Early exit or handle if no buses to plot against makes sense.
+        # For now, will proceed, and it might result in an empty plot or error downstream.
+
+    aligned_voltage_data = []
+    for i, net_orig in enumerate(nets_to_visualize):
+        label = labels[i]
+        # Always work on a deepcopy for any modifications or PF runs for this visualization
+        net = copy.deepcopy(net_orig)
+        
+        logger.debug(f"Processing snapshot '{label}' for voltage profile.")
+
+        try:
+            # Attempt to set a common reference for power flow if common_ref_bus is valid for this network
+            if common_ref_bus is not None and common_ref_bus in net.bus.index:
+                if hasattr(net, 'ext_grid'):
+                    net.ext_grid = net.ext_grid[0:0] # Clear all existing ext_grids
+
+                pp.create_ext_grid(net, bus=common_ref_bus, vm_pu=1.0, va_degree=0.0, name=f"Vis_Ref_{label}")
+                logger.info(f"Temporarily set ext_grid at bus {common_ref_bus} for '{label}' for consistent voltage profile PF.")
+                
+                pp.runpp(net, enforce_q_lims=False, calculate_voltage_angles=True, algorithm='nr')
+            
+            elif common_ref_bus is None: # No common_ref_bus determined (e.g. processed net missing/no slack)
+                logger.warning(f"No common_ref_bus determined. Running PF for '{label}' with its original setup.")
+                if not (hasattr(net, 'res_bus') and 'vm_pu' in net.res_bus.columns and not net.res_bus.empty):
+                    pp.runpp(net, enforce_q_lims=False, calculate_voltage_angles=True, algorithm='nr')
+
+            else: # common_ref_bus is known but not in this net_for_pf.bus.index
+                logger.warning(f"Common reference bus {common_ref_bus} not in '{label}'. Running PF for '{label}' with its original setup.")
+                if not (hasattr(net, 'res_bus') and 'vm_pu' in net.res_bus.columns and not net.res_bus.empty):
+                    pp.runpp(net, enforce_q_lims=False, calculate_voltage_angles=True, algorithm='nr')
+
+        except LoadflowNotConverged:
+            logger.warning(f"Power flow did NOT converge for '{label}' during voltage profile generation.")
+            if not hasattr(net, 'res_bus'): net.res_bus = pd.DataFrame(index=net.bus.index if hasattr(net, 'bus') else None)
+            net.res_bus['vm_pu'] = np.nan 
+        except Exception as e:
+            logger.error(f"Error during power flow for '{label}' in voltage profile generation: {e}")
+            logger.debug(traceback.format_exc())
+            if not hasattr(net, 'res_bus'): net.res_bus = pd.DataFrame(index=net.bus.index if hasattr(net, 'bus') else None)
+            net.res_bus['vm_pu'] = np.nan
+
+        if hasattr(net, 'res_bus') and 'vm_pu' in net.res_bus.columns and not reference_bus_index.empty:
+            current_voltages = net.res_bus.vm_pu.reindex(reference_bus_index, fill_value=np.nan)
+            aligned_voltage_data.append(current_voltages.values)
+        elif not reference_bus_index.empty :
+            aligned_voltage_data.append(np.full(len(reference_bus_index), np.nan))
+        else: # reference_bus_index is empty
+             aligned_voltage_data.append(np.array([])) # Append empty array if no buses
+
+
+        # Plot in both rows
+        plot_grid(net, axes[0, i], title=f"{label} - Regular")
+        plot_grid_component(net, axes[1, i],)
+        
+        # Check topology status using simplified function
+        topo_radial, topo_connected = is_radial_and_connected(net, include_trafos=True)
+        op_radial, op_connected = is_radial_and_connected(net, include_switches=True)
+
+         # Create simple status text for top row (topological graph)
+        axes[0, i].text(0.5, -0.12,
+                    f"Topological Graph: Connected: {topo_connected} Radial: {topo_radial} \nOperational Graph:Connected: {op_connected} Radial: {op_radial}",
+                    transform=axes[0, i].transAxes,
+                    ha="center", va="top", fontsize=7)
+        
+
+    # Plot voltage profile in top right
+    voltage_plot_ax = axes[0, n_nets]
+    if aligned_voltage_data:
+        stacked_voltages = np.column_stack(aligned_voltage_data)
+        bus_labels_for_plot = [str(i) for i in reference_bus_index.tolist()]
+        plot_voltage_profile(stacked_voltages, voltage_plot_ax, bus_labels=bus_labels_for_plot, title="Voltage Profile")
+    
+    # Hide bottom right subplot (where voltage plot would be)
+    axes[1, n_nets].axis("off")
+    axes[1, n_nets].set_visible(False)
+    
+    plt.tight_layout()
+    plt.show()
+    # if output_dir:
+    #     filename = output_dir / f"{graph_id}_network_states.png"
+    #     try:
+    #         plt.savefig(filename, bbox_inches='tight', dpi=300)
+    #     except Exception as e:
+    #         pass
+        
+    #     #plt.close(fig)
+    # else:
+    #     plt.show()
+def preprocess_network_for_optimization(net, logger=None, debug=False, ):
 
     # Find distribution voltage level (typically the most common lower voltage)
     if hasattr(net, 'bus') and 'vn_kv' in net.bus.columns:
@@ -116,18 +597,18 @@ def preprocess_network_for_optimization(net, logger=None, debug=False, graph_id=
     # Find main distribution component
     dist_components = list(nx.connected_components(G_dist_only))
     if not dist_components:
-        logger.warning(f"{graph_id}: No distribution components found.")
+        logger.warning(f"No distribution components found.")
         return None, None, None
     
     main_dist_component = set(max(dist_components, key=len))
-    logger.info(f"{graph_id}: Selected main distribution component with {len(main_dist_component)} buses.")
+    logger.info(f" Selected main distribution component with {len(main_dist_component)} buses.")
     
     # Create active bus mask for distribution buses only
     active_bus_mask = pd.Series(False, index=net.bus.index)
     active_bus_mask.loc[list(main_dist_component)] = True
     
     # Identify different types of excluded nodes
-    G_full_phys = build_nx_graph(net, include_lines=True, include_trafos=True)
+    G_full_phys = build_nx_graph(net,include_trafos=True)
     node_to_full_phys_comp_id = {
         node: i for i, comp in enumerate(nx.connected_components(G_full_phys)) for node in comp
     }
@@ -161,25 +642,25 @@ def preprocess_network_for_optimization(net, logger=None, debug=False, graph_id=
     
     # If no slack buses in main component, add one
     if not (main_dist_component & slack_buses):
-        logger.warning(f"{graph_id}: Selected main component has no original reference buses, adding one...")
+        logger.warning(f"Selected main component has no original reference buses, adding one...")
         subnet_graph_for_slack = G_dist_only.subgraph(main_dist_component)
         degrees_in_main = dict(subnet_graph_for_slack.degree())
         if degrees_in_main:
             new_slack = max(degrees_in_main, key=degrees_in_main.get)
             slack_buses.add(new_slack)
-            logger.warning(f"{graph_id}: Added new reference bus {new_slack} to slack_buses set.")
+            logger.warning(f" Added new reference bus {new_slack} to slack_buses set.")
 
     # Create active bus mask for distribution buses only
     active_bus_mask = pd.Series(False, index=net.bus.index)
     active_bus_mask.loc[list(main_dist_component)] = True
     
     if debug:
-        logger.debug(f"{graph_id}: Debugging graph connectivity:")
-        logger.debug(f"{graph_id}: Selected main_dist_component size: {len(main_dist_component)}")
-        logger.debug(f"{graph_id}: Main_dist_component buses: {sorted(list(main_dist_component))}")
-        logger.debug(f"{graph_id}: Transformer-linked_nodes: {len(transformer_linked_nodes)}")
-        logger.debug(f"{graph_id}: Other_excluded_nodes: {len(other_excluded_nodes)}")
-        logger.debug(f"{graph_id}: All identified slack buses: {slack_buses}")
+        logger.debug(f" Debugging graph connectivity:")
+        logger.debug(f" Selected main_dist_component size: {len(main_dist_component)}")
+        logger.debug(f" Main_dist_component buses: {sorted(list(main_dist_component))}")
+        logger.debug(f" Transformer-linked_nodes: {len(transformer_linked_nodes)}")
+        logger.debug(f" Other_excluded_nodes: {len(other_excluded_nodes)}")
+        logger.debug(f" All identified slack buses: {slack_buses}")
     
     try:
         processed_net = pp.select_subnet(
@@ -198,7 +679,7 @@ def preprocess_network_for_optimization(net, logger=None, debug=False, graph_id=
                 has_power_source = True
 
         if not has_power_source:
-            logger.warning(f"{graph_id}: Processed network has no power sources, adding one...")
+            logger.warning(f" Processed network has no power sources, adding one...")
             candidate_buses_for_ext_grid = main_dist_component & slack_buses
             chosen_slack_bus_for_ext_grid = next(iter(candidate_buses_for_ext_grid), None)
             
@@ -210,22 +691,15 @@ def preprocess_network_for_optimization(net, logger=None, debug=False, graph_id=
             
             if chosen_slack_bus_for_ext_grid is not None and chosen_slack_bus_for_ext_grid in processed_net.bus.index:
                 pp.create_ext_grid(processed_net, chosen_slack_bus_for_ext_grid, vm_pu=1.0, va_degree=0.0)
-                logger.warning(f"{graph_id}: Added ext_grid at bus {chosen_slack_bus_for_ext_grid}.")
+                logger.warning(f" Added ext_grid at bus {chosen_slack_bus_for_ext_grid}.")
                 slack_buses.add(chosen_slack_bus_for_ext_grid)
 
     except Exception as e:
-        logger.error(f"{graph_id}: Error creating subnet: {e}")
+        logger.error(f"Error creating subnet: {e}")
         logger.error(traceback.format_exc())
         return None, None, None
     
     relevant_slack_buses = list(slack_buses & main_dist_component)
-    
-    visualization_data = {
-        "main_component_nodes": list(main_dist_component),
-        "transformer_linked_nodes": list(transformer_linked_nodes),
-        "other_excluded_nodes": list(other_excluded_nodes),
-        "slack_buses": relevant_slack_buses 
-    }
     
     # if debug and graph_id is not None and output_dir is not None:
     #     try:
@@ -235,107 +709,8 @@ def preprocess_network_for_optimization(net, logger=None, debug=False, graph_id=
     #         logger.error(f"{graph_id}: Error during visualization: {e}")
     #         logger.error(traceback.format_exc())
     
-    logger.info(f"{graph_id}: Preprocessed network: {len(processed_net.bus)} of {len(net.bus)} buses kept.")
-    return processed_net, active_bus_mask, visualization_data
-
-def visualize_preprocessing(net_orig, active_bus_mask, graph_id, visualization_data, output_dir=None, debug=False):
-    if output_dir is None:
-        output_dir = Path("data_generation") / "logs" / "visualizations"
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    G = build_nx_graph(net_orig, include_lines=True, include_trafos=True)
-    
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.gca() 
-
-    pos = {}
-    if hasattr(net_orig, 'bus_geodata') and not net_orig.bus_geodata.empty:
-        pos = {int(b): (r.x, r.y) for b, r in net_orig.bus_geodata.iterrows() if b in G}
-    
-    if not pos or len(pos) < G.number_of_nodes():
-        if G.number_of_nodes() > 0:
-            layout_pos = pos if pos else None
-            fixed_nodes = list(pos.keys()) if pos else None
-            current_pos = nx.spring_layout(G, seed=42, pos=layout_pos, fixed=fixed_nodes)
-            pos.update(current_pos)
-        else:
-            pos = {}
-
-    main_component_nodes = set(visualization_data.get("main_component_nodes", []))
-    transformer_linked_nodes = set(visualization_data.get("transformer_linked_nodes", []))
-    other_excluded_nodes = set(visualization_data.get("other_excluded_nodes", []))
-    slack_buses_viz = set(visualization_data.get("slack_buses", []))
-
-    active_edges = []
-    inactive_edges = []
-    if G.number_of_edges() > 0:
-        for u, v in G.edges():
-            if u in main_component_nodes and v in main_component_nodes:
-                active_edges.append((u,v))
-            else:
-                inactive_edges.append((u,v))
-
-    nx.draw_networkx_edges(G, pos, ax=ax, edgelist=inactive_edges, edge_color='lightcoral', width=1.0, alpha=0.6)
-    nx.draw_networkx_edges(G, pos, ax=ax, edgelist=active_edges, edge_color='royalblue', width=1.5, alpha=0.8)
-    
-    cat_main = [n for n in main_component_nodes if n in G]
-    cat_trafo = [n for n in transformer_linked_nodes if n in G]
-    cat_other = [n for n in other_excluded_nodes if n in G]
-    cat_slack = [n for n in slack_buses_viz if n in G]
-
-    nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=cat_main, 
-                         node_color='blue', node_size=60, label=f'Main Component ({len(cat_main)})')
-    nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=cat_trafo, 
-                         node_color='pink', node_size=50, alpha=0.9, label=f'Excluded (Transformer-Linked) ({len(cat_trafo)})')
-    nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=cat_other, 
-                         node_color='orange', node_size=40, alpha=0.8, label=f'Excluded (Isolated/Other) ({len(cat_other)})')
-    
-    nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=cat_slack, 
-                         node_color='green', node_size=250, 
-                         node_shape='*', label=f'Slack/Reference Buses ({len(cat_slack)})')
-    
-    labels_to_draw = {bus: str(bus) for bus in cat_slack}
-    nx.draw_networkx_labels(G, pos, ax=ax, labels=labels_to_draw, font_size=8, font_weight='bold')
-    
-    ax.legend(loc='upper right', scatterpoints=1, frameon=True, fontsize='small')
-    ax.set_title(f"Preprocessing Results for {graph_id}", fontsize='medium')
-    ax.axis('off')
-    
-    plt.tight_layout() 
-    
-    filename = output_dir / f"{graph_id}_preprocessing.png"
-    fig.savefig(filename, bbox_inches='tight', dpi=300) 
-    plt.close(fig) 
-
-    print(f"Preprocessing visualization saved to {filename}") 
-
-# def create_operational_graph(net):
-#     G = nx.Graph()
-#     G.add_nodes_from(net.bus.index)
-    
-#     # Add lines that have closed switches
-#     line_switches = net.switch[net.switch.et == 'l']
-    
-#     for switch_idx, switch in line_switches.iterrows():
-#         if switch.closed:  
-#             line_idx = switch.element
-#             line = net.line.loc[line_idx]
-#             G.add_edge(int(line.from_bus), int(line.to_bus), 
-#                       line_idx=int(line_idx), 
-#                       switch_idx=int(switch_idx))
-    
-#     # Add bus-bus switches if closed
-#     bus_switches = net.switch[net.switch.et == 'b']
-#     for switch_idx, switch in bus_switches.iterrows():
-#         if switch.closed:
-#             G.add_edge(int(switch.bus), int(switch.element),
-#                       switch_idx=int(switch_idx),
-#                       is_bus_switch=True)
-    
-#     return G
-
+    logger.info(f"Preprocessed network: {len(processed_net.bus)} of {len(net.bus)} buses kept.")
+    return processed_net, active_bus_mask, 
 def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
     # ---------- prepare mask ------------------------------------------
     if y_mask is None:
@@ -394,457 +769,6 @@ def alternative_mst_reconfigure(net, penalty=1.0, y_mask=None):
 
     return net
 
-def find_disconnected_buses(G):
-    disconnected_buses = set()
-    # Find isolated nodes and very small components
-    for component in nx.connected_components(G):
-        if len(component) <= 2:  # Isolated or very small components
-            disconnected_buses.update(component)
-        # Also check for nodes with degree 0 (completely isolated)
-        for node in component:
-            if G.degree(node) == 0:
-                disconnected_buses.add(node)
-    
-    return disconnected_buses
-
-def build_operational_graph(G):
-    H = G.copy()
-    H.remove_edges_from([e for e,d in G.edges(data=True) if d.get("closed",True) is False])
-    return H
-
-def find_cycles(G):
-    cycle_edges = set()
-    
-    # Check each connected component for cycles
-    for component in nx.connected_components(G):
-        if len(component) <= 2:
-            continue
-            
-        subgraph = G.subgraph(component)
-        if not nx.is_tree(subgraph):
-            # Find all cycles in this component
-            try:
-                cycles = nx.cycle_basis(subgraph)
-                for cycle in cycles:
-                    # Add all edges in the cycle
-                    for i in range(len(cycle)):
-                        u, v = cycle[i], cycle[(i + 1) % len(cycle)]
-                        cycle_edges.add((min(u, v), max(u, v)))
-            except:
-                # Fallback: just mark that there are cycles
-                for u, v in subgraph.edges():
-                    cycle_edges.add((min(u, v), max(u, v)))
-    
-    return cycle_edges
-
-
-
-def is_radial_and_connected(net, y_mask=None, include_lines=True, include_switches=True):
-
-    G = build_nx_graph(net, include_lines=include_lines, include_switches=include_switches)
-    # Apply mask by removing nodes if provided
-    if y_mask is not None:
-        if isinstance(y_mask, pd.Series):
-            active_buses = set(net.bus.index[y_mask])
-        else:
-            active_buses = set(y_mask)
-        
-        nodes_to_remove = [n for n in G.nodes() if n not in active_buses]
-        G.remove_nodes_from(nodes_to_remove)
-    cycles = find_cycles(G)
-    disconnected_buses = find_disconnected_buses(G)
-    radial = len(cycles) == 0
-    connected = len(disconnected_buses) == 0 
-    
-    return radial, connected
-
-
-def count_switch_changes(net_a, net_b):
-    sa = net_a.switch[(net_a.switch.et=='l')]['closed']
-    sb = net_b.switch[(net_b.switch.et=='l')]['closed']
-    common = sa.index.intersection(sb.index)
-    return int((sa.loc[common] != sb.loc[common]).sum())
-
-def loss_improvement(net_before, net_after, include_trafos=True):
-    pp.runpp(net_before, enforce_q_lims=False)
-    pp.runpp(net_after,  enforce_q_lims=False)
-    def active_loss(net):
-        loss = net.res_line["pl_mw"].abs().sum()
-        if include_trafos and "res_trafo" in net:
-            loss += net.res_trafo["pl_mw"].abs().sum()
-        return float(loss)
-
-    l0 = active_loss(net_before)
-    l1 = active_loss(net_after)
-
-    return {
-        "loss_before":       l0,
-        "loss_after":        l1,
-        "loss_improvement":  100.0 * (l0 - l1) / l0 if l0 > 0 else np.nan
-    }
-
-
-
-def plot_grid(net, ax, title=""):
-    #G   = create_nxgraph(net, include_lines=True, include_switches=True)
-    G = build_nx_graph(net,include_lines=True, include_switches=True)
-    isolated = [n for n, d in G.degree() if d == 0]
-    
-    if not net.bus_geodata.empty:
-        pos = {int(b): (r.x, r.y) for b, r in net.bus_geodata.iterrows()}
-    else:
-        pos = nx.kamada_kawai_layout(G)
-
-    # Find disconnected buses and cycles
-    disconnected_buses = find_disconnected_buses(G)
-    cycle_edges = find_cycles(G)
-
-    # Separate edges by type
-    regular_edges = []
-    open_edges = []
-    cycle_edges_list = []
-    
-    for u, v, data in G.edges(data=True):
-        edge_tuple = (min(u,v), max(u,v))
-        if 'closed' in data and not data['closed']:
-            open_edges.append((u, v))
-        elif edge_tuple in cycle_edges:
-            cycle_edges_list.append((u, v))
-        else:
-            regular_edges.append((u, v))
-
-    # all edges / nodes
-    nx.draw_networkx_edges(G, pos, edgelist=regular_edges, edge_color="lightgrey", ax=ax, width=1.0)
-    nx.draw_networkx_nodes(G, pos, node_size=25, node_color="lightgrey", edgecolors="lightgrey", ax=ax)
-
-    nx.draw_networkx_edges(G, pos, edgelist=cycle_edges_list, edge_color="black", ax=ax, width=1.5, alpha=0.8)
-    nx.draw_networkx_edges(G, pos, edgelist=open_edges, edge_color="red", ax=ax, width=2.0)
-    
-    
-    # open switches
-    open_edges = [(u, v) for u, v, d in G.edges(data=True)
-              if not d.get("closed", True)]
-    if open_edges:
-        nx.draw_networkx_edges(G, pos, edgelist=open_edges,
-                               edge_color="red", width=2.0, ax=ax)
-        incident = {n for e in open_edges for n in e}
-        nx.draw_networkx_nodes(G, pos, nodelist=list(incident),
-                               node_size=75, node_color="red",
-                               edgecolors="black", linewidths=1.5, ax=ax)
-
-    nx.draw_networkx_nodes(G, pos, nodelist=list(disconnected_buses), node_size=80,
-                          node_color="black", edgecolors="black", linewidths=2, ax=ax)
-    
-    ax.set_title(title+ "open switches: " + str(len(open_edges)))
-    ax.axis("off")
-
-
-def plot_voltage_profile(voltage_data, ax, bus_labels=None, title="Voltage profile"):
-    voltage_data = np.asarray(voltage_data, dtype=float)
-    
-    num_phases = 0
-    if voltage_data.ndim > 1:
-        num_phases = voltage_data.shape[1]
-    elif voltage_data.ndim == 1 and voltage_data.size > 0 :
-        num_phases = 1 
-        voltage_data = voltage_data[:, np.newaxis] 
-    else: # Empty data
-        ax.text(0.5, 0.5, "No voltage data available", ha='center', va='center')
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlabel("Bus index / Label")
-        ax.set_ylabel("Voltage (p.u.)")
-        return
-
-    default_labels = ["Original", "Processed", "MST", "SOCP Optimized", "Original Optimized"]
-    phase_labels = default_labels[:num_phases]
-    if num_phases > len(default_labels):
-        phase_labels.extend([f"Snapshot {i+1}" for i in range(len(default_labels), num_phases)])
-
-    x_ticks = np.arange(voltage_data.shape[0])
-    for col in range(voltage_data.shape[1]):
-        ax.plot(x_ticks, voltage_data[:, col], label=phase_labels[col], marker='.', linestyle='-', markersize=4, linewidth=1.2)
-
-    ax.axhline(1.05, linestyle="--", linewidth=0.8, color="grey")
-    ax.axhline(0.95, linestyle="--", linewidth=0.8, color="grey")
-    
-    if bus_labels is not None and len(bus_labels) == len(x_ticks):
-        if len(x_ticks) > 20: 
-             step = len(x_ticks) // 10
-             ax.set_xticks(x_ticks[::step])
-             ax.set_xticklabels(bus_labels[::step], rotation=45, ha="right")
-        else:
-            ax.set_xticks(x_ticks)
-            ax.set_xticklabels(bus_labels, rotation=45, ha="right")
-    else:
-        ax.set_xlabel("Bus index")
-
-    ax.set_ylabel("Voltage (p.u.)")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
-    if voltage_data.shape[1] > 1 or len(phase_labels) == 1 : 
-        ax.legend(frameon=False)
-
-# def create_nxgraph(net, *, include_lines=True, include_switches=True):
-#     G = nx.Graph()
-#     # plain lines -----------------------------------------------------------
-#     if include_lines:
-#         for idx, ln in net.line.iterrows():
-#             G.add_edge(int(ln.from_bus), int(ln.to_bus),
-#                        element=int(idx),
-#                        closed=True)                   
-#     # line-switches ---------------------------------------------------------
-#     if include_switches:
-#         for s, sw in net.switch.query("et == 'l'").iterrows():
-#             ln   = net.line.loc[int(sw.element)]
-#             edge = (int(ln.from_bus), int(ln.to_bus))
-#             G.edges[edge]["closed"] = bool(sw.closed)
-#             G.edges[edge]["switch_id"] = int(s)      
-#     return G
-
-
-
-def visualize_network_states(snapshots, active_bus_mask, graph_id, output_dir=None, debug=False):
-    if output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    nets_to_visualize = []
-    labels = []
-    
-    snapshot_keys_ordered = ["original", "processed", "mst", "optimised_mst"]
-    if debug:
-        snapshot_keys_ordered.append("optimised_orig")
-
-    for key in snapshot_keys_ordered:
-        if key in snapshots and snapshots[key] is not None:
-            nets_to_visualize.append(snapshots[key])
-            labels.append(key.replace("_", " ").title())
-    
-    n_nets = len(nets_to_visualize)
-    if n_nets == 0:
-        return
-    
-    fig, axes = plt.subplots(1, n_nets + 1, figsize=(4 * (n_nets + 1), 5))
-    if n_nets == 0: 
-        axes = [axes]
-
-    common_ref_bus = None
-    for net in nets_to_visualize:
-        if hasattr(net, 'ext_grid') and not net.ext_grid.empty:
-            common_ref_bus = net.ext_grid.bus.iloc[0]
-            break
-    
-    # Get union of all bus indices to ensure consistent indexing
-    all_bus_indices = set()
-    for net in nets_to_visualize:
-        if hasattr(net, "bus"):
-            all_bus_indices.update(net.bus.index.tolist())
-    reference_bus_index = pd.Index(sorted(list(all_bus_indices)))
-    logger.debug(f"Reference bus index: {reference_bus_index}")
-   
-
-    aligned_voltage_data = []
-    for i, net in enumerate(nets_to_visualize):
-        try:
-            # Ensure power flow is solved with same reference
-            if common_ref_bus is not None and common_ref_bus in net.bus.index:
-                # Set consistent reference voltage
-                if hasattr(net, 'ext_grid') and not net.ext_grid.empty:
-                    net.ext_grid.loc[:, 'vm_pu'] = 1.0
-                    net.ext_grid.loc[:, 'va_degree'] = 0.0
-            
-            if not hasattr(net, 'res_bus') or net.res_bus.empty:
-                pp.runpp(net, enforce_q_lims=False, calculate_voltage_angles=False)
-        except Exception as e:
-            logger.warning(f"Power flow failed for {labels[i]}: {e}")
-
-        if hasattr(net, 'res_bus') and not net.res_bus.empty and 'vm_pu' in net.res_bus.columns:
-            current_voltages = net.res_bus.vm_pu.reindex(reference_bus_index, fill_value=np.nan)
-            aligned_voltage_data.append(current_voltages.values)
-        else:
-            aligned_voltage_data.append(np.full(len(reference_bus_index), np.nan))
-
-    
-    for i, (net, label) in enumerate(zip(nets_to_visualize, labels)):
-        current_ax = axes[i] if n_nets > 0 else axes 
-        plot_grid(net, current_ax, title=label)
-        
-        mask_for_check = None
-        if label.lower() == "original":
-            mask_for_check = None
-        elif hasattr(net, "bus") and not net.bus.empty and active_bus_mask is not None:
-            if isinstance(active_bus_mask, pd.Series):
-                 mask_for_check = active_bus_mask.reindex(net.bus.index, fill_value=False)
-            else: 
-                 mask_for_check = active_bus_mask
-
-        # Get detailed topology status
-        #status = get_network_topology_status(net, y_mask=mask_for_check)
-        
-        # Create status text
-        op_status = "r"# f"Op: R={status['operational']['radial']} C={status['operational']['connected']}"
-        topo_status = "r"#f"Topo: R={status['topological']['radial']} C={status['topological']['connected']}"
-        comp_info ="r"# f"Comp: {status['operational_components']}/{status['topological_components']}"
-        
-        current_ax.text(0.5, -0.12,
-                    f"{op_status}\n{topo_status}\n{comp_info}",
-                    transform=current_ax.transAxes,
-                    ha="center", va="top", fontsize=7)
-    
-    voltage_plot_ax = axes[n_nets] if n_nets > 0 else axes 
-    if aligned_voltage_data:
-        stacked_voltages = np.column_stack(aligned_voltage_data)
-        bus_labels_for_plot = [str(i) for i in reference_bus_index.tolist()]
-        plot_voltage_profile(stacked_voltages, voltage_plot_ax, bus_labels=bus_labels_for_plot, title="Voltage Profile")
-    else:
-        voltage_plot_ax.text(0.5, 0.5, "Voltage profile data not available.", ha='center', va='center')
-        voltage_plot_ax.set_title("Voltage Profile")
-        voltage_plot_ax.axis('off')
-
-    plt.tight_layout()
-    
-    if output_dir:
-        filename = output_dir / f"{graph_id}_network_states.png"
-        try:
-            plt.savefig(filename, bbox_inches='tight', dpi=300)
-        except Exception as e:
-            pass
-        plt.close(fig)
-    else:
-        plt.show()
-
-
-def store_snapshots(graph_id: str, root_folder: Path, logger, **nets,):
-    for phase, net in nets.items():
-        out_dir = root_folder / phase / "pandapower_networks"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        fname = out_dir / f"{graph_id}.json"         
-        with open(fname, "w") as fp:
-            fp.write(pp.to_json(net))
-
-        logger.info(f"[{graph_id}] snapshot '{phase}' saved → {fname}")
-
-
-def process_single_graph(graph_id, net_json, folder_path, toggles, vis_dir=None, lp_dir=None, logger=None, debug=False):
-    logger.debug(f"Processing graph {graph_id}")
-    logger = get_logger(f"graph.{graph_id}")
-    net_orig = pp.from_json_string(net_json)
-    try: 
-        pp.runpp(net_orig, enforce_q_lims=False)
-        if not net_orig.converged:
-            logger.warning(f"{graph_id}: PF on original net failed - skip")
-            return None
-    except LoadflowNotConverged:
-        logger.warning(f"{graph_id}: PF on original net failed - skip")
-        return None
-    
-    pdb.set_trace()
-    # Preprocess network to ensure connectivity
-    processed_net, active_bus_mask, viz_data = preprocess_network_for_optimization(net_orig, debug=debug, graph_id=graph_id, output_dir=vis_dir,logger =logger)
-    
-    if processed_net is None:
-        logger.warning(f"{graph_id}: Network preprocessing failed - cannot create connected component")
-        return None
-    
-    try:
-        pp.runpp(processed_net, enforce_q_lims=False)
-    except LoadflowNotConverged:
-        logger.warning(f"{graph_id}: PF on processed network failed - skip")
-        return None
-    pdb.set_trace()
-    # Apply MST reconfiguration
-    net_mst = alternative_mst_reconfigure(copy.deepcopy(processed_net), penalty=1.0, y_mask=active_bus_mask)
-    
-    pdb.set_trace()
-    # Check radiality and connectivity after MST
-    rad_conn_mst = is_radial_and_connected(net_mst, y_mask=active_bus_mask)
-    logger.info(f"{graph_id}: MST network is radial={rad_conn_mst[0]}, connected={rad_conn_mst[1]}")
-    logger.debug(f"   >> net_mst.bus.count = {len(net_mst.bus.index)}")
-    logger.debug(f"   >> active_bus_mask.count = {len(active_bus_mask)}")
-    logger.debug(f"   >> active_bus_mask.index  = {list(active_bus_mask.index[:10])}...")  # first few
-    try:
-        pp.runpp(net_mst, enforce_q_lims=False)
-    except LoadflowNotConverged:
-        logger.warning(f"{graph_id}: PF after MST did not converge – skip")
-        return None
-    
-    def align_mask_to_net(mask: pd.Series, net: pp.pandapowerNet) -> pd.Series:
-        # forces mask to exactly the net.bus.index
-        return mask.reindex(net.bus.index, fill_value=False).astype(bool)
-
-    # … then in process_single_graph:
-    mask_mst = align_mask_to_net(active_bus_mask, net_mst)
-
-    # Apply SOCP optimization
-    net_opt_mst, metrics_mst = apply_socp(
-        net_mst, 
-        graph_id + "_mst", 
-        toggles=toggles, 
-        logger=logger,
-        active_bus_mask=active_bus_mask,
-        lp_dir=lp_dir,
-        debug=debug
-    )
-    
-    flips_orig_to_mst = count_switch_changes(processed_net, net_mst)
-    flips_mst_to_opt = count_switch_changes(net_mst, net_opt_mst)
-    
-    metrics = {
-        "graph_id": graph_id,
-        "total_switches": processed_net.switch.shape[0],
-        "switches_changed_orig_to_mst": flips_orig_to_mst,
-        "switches_changed_mst_to_opt": flips_mst_to_opt,
-        "opt_time_mst": metrics_mst["opt_time"],
-        "loss_improvement_mst": metrics_mst["loss_improvement"],
-        "rad_mst": rad_conn_mst,
-        "rad_mst_opt": (metrics_mst["after_radial"], metrics_mst["after_connected"]),
-    }
-    
-    snapshots = {
-        "original": net_orig,
-        "processed": processed_net,
-        "mst": net_mst,
-        "optimised_mst": net_opt_mst,
-    }
-    
-    if debug:
-        try:
-            # Apply SOCP directly to the processed network 
-            net_opt_orig, metrics_orig = apply_socp(
-                processed_net,
-                graph_id + "_orig",
-                toggles=toggles,
-                logger=logger,
-                active_bus_mask=active_bus_mask,
-                lp_dir=lp_dir,
-                debug=debug
-            )
-        
-            flips_mst_vs_orig = count_switch_changes(net_opt_mst, net_opt_orig)
-            
-            metrics.update({
-                "opt_time_origPF": metrics_orig["opt_time"],
-                "switches_changed_orig_to_opt": metrics_orig["switches_changed"],
-                "state_diff_between_opts": flips_mst_vs_orig,
-                "loss_improvement_orig_opt": metrics_orig["loss_improvement"],
-                "rad_origPF_opt": (metrics_orig["after_radial"], metrics_orig["after_connected"])
-            })
-            snapshots["optimised_orig"] = net_opt_orig
-            logger.info(
-                f"{graph_id}: MST→OPT={flips_mst_to_opt} flips; origPF→OPT={metrics_orig['switches_changed']} flips; diff={flips_mst_vs_orig}"
-            )
-        except Exception as e:
-            logger.warning(f"{graph_id}: Error in original network optimization: {e}")
-            logger.debug(traceback.format_exc())
-    else:
-        logger.info(f"{graph_id}: MST only, MST→OPT={flips_mst_to_opt} flips")
-    
-    visualize_network_states(snapshots, active_bus_mask, graph_id, output_dir=vis_dir, debug=debug)
-    store_snapshots(graph_id, folder_path, logger, **snapshots)
-    
-    return metrics
-
 
 def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, lp_dir=None, debug=False):
     if logger is None:
@@ -895,8 +819,8 @@ def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, l
     
     # Calculate metrics
     flips = count_switch_changes(net_before_opt, net_opt)
-    rad_before = is_radial_and_connected(net_before_opt, y_mask=active_bus_mask)
-    rad_after = is_radial_and_connected(net_opt, y_mask=active_bus_mask)
+    rad_before = is_radial_and_connected(net_before_opt, include_switches=True) #y_mask=active_bus_mask)  
+    rad_after = is_radial_and_connected(net_opt, include_switches=True) #y_mask=active_bus_mask)
     loss_impr = None
     if pf_converged:
         loss_impr = loss_improvement(net_before_opt, net_opt)
@@ -925,19 +849,119 @@ def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, l
                 
     return net_opt, metrics
 
-def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False, serialize=False):
+def process_single_graph(graph_id, net_json, folder_path, toggles=None, vis_dir=None, lp_dir=None, logger=None, debug=False):
+    logger.info(f"Processing graph {graph_id}")
+    
+    # 1 load and run network -------------------------------------------------------------
+    net_orig = pp.from_json_string(net_json)
+    try: 
+        pp.runpp(net_orig, enforce_q_lims=False)
+        if not net_orig.converged:
+            logger.warning(f"{graph_id}: PF on original net failed - skip")
+            return None
+    except LoadflowNotConverged:
+        logger.warning(f"{graph_id}: PF on original net failed - skip")
+        return None
+    
+    # 2 Preprocess network -------------------------------------------------------------
+    processed_net, active_bus_mask,  = preprocess_network_for_optimization(net_orig, debug=debug, logger =logger)
+    try:
+        pp.runpp(processed_net, enforce_q_lims=False)
+    except LoadflowNotConverged:
+        logger.warning(f"{graph_id}: PF on processed network failed - skip")
+        return None
+
+    # 3 Check radiality and connectivity ---------------------------------------------
+    net_mst = alternative_mst_reconfigure(copy.deepcopy(processed_net), penalty=1.0, y_mask=active_bus_mask)
+
+    try:
+        pp.runpp(net_mst, enforce_q_lims=False)
+    except LoadflowNotConverged:
+        logger.warning(f"{graph_id}: PF on MST network failed - skip")
+        return None
+
+    # Apply SOCP optimization --------------------------------------------------------------
+    net_opt_mst, metrics_mst = apply_socp(
+        net_mst, 
+        graph_id + "_mst", 
+        toggles=toggles, 
+        logger=logger,
+        active_bus_mask=active_bus_mask,
+        lp_dir=lp_dir,
+        debug=debug
+    )
+    rad_conn_mst = is_radial_and_connected(net_mst, include_switches=True) #y_mask=active_bus_mask)
+    flips_orig_to_mst = count_switch_changes(processed_net, net_mst)
+    flips_mst_to_opt = count_switch_changes(net_mst, net_opt_mst)
+
+    metrics = {
+        "graph_id": graph_id,
+        "total_switches": processed_net.switch.shape[0],
+        "switches_changed_orig_to_mst": flips_orig_to_mst,
+        "switches_changed_mst_to_opt": flips_mst_to_opt,
+        "opt_time_mst": metrics_mst["opt_time"],
+        "loss_improvement_mst_opt": metrics_mst["loss_improvement"],
+        "rad_mst": rad_conn_mst,
+        "rad_mst_opt": (metrics_mst["after_radial"], metrics_mst["after_connected"]),
+    }
+
+    snapshots = {
+        "original": net_orig,
+        "processed": processed_net,
+        "mst": net_mst,
+        "optimised_mst": net_opt_mst,
+    }
+    if debug:
+        try:
+            # Apply SOCP directly to the processed network 
+            net_opt_orig, metrics_orig = apply_socp(
+                processed_net,
+                graph_id + "_orig",
+                toggles=toggles,
+                logger=logger,
+                active_bus_mask=active_bus_mask,
+                lp_dir=lp_dir,
+                debug=debug
+            )
+        
+            flips_mst_vs_orig = count_switch_changes(net_opt_mst, net_opt_orig)
+            
+            metrics.update({
+                "opt_time_origPF": metrics_orig["opt_time"],
+                "switches_changed_orig_to_opt": metrics_orig["switches_changed"],
+                "state_diff_between_opts": flips_mst_vs_orig,
+                "loss_improvement_orig_opt": metrics_orig["loss_improvement"],
+                "rad_origPF_opt": (metrics_orig["after_radial"], metrics_orig["after_connected"])
+            })
+            snapshots["optimised_orig"] = net_opt_orig
+            logger.info(
+                f"{graph_id}: MST→OPT={flips_mst_to_opt} flips; origPF→OPT={metrics_orig['switches_changed']} flips; diff={flips_mst_vs_orig}"
+            )
+        except Exception as e:
+            logger.warning(f"{graph_id}: Error in original network optimization: {e}")
+            logger.debug(traceback.format_exc())
+    else:
+        logger.info(f"{graph_id}: MST only, MST→OPT={flips_mst_to_opt} flips")
+    
+    visualize_network_states(snapshots, active_bus_mask, graph_id, output_dir=vis_dir, debug=debug)
+    #store_snapshots(graph_id, folder_path, logger, **snapshots)
+    
+    return metrics
+
+  
+def apply_optimization(folder_path, toggles=None, debug=False, serialize=False):
     folder_path = Path(folder_path)
-    root_logger = init_application_logging(method=method, debug=debug)
+    root_logger = init_application_logging(debug=debug)
     logger = get_logger("optimization")
-    logger.info(f"Starting {method} optimization on {folder_path}")
+    logger.info(f"Starting optimization on {folder_path}")
     logger.info(f"Toggles: {toggles}")
 
     if not serialize:
         init_worker_logging()
 
-
     _, pp_networks, features = load_graph_data_old(folder_path)
     items = [(gid, net) for gid, net in pp_networks.items()]
+    #print(items)
     metrics = []
     vis_dir = Path("data_generation")  / "logs" / "visualizations"
     lp_dir = Path("data_generation") / "logs" / "lp_files"
@@ -947,9 +971,11 @@ def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False, se
 
     if serialize:
             #--- Sequential execution ---
-        for gid, net_json in items:
+        for idx, (gid, net_json) in enumerate(items):
             res = process_single_graph(gid, net_json, folder_path , toggles,vis_dir,lp_dir,logger=logger, debug = debug)
             if res: metrics.append(res)
+            if idx ==0: 
+                break
     else: 
         # --- Parallel execution ---
         with ProcessPoolExecutor(
@@ -1026,6 +1052,7 @@ def apply_optimization(folder_path, method="SOCP", toggles=None, debug=False, se
         plt.tight_layout()
         plt.show()
    
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
@@ -1034,8 +1061,6 @@ if __name__ == "__main__":
                         #default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_14\test",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_2\test",
                         type=str, help='Dataset folder path')
-    parser.add_argument('--set', type=str, choices=['test', 'validation', 'train', '', 'all'], default='', help='Dataset set to process; leave empty for no subfolder')
-    parser.add_argument('--method', type=str, choices=['SOCP', 'MILP'], default='SOCP', help='Choose optimization method: SOCP or MILP')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
     parser.add_argument('--serialize', type=bool, default=True, help='Serialize the optimization results usefull for debugging')
     # SOCP toggles
@@ -1053,7 +1078,7 @@ if __name__ == "__main__":
     parser.add_argument("--write_files", action="store_true", help="If set, write out LP/MPS model files; otherwise skip for speed")
     args = parser.parse_args()
 
-    logger = init_application_logging(method=args.method, debug=args.debug)
+    logger = init_application_logging(debug=args.debug)
     
     SOCP_toggles = { 
         "include_voltage_drop_constraint": args.include_voltage_drop_constraint, 
@@ -1068,19 +1093,10 @@ if __name__ == "__main__":
         "all_lines_are_switches": args.all_lines_are_switches,
         "include_cone_constraint": args.include_cone_constraint 
     }
-    
 
     logger.info("Toggles for optimization:")
     logger.info(SOCP_toggles)
-    if args.set:
-        apply_optimization(Path(args.folder_path) / args.set, method=args.method, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
-    elif args.set == "all": 
-        for set_name in Path(args.folder_path).iterdir():
-            if set_name.is_dir():
-                print("\nProcessing set:", set_name)
-                apply_optimization(Path(args.folder_path) / set_name, method=args.method, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
-    else:
-        apply_optimization(args.folder_path, method=args.method, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
+    apply_optimization(args.folder_path, toggles=SOCP_toggles, debug=args.debug, serialize=args.serialize)
 
     print("\nGround truth generation complete!!!!")
 
