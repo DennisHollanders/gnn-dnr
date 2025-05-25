@@ -31,7 +31,11 @@ import string
 import simbench as sb
 from typing import List, Dict, Tuple, Any
 import time
+import tqdm
+tqdm.tqdm.monitor_interval = 0
+
 from tqdm import tqdm
+from tqdm import _monitor
 import sys 
 
 random.seed(0)
@@ -867,43 +871,73 @@ def transform_subgraphs(
     processed = {"total": 0, "successful": 0, "failed": 0}
     logger.info(" \n \n start transforming subgraphs")
 
-    pbar = tqdm(total=total_required, desc="Processing subgraphs", unit="subgraph")
-
-    # serialize execution
-    # for idx, subgraph in enumerate(raw_subgraphs):
-    #     _worker(subgraph, dfs, args, dist_callables, save_location, idx)
-
-    counter = itertools.count()
+    # Determine which subgraphs to process - SAMPLE WITH REPLACEMENT
+    if args.iterate_all:
+        # Process each subgraph exactly once
+        to_do = [(i, sg) for i, sg in enumerate(raw_subgraphs)]
+    else:
+        # Sample from available subgraphs to reach the target number
+        sampled_subgraphs = random.choices(raw_subgraphs, k=args.num_subgraphs)
+        to_do = [(i, sg) for i, sg in enumerate(sampled_subgraphs)]
+    
+    logger.info(f"Will process {len(to_do)} jobs from {len(raw_subgraphs)} available subgraphs")
+    
     # parallel execution
-    with ProcessPoolExecutor(max_workers=get_n_workers(), initializer=setup_logging, initargs=()) as ex:
-        while processed["total"] < total_required:
-            to_do = raw_subgraphs[: min(len(raw_subgraphs), total_required - processed["total"])]
+    processed = {"total": 0, "successful": 0, "failed": 0}
+    logger.info(" \n \n start transforming subgraphs")
+
+
+    # # serialize execution
+    # for idx, subgraph in enumerate(raw_subgraphs):
+    #     _worker(subgraph,  graph_id, sg, dfs, args, dist_callables, save_location)
+
+        # Determine which subgraphs to process
+    if args.iterate_all:
+        to_do = [(i, sg) for i, sg in enumerate(raw_subgraphs)]
+    else:
+        sampled_subgraphs = random.choices(raw_subgraphs, k=args.num_subgraphs)
+        to_do = [(i, sg) for i, sg in enumerate(sampled_subgraphs)]
+    _monitor.monitor.daemon = False
+
+    logger.info(f"Will process {len(to_do)} jobs from {len(raw_subgraphs)} available subgraphs")
+    pbar = tqdm(total=len(to_do), desc="Processing subgraphs", unit="subgraph")
+
+    # Enhanced parallel execution with timeout
+    try:
+        with ProcessPoolExecutor(max_workers=get_n_workers(), initializer=setup_logging, initargs=()) as ex:
+            # Submit all jobs
             futures = [
-                ex.submit(_worker,next(counter), sg, dfs, args, dist_callables, save_location)
-                for sg in to_do
+                ex.submit(_worker, graph_id, sg, dfs, args, dist_callables, save_location)
+                for graph_id, sg in to_do
             ]
-
-            for fut in as_completed(futures):
-                suc, fl = fut.result()
-                processed["successful"] += suc
-                processed["failed"]     += fl
-                processed["total"]      += (suc + fl)
-                pbar.update(suc + fl)
-    # with ProcessPoolExecutor(max_workers=get_n_workers(),
-    #                      initializer=setup_logging,
-    #                      initargs=()) as ex:
-
-    #     work_iter = ((gid, sg, dfs, args, dist_callables, save_location)
-    #                 for gid, sg in enumerate(raw_subgraphs))
-
-    #     for suc, fl in tqdm(ex.map(_worker, *zip(*work_iter)),
-    #                         total=len(raw_subgraphs),
-    #                         desc="Subgraphs", unit="sg"):
-    #         processed["successful"] += suc
-    #         processed["failed"]     += fl
-    #         processed["total"]      += (suc + fl)
-
-    pbar.close()
+            
+            # Process with timeout
+            for i, fut in enumerate(as_completed(futures)):
+                try:
+                    suc, fl = fut.result(timeout=180)  
+                    processed["successful"] += suc
+                    processed["failed"] += fl
+                    processed["total"] += (suc + fl)
+                    logger.debug(f"Job {i+1} completed: {suc} success, {fl} failed")
+                except concurrent.futures.TimeoutError:
+                    logger.warning(f"Job {i+1} timed out after 3 minutes")
+                    processed["failed"] += 1
+                    processed["total"] += 1
+                except Exception as e:
+                    logger.error(f"Job {i+1} failed: {e}")
+                    processed["failed"] += 1
+                    processed["total"] += 1
+                finally:
+                    pbar.update(1)
+                    
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted")
+        raise
+    finally:
+        pbar.close()
+    for bar in list(tqdm.tqdm._instances):
+        bar.close()
+    _monitor.monitor.join(timeout=1)
     logger.info(f"Finished: {processed}")
     return processed
 

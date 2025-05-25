@@ -448,12 +448,18 @@ def save_combined_data(dataset, set_name, base_dir):
                      (net.line.to_bus  ==b).any() or
                      ((net.switch.bus==b)&(net.switch.closed)).any())]
         print("still isolated:", remaining)
-        from pandapower.pf.run import _init_runpp
+        # run a normal pandapower power flow
+        pp.runpp(net,
+                initialization="dc",
+                calculate_voltage_angles=True)
 
-        # build the PPC and grab its branch‐bus counts
-        ppc, _ = _init_runpp(net, init="dc", calculate_voltage_angles=True)
-        isolated = [i for i, cnt in enumerate(ppc["branch_bus_count"]) if cnt == 0]
-        print("PPC buses with zero branches:", isolated)
+        # mark any isolated areas out of service (so net.isolated_buses is populated)
+        pp.set_isolated_areas_out_of_service(net, respect_switches=True)
+        pp.drop_out_of_service_elements(net)
+
+        # now net.isolated_buses contains the bus indices with no connected branches
+        isolated_buses = list(net._isolated_buses) if hasattr(net, "_isolated_buses") else []
+        print("Isolated buses:", isolated_buses)
         # Extract features
         node_feats = extract_node_features2(net, nx_graph) if nx_graph is not None else None
         edge_feats = extract_edge_features2(net, nx_graph) if nx_graph is not None else None

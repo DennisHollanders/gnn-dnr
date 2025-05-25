@@ -71,7 +71,7 @@ def parse_arguments():
     parser.add_argument('--iterate_all', action='store_true',
                         help='Iterate over all subgraphs')
     # if iterate_all == True:
-    parser.add_argument('--n_samples_per_graph', type=int, default=5,
+    parser.add_argument('--n_samples_per_graph', type=int, default=1,
                         help='Number of samples per subgraph')
     # if iteral_all == False:
     parser.add_argument('--num_subgraphs', type=int, default=10,
@@ -123,9 +123,9 @@ def parse_arguments():
                         help='Generate training data')
     parser.add_argument('--generate_test_val', default=False,
                         help='Generate test and validation sets')
-    parser.add_argument('--test_cases', type=int, default=10,
+    parser.add_argument('--test_cases', type=int, default=100,
                         help='Number of test cases to generate')
-    parser.add_argument('--val_cases', type=int, default=10,
+    parser.add_argument('--val_cases', type=int, default=100,
                         help='Number of validation cases to generate')
     parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.7, 1.3],
                         help='Range for load variation in test/val sets ')
