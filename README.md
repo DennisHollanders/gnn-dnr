@@ -1,6 +1,6 @@
 This repository contains the full pipeline for training a graph neural network to perform distribution network reconfiguration. -
 
-# Content
+## Content
 1. data_generation
           - create_dataset:
           - create_gt:
@@ -11,14 +11,21 @@ This repository contains the full pipeline for training a graph neural network t
 3. How to use
 4. Hardware used
 
-# 1. data_generation
+## 1. data_generation
 
-# 2. model_search
+### 1.1 create_dataset
 
-# 3. How to use
+### 1.2 create_gt
+
+## 2. model_search
+
+## 3. How to use
+
 - put required data in "data" folder
 - init poetry
 - poetry run python data_generation/create_dataset --....
 - poetry run python data_generation/create_gt --.... 
-
-# 4. Hardware used
+- set generated data as folders in config file
+- poetry run python model_search/main.py --config config-cvx.yaml
+  
+## 4. Hardware used
