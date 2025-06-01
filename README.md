@@ -1,9 +1,24 @@
-1. Initialize poetry env
-2. Add data zip to a data folder:
-          path structure: data\test_val_real__range-30-150_nTest-5_nVal-5_2732025_1
+This repository contains the full pipeline for training a graph neural network to perform distribution network reconfiguration. -
 
-3. poetry run python data_generation/define_ground_truth.py
-4. Optionally poetry run python data_generation/define_ground_truth.py --include_radiality_constraints True --use_spanning_tree_radiality False
+# Content
+1. data_generation
+          - create_dataset:
+          - create_gt:
+2. model_search
+          - models folder
+          - configs folder
+          - train/load_data/evaluation/preprocess_data
+3. How to use
+4. Hardware used
 
-Note:  I tried adding slack variables as mentioned yesterday, I however kept the original code in comments.
-Note: The last network fails due to some indexing errors you can ignore this, will check this myself later. 
+# 1. data_generation
+
+# 2. model_search
+
+# 3. How to use
+- put required data in "data" folder
+- init poetry
+- poetry run python data_generation/create_dataset --....
+- poetry run python data_generation/create_gt --.... 
+
+# 4. Hardware used
