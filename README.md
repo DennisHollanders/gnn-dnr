@@ -1,4 +1,6 @@
-This repository contains the full pipeline for training a graph neural network to perform distribution network reconfiguration. -
+This repository contains the full pipeline for training a graph neural network to perform distribution network reconfiguration. 
+
+**in development**
 
 ## Content
 1. data_generation
