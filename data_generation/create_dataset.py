@@ -1,4 +1,3 @@
-import pickle as pkl
 from pathlib import Path
 import geopandas as gpd
 import pandas as pd
@@ -7,31 +6,21 @@ import os
 import sys
 import argparse
 from datetime import datetime
-import glob
-import numpy as np
-import random
-from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
-from logging.handlers import QueueHandler, QueueListener
-from tqdm import tqdm
-import math
-from typing import List, Any, Dict, Tuple
-import re 
 
-# Get the path to the 'src' folder relative to the script
 SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if SRC_PATH not in sys.path:
     sys.path.append(SRC_PATH)
     
 from electrify_subgraph import transform_subgraphs
 from logger_setup import setup_logging
+from create_testval import generate_flexible_datasets
 
 def data_paths(data_dir):
     base = Path(data_dir)
     return {
         'cbs': base / "cbs_pc6_2023.gpkg",
         'buurt': base / 'buurt_to_postcodes.csv',
-        #'cons': base / "aggregated_kleinverbruik_with_opwek.csv",
         'std': base / "cleaned_energ_standard_energy_data.csv"
     }
 
@@ -54,7 +43,8 @@ def parse_arguments():
                         help='Data directory path (default: data)')
     parser.add_argument('--save_dir', type=str, default='data', 
                         help='Directory to save outputs ')
-    
+    parser.add_argument('--multiprocessing', default=False,
+                        help='Enable multiprocessing for data generation')
     # Subgraph options
     parser.add_argument('--subgraph_folder', type=str, 
     #default='filtered_complete_subgraphs_final.pkl',
@@ -104,29 +94,36 @@ def parse_arguments():
                         help='Unconstrain edge selection within layers')
     parser.add_argument("--min_distance_threshold", type=float, default=1,)
     
-    # Modification parameters
-    parser.add_argument('--consumption_std', type=float, default=1,
+    # # Modification parameters
+    parser.add_argument('--consumption_std', type=float, default=0.3,
                         help='Standard deviation for consumption variation (default: 0.4)')
-    parser.add_argument('--production_std', type=float, default=1,
+    parser.add_argument('--production_std', type=float, default=0.2,
                         help='Standard deviation for production variation (default: 0.6)')
-    parser.add_argument('--net_load_std', type=float, default=1,
+    parser.add_argument('--net_load_std', type=float, default=0.2,
                         help='Standard deviation for net load variation (default: 0.5)')
-    
+    parser.add_argument("--add_voltage_variation", type=bool, default=True,)
     # Save options
     parser.add_argument('--no_save', action='store_true',
                         help='Disable saving of outputs')
     parser.add_argument('--logging', default=True,
                         help='Enable logging')
+    parser.add_argument('--logging_level', type=str, default='INFO',
+                        help='Logging level (default: INFO)')
                         
     # Test and validation set options
-    parser.add_argument('--generate_train_data', default=True,
+    parser.add_argument('--generate_train_data', default=False,
                         help='Generate training data')
-    parser.add_argument('--generate_test_val', default=False,
+    parser.add_argument('--generate_test_val', default=True,
                         help='Generate test and validation sets')
-    parser.add_argument('--test_cases', type=int, default=100,
-                        help='Number of test cases to generate')
-    parser.add_argument('--val_cases', type=int, default=100,
-                        help='Number of validation cases to generate')
+    
+    parser.add_argument('--force_graph_topology', type=str, nargs='*', default=[],
+                        help='List of specific graph topologies to force include (e.g., ["pp_case33bw", "simbench_1-MV-rural--0-sw"])')
+    parser.add_argument('--dataset_names', type=list, nargs='+', default=["test", "validation"],
+                        help='Names of datasets to create (default: ["test", "validation"])')
+    parser.add_argument('--samples_per_dataset', type=list, nargs='+', default=[10, 10],
+                        help='Number of samples for each dataset (default: [10, 10])')
+
+
     parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.7, 1.3],
                         help='Range for load variation in test/val sets ')
     parser.add_argument('--bus_range_test_val', type=int, nargs=2, default=[30, 230],
@@ -135,6 +132,16 @@ def parse_arguments():
                         help='Require switches in test/val networks')
     parser.add_argument('--random_seed', type=int, default=0,
                         help='Random seed for reproducibility')
+
+    # Add new cable-based arguments
+    parser.add_argument('--max_line_loading', type=float, default=120.0,
+                        help='Maximum allowed line loading percentage (default: 110%)')
+    parser.add_argument('--target_loading_min', type=float, default=30.0,
+                        help='Minimum target line loading percentage (default: 60%)')
+    parser.add_argument('--target_loading_max', type=float, default=70.0,
+                        help='Maximum target line loading percentage (default: 90%)')
+    parser.add_argument('--dg_penetration', type=float, default=0.2,
+                        help='Distributed generation penetration rate (default: 0.2 = 20%)')
     
     return parser.parse_args()
 
@@ -142,17 +149,19 @@ def parse_arguments():
 def main():
     
     args = parse_arguments()
-
+    # Assert that dataset_names and samples_per_dataset have equal lengths
+    assert len(args.dataset_names) == len(args.samples_per_dataset), \
+        f"dataset_names length ({len(args.dataset_names)}) must equal samples_per_dataset length ({len(args.samples_per_dataset)})"
     print("Arguments:")
     for arg in vars(args):
         print(f"{arg}: {getattr(args, arg)}")
 
     #Initialize logging
-    queue_handler, queue_listener = setup_logging(run_tag=os.environ.get("SLURM_JOB_ID"))
+    queue_handler, queue_listener = setup_logging(run_tag="data_generation", level_file =args.logging_level,level_console=args.logging_level)
 
     # Start the listener in the main process
     queue_listener.start()
-    logger = logging.getLogger(__name__)  # Get logger AFTER setup
+    logger = logging.getLogger(__name__)  
 
     # timestamp & unique save path
     current_date = datetime.now()
@@ -169,8 +178,7 @@ def main():
     
     # Define distributions
     distributions = {
-        'n_switches': {'type': 'normal', 'mean': 5, 'std': 5, 'min': 3, 'max': 20, 'is_integer': True},
-        #'n_switches': {'type': 'normal', 'mean': 0, 'std': 0.0001, 'min': 0, 'max': 1, 'is_integer': True},
+        'n_switches': {'type': 'normal', 'mean': 5, 'std': 5, 'min': 3, 'max': 20, 'is_integer': True},\
         'n_busses': {'type': 'normal', 'mean': args.target_busses, 'std': 5, 'min': args.target_busses - args.bus_range, 
                     'max': args.target_busses + args.bus_range, 'is_integer': True},
         'layer_list': {'type': 'categorical', 'choices': [[0,1,2,3,4,5,6], [0,1,2,3,], [1,2,3], [0,2,3,4], [1,2],[0,1]], 
@@ -178,6 +186,8 @@ def main():
         "standard_cables": {'type': 'categorical', 'choices': ['standard_cable_1', 'standard_cable_2', 'standard_cable_3'], 
                            'weights': [0.3, 0.3, 0.3]},
         "n_slack_busses": {'type': 'normal', 'mean': 2, 'std': 1, 'min': 1, 'max': 4, 'is_integer': True},
+        "dg_penetration": {'type': 'beta', 'alpha': 2, 'beta': 5, 'min': 0.1, 'max': 0.4},
+        "slack_vm_set": {"type":"uniform", "min": 1.0, "max": 1.05},
     }
     
 
@@ -196,11 +206,15 @@ def main():
     if args.generate_test_val:
 
         logger.info("\nGenerating test and validation sets...")
-        from create_testval import generate_combined_dataset
-        
         # Generate test and validation sets
-        test_dataset, val_dataset = generate_combined_dataset(args, max_workers =4)
-    
+        datasets = generate_flexible_datasets(
+                args, 
+                dataset_names=args.dataset_names,
+                samples_per_dataset=args.samples_per_dataset,
+                force_topologies=args.force_graph_topology,
+                max_workers=4
+            )
+
     queue_listener.stop()
         
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import numpy as np
 import concurrent.futures
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 import pandapower as pp
 import pandapower.networks as pn
 import simbench as sb
@@ -19,9 +19,6 @@ import networkx as nx
 
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)
-# Create a cache directory for networks
-CACHE_DIR = Path("network_cache")
-CACHE_DIR.mkdir(exist_ok=True)
 
 # Global registry for SimBench timepoints
 network_timepoints: Dict[str, Dict[str, Any]] = {}
@@ -29,11 +26,10 @@ network_timepoints: Dict[str, Dict[str, Any]] = {}
 def has_switches(net):
     return hasattr(net, 'switch') and not net.switch.empty and len(net.switch) > 0
 
-def load_and_cache_network(network_id, cache_dir=CACHE_DIR):
-    # Create cache file path
-    cache_file = cache_dir / f"{network_id}.pkl"
-    
-    # Check if network is in cache
+def load_and_cache_network(network_id):
+
+    cache_file = Path("data_generation") / "network_cache" / f"{network_id}.pkl"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
     if cache_file.exists():
         try:
             start_time = time.time()
@@ -43,9 +39,7 @@ def load_and_cache_network(network_id, cache_dir=CACHE_DIR):
             return net
         except Exception as e:
             print(f"Error loading cached network {network_id}: {e}")
-            # Continue to load from source if cache loading fails
     
-    # Load from source
     try:
         start_time = time.time()
         if network_id.startswith('simbench_'):
@@ -60,7 +54,7 @@ def load_and_cache_network(network_id, cache_dir=CACHE_DIR):
         else:
             raise ValueError(f"Unknown network type: {network_id}")
             
-        # Cache the network for future use
+
         with open(cache_file, 'wb') as f:
             pkl.dump(net, f)
         
@@ -76,12 +70,10 @@ def check_network_suitability(network_id, bus_range=(25,50), require_switches=Tr
     
     if net is None:
         return False, None
-    
-    # Check bus count
+
     if not (bus_range[0] <= len(net.bus) <= bus_range[1]):
         return False, None
-    
-    # Check for switches if required
+
     if require_switches and not has_switches(net):
         return False, None
     
@@ -91,22 +83,19 @@ def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers
     start_time = time.time()
     candidate_networks = {}
     networks_without_switches = []
-    
-    # Get Simbench network codes
+
     list_of_codes = sb.collect_all_simbench_codes(mv_level="MV")
     mv_codes = [code for code in list_of_codes if "MV" in code]
-    
-    # Filter Simbench codes if require_switches
+
     if require_switches:
         mv_sw_codes = [code for code in mv_codes if "no_sw" not in code]
     else:
         mv_sw_codes = mv_codes
-    
-    # Get PandaPower network names
+   
     standard_cases = [
         "case4gs", "case5", "case6ww", "case9", "case14", "case30", 
         "caseIEEE30", "case33bw", "case39", "case57", "case89pegase", 
-        "case118", "case145"
+        "case118", "case145", "case300", "iceland"
     ]
     
     # Create network IDs for all potential candidates
@@ -114,11 +103,9 @@ def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers
     pp_ids = [f"pp_{case}" for case in standard_cases]
     all_network_ids = simbench_ids + pp_ids
     
-    print(f"Checking {len(all_network_ids)} potential networks...")
-    
-    # Use parallel processing to check network suitability
+    logger.info(f"Checking {len(all_network_ids)} potential networks...")
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create a dictionary of futures mapped to network IDs
         future_to_id = {
             executor.submit(check_network_suitability, 
                            network_id, 
@@ -135,24 +122,23 @@ def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers
                     bus_count = len(net.bus)
                     switch_count = len(net.switch) if hasattr(net, 'switch') else 0
                     candidate_networks[network_id] = net
-                    print(f"Added network {network_id} with {bus_count} buses and {switch_count} switches")
+                    logger.info(f"Added network {network_id} with {bus_count} buses and {switch_count} switches")
                 elif require_switches and net is not None and not has_switches(net):
                     networks_without_switches.append(network_id)
             except Exception as e:
-                print(f"Error processing {network_id}: {e}")
+                logger.info(f"Error processing {network_id}: {e}")
     
-    print(f"\nFound {len(candidate_networks)} valid networks matching criteria in {time.time() - start_time:.2f}s")
+    logger.info(f"\nFound {len(candidate_networks)} valid networks matching criteria in {time.time() - start_time:.2f}s")
     if require_switches and networks_without_switches:
-        print(f"Skipped {len(networks_without_switches)} networks without switches")
+        logger.info(f"Skipped {len(networks_without_switches)} networks without switches")
     
     return candidate_networks
 
 def apply_random_load_variations(net, load_variation_range=(0.5, 1.51)):
     """Apply random load variations to a network"""
-    # Create a deep copy to avoid modifying the original
+
     net_case = copy.deepcopy(net)
-    
-    # Apply random load variations
+
     for idx in net_case.load.index:
         factor = np.random.uniform(load_variation_range[0], load_variation_range[1])
         net_case.load.at[idx, "p_mw"] *= factor
@@ -164,57 +150,124 @@ network_timepoints = {}
 
 def apply_profile_timepoint(net, profiles, time_step):
     for elm_param in profiles.keys():
-        if profiles[elm_param].shape[1]:  # Check if there's any data
-            elm = elm_param[0]  # Element type (e.g., 'load', 'sgen')
-            param = elm_param[1]  # Parameter name (e.g., 'p_mw', 'q_mvar')
+        if profiles[elm_param].shape[1]:
+            elm = elm_param[0]  
+            param = elm_param[1] 
             net[elm].loc[:, param] = profiles[elm_param].loc[time_step]
     return net
 
 
-def generate_combined_dataset(
-    args,
-    max_workers: int = 4
-) -> Tuple[Dict[str,Any], Dict[str,Any]]:
-    """Generate test/validation datasets, save them, and return them."""
+def generate_flexible_datasets(args,dataset_names: List[str],samples_per_dataset: List[int],
+    force_topologies: List[str] = None,max_workers: int = 4) -> Dict[str, Dict[str, Any]]:
+
     start = time.time()
     random.seed(args.random_seed)
     np.random.seed(args.random_seed)
+    
+    if force_topologies is None:
+        force_topologies = []
 
     candidates = get_candidate_networks(
-        bus_range= args.bus_range_test_val,
+        bus_range=args.bus_range_test_val,
         require_switches=args.require_switches,
         max_workers=max_workers
     )
+    
     if not candidates:
         raise ValueError("No suitable networks found.")
 
-    def allocate(total: int, tag: str):
+    available_forced = []
+    for topology in force_topologies:
+        if topology in candidates:
+            available_forced.append(topology)
+        else:
+            logger.warning(f"Forced topology '{topology}' not found in candidates. Skipping.")
+
+    forced_cases = []
+    for i, topology in enumerate(available_forced):
+        net = candidates[topology]
+        dataset_tag = dataset_names[0] if dataset_names else "dataset"
+        name, data = create_network_case(topology, net, dataset_tag, i, args.load_variation_range)
+        if name:
+            forced_cases.append((name, data, topology))
+    
+    logger.info(f"Created {len(forced_cases)} forced topology cases from {len(available_forced)} available topologies")
+
+    def allocate_dataset(dataset_name: str, target_samples: int, forced_cases_for_dataset: List = None):
+        """Allocate samples for a single dataset"""
+        if forced_cases_for_dataset is None:
+            forced_cases_for_dataset = []
+        
         counts = {k: 0 for k in candidates}
-        ds: Dict[str,Any] = {}
-        while len(ds) < total:
-            for key, net in candidates.items():
-                if len(ds) >= total:
+        ds: Dict[str, Any] = {}
+        used_topologies = set()
+        
+    
+        for name_forced, data_forced, topology in forced_cases_for_dataset:
+            ds[name_forced] = data_forced
+            used_topologies.add(topology)
+
+        remaining_candidates = {k: v for k, v in candidates.items() if k not in used_topologies}
+        
+        while len(ds) < target_samples:
+            if not remaining_candidates:
+                logger.warning(f"Ran out of unique topologies for {dataset_name}. Generated {len(ds)}/{target_samples} samples.")
+                break
+                
+            for key, net in remaining_candidates.items():
+                if len(ds) >= target_samples:
                     break
+                    
                 idx = counts[key]
-                name, data = create_network_case(key, net, tag, idx, args.load_variation_range)
-                if name:
+                name, data = create_network_case(key, net, dataset_name, idx, args.load_variation_range)
+                if name and name not in ds:
                     ds[name] = data
                     counts[key] += 1
+                    if key in remaining_candidates:
+                        del remaining_candidates[key]
+                    break
+        
         return ds
 
-    test_ds = allocate(args.test_cases, 'test')
-    val_ds  = allocate(args.val_cases,  'val')
+    # Generate datasets
+    all_datasets = {}
+    
+    for i, (dataset_name, target_samples) in enumerate(zip(dataset_names, samples_per_dataset)):
+        dataset_forced_cases = forced_cases if i == 0 else []
 
-    logger.info(f"Generated {len(test_ds)} test and {len(val_ds)} validation in {time.time()-start:.1f}s")
+        adjusted_target = target_samples
+        if dataset_forced_cases:
+            adjusted_target = max(0, target_samples - len(dataset_forced_cases))
+        
+        dataset = allocate_dataset(dataset_name, adjusted_target, dataset_forced_cases)
+        all_datasets[dataset_name] = dataset
+        
+        logger.info(f"Generated {len(dataset)} samples for {dataset_name} dataset (target: {target_samples})")
 
-    # versioned path
+    if len(force_topologies) > 0 and len(dataset_names) > 1:
+        if len(available_forced) > 0:
+            logger.info(f"Forced topologies were only added to the first dataset ('{dataset_names[0]}')")
+        
+        unfilled_datasets = []
+        for i, (dataset_name, target_samples) in enumerate(zip(dataset_names, samples_per_dataset)):
+            if i > 0 and len(all_datasets[dataset_name]) < target_samples:
+                unfilled_datasets.append(dataset_name)
+        
+        if unfilled_datasets:
+            logger.warning(f"Unable to fully create datasets: {unfilled_datasets} due to topology constraints")
+
+    # Save datasets
     now = datetime.now()
     min_bus_range = args.bus_range_test_val[0]
     max_bus_range = args.bus_range_test_val[1]
     bstr = f"{min_bus_range}-{max_bus_range}"
-    base_name = f"test_val_real__range-{bstr}_nTest-{args.test_cases}_nVal-{args.val_cases}_{now.day}{now.month}{now.year}"
+    
+    # Create base name with dataset info
+    dataset_info = "_".join([f"{name}-{count}" for name, count in zip(dataset_names, samples_per_dataset)])
+    base_name = f"flexible_datasets__range-{bstr}_{dataset_info}_{now.day}{now.month}{now.year}"
     base_abs = os.path.abspath(args.data_dir)
-    # find sequence
+    
+    # Find sequence
     pattern = os.path.join(base_abs, base_name + '_*')
     existing = glob.glob(pattern)
     seq = 1
@@ -224,119 +277,84 @@ def generate_combined_dataset(
             seq = max(nums) + 1
     save_path = os.path.join(base_abs, f"{base_name}_{seq}")
 
-    save_dataset(test_ds, val_ds,args,base_path=save_path )
+    base_path = Path(save_path)
+    os.makedirs(base_path, exist_ok=True)
+    
+    # Save metadata
+    with open(os.path.join(base_path, 'metadata.txt'), 'w') as f:
+        f.write(f"Created: {now}\n")
+        f.write(f"Bus range: {args.bus_range_test_val}\n")
+        f.write(f"Forced topologies: {force_topologies}\n")
+        for name, samples in zip(dataset_names, samples_per_dataset):
+            actual_count = len(all_datasets[name])
+            f.write(f"{name}: {actual_count}/{samples}\n")
+    
+    # Save each dataset
+    for dataset_name, dataset_data in all_datasets.items():
+        save_combined_data(dataset_data, dataset_name, base_path)
+    
+    logger.info(f"All datasets saved at {base_path}")
+    logger.info(f"Generated datasets in {time.time()-start:.1f}s")
 
-    return test_ds, val_ds
-
-def save_test_data(test_dataset, val_dataset, args):  
-    # Format bus range as a string
-    current_date = datetime.now()
-    bus_range_str = f"{args.bus_range_test_val[0]}-{args.bus_range_test_val[1]}"
+    return all_datasets
+def save_combined_data(dataset, set_name, base_dir):
+    pp_dir = base_dir / set_name / "pandapower_networks"
+    os.makedirs(pp_dir, exist_ok=True)
+    for case_name, data in dataset.items():
+        net = data["network"]
+        pp_file = os.path.join(pp_dir, f"{case_name}.json")
+        with open(pp_file, "w") as f:
+            json.dump(pp.to_json(net), f)
     
-    day, month, year = current_date.day, current_date.month, current_date.year
-    base_name = f"test_val_real__range-{bus_range_str}_nTest-{args.test_cases}_nVal-{args.val_cases}_{day}{month}{year}"
-        
-    # Find existing datasets with the same pattern to determine sequence number
-    search_pattern = f"{base_name}_*"
-    base_path = os.path.abspath(args.data_dir)
-    existing_dirs = glob.glob(os.path.join(base_path, search_pattern))
-        
-    if not existing_dirs:
-        sequence_num = 1
-    else:
-        seq_nums = []
-        for dir_path in existing_dirs:
-            try:
-                dir_name = os.path.basename(dir_path)
-                seq_num = int(dir_name.split('_')[-1])
-                seq_nums.append(seq_num)
-            except (ValueError, IndexError):
-                continue
-        sequence_num = max(seq_nums) + 1 if seq_nums else 1
-    
-    # Create the directory name with sequence number
-    dataset_dir = f"{base_name}_{sequence_num}"
-    test_val_save_location = os.path.join(base_path, dataset_dir)
-    
-    print(f"Creating test/validation dataset at: {test_val_save_location}")
-    print(f"Test set size: {len(test_dataset)}")
-    print(f"Validation set size: {len(val_dataset)}")
-    
-    # Save datasets
-    save_combined_data(test_dataset, "test","original", test_val_save_location)
-    save_combined_data(val_dataset, "validation", "original",  test_val_save_location)
-    
-    print(f"Test and validation datasets saved successfully at {test_val_save_location}")
-    
-    return transform_stats
-
-
+    logger.info(f"Saved {len(dataset)} {set_name} cases individually to {base_dir}")
 
 def create_network_case(network_id, net, case_type, case_idx, load_variation_range=(0.5, 1.51)):
     """Create a single network case using SimBench profiles when available"""
     global network_timepoints
     
     try:
-        # Create a deep copy to avoid modifying the original
         net_case = copy.deepcopy(net)
         used_profile = False
         selected_timepoint = None
-        
-        # Check if this is a SimBench network that might have profiles
         if network_id.startswith('simbench_'):
             try:
-                
-                # Try to get profiles from the network - this is the correct approach based on the notebook
-                try:
-                    # Get all available profiles for the network
-                    profiles = sb.get_absolute_values(net_case, profiles_instead_of_study_cases=True)
+                # Get all available profiles for the network
+                profiles = sb.get_absolute_values(net_case, profiles_instead_of_study_cases=True)
                     
-                    # Check if we've initialized timepoints for this network
-                    if network_id not in network_timepoints:
-                        # Determine available timepoints - these are the indices of the profiles
-                        available_timesteps = list(range(len(profiles[list(profiles.keys())[0]])))
-                        network_timepoints[network_id] = {
-                            'timepoints': available_timesteps,
-                            'used': set()
-                        }
-                        print(f"Found {len(available_timesteps)} timepoints for {network_id}")
+                # Check if we've initialized timepoints for this network
+                if network_id not in network_timepoints:
+                    # Determine available timepoints - these are the indices of the profiles
+                    available_timesteps = list(range(len(profiles[list(profiles.keys())[0]])))
+                    network_timepoints[network_id] = {
+                        'timepoints': available_timesteps,
+                        'used': set()
+                    }
+                    logger.debug(f"Found {len(available_timesteps)} timepoints for {network_id}")
                     
-                    # Get unused timepoints
-                    available = [tp for tp in network_timepoints[network_id]['timepoints'] 
-                                if tp not in network_timepoints[network_id]['used']]
+                # Get unused timepoints
+                available = [tp for tp in network_timepoints[network_id]['timepoints'] 
+                            if tp not in network_timepoints[network_id]['used']]
                     
-                    if available:
-                        # Select a random unused timepoint
-                        selected_timepoint = random.choice(available)
-                        network_timepoints[network_id]['used'].add(selected_timepoint)
-                        
-                        # Apply the timepoint to the network - this is the correct way
-                        apply_profile_timepoint(net_case, profiles, selected_timepoint)
-                        
-                        print(f"Successfully applied SimBench profile timepoint {selected_timepoint} to {network_id}")
-                        used_profile = True
-                    else:
-                        print(f"All timepoints used for {network_id}, resetting timepoint tracking")
-                        # Reset used timepoints to allow reuse
-                        network_timepoints[network_id]['used'] = set()
-                        
-                        # Try again with a timepoint
-                        selected_timepoint = random.choice(network_timepoints[network_id]['timepoints'])
-                        network_timepoints[network_id]['used'].add(selected_timepoint)
-                        
-                        apply_profile_timepoint(net_case, profiles, selected_timepoint)
-                        print(f"Applied reused timepoint {selected_timepoint} to {network_id}")
-                        used_profile = True
-                        
-                except Exception as e:
-                    print(f"Error accessing SimBench profiles: {e}")
-                    # Fall back to random variations if profiles don't work
+                if available:
+                    # Select a random unused timepoint
+                    selected_timepoint = random.choice(available)
+                    network_timepoints[network_id]['used'].add(selected_timepoint)
+                    
+                    # Apply the timepoint to the network - this is the correct way
+                    net_case = apply_profile_timepoint(net_case, profiles, selected_timepoint)
+                    
+                    logger.info(f"Successfully applied SimBench profile timepoint {selected_timepoint} to {network_id}")
+                    used_profile = True
+                else:
+                    logger.info("all available timepoints used applying random variation to exsisting timepoints")
+                    selected_timepoint = random.choice(network_timepoints[network_id]["used"])
+                    net_case = apply_profile_timepoint(net_case, profiles, selected_timepoint)
                     net_case = apply_random_load_variations(net_case, load_variation_range)
+
             except Exception as e:
-                print(f"Error in SimBench processing: {e}")
+                logger.info(f"Error accessing SimBench profiles: {e}")
                 net_case = apply_random_load_variations(net_case, load_variation_range)
         else:
-            # For non-SimBench networks, always use random variations
             net_case = apply_random_load_variations(net_case, load_variation_range)
 
         G_nx = top.create_nxgraph(net_case, respect_switches=False)
@@ -344,14 +362,14 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
 
         # pick the largest
         largest = max(components, key=len)
-        print(f"[DEBUG] keeping largest component: {len(largest)} buses of {G_nx.number_of_nodes()}")
+        logger.debug(f"[DEBUG] keeping largest component: {len(largest)} buses of {G_nx.number_of_nodes()}")
         
         # now mask your net to that
         subnet = pp.select_subnet(net_case, buses=list(largest), include_switch_buses=True, keep_everything_else =True)
         
         nx_graph_subnet = top.create_nxgraph(subnet, respect_switches=True)
         node_count = len(subnet.bus)
-        print(f"[DEBUG] amount of nodes of created subnet: {node_count}")
+        logger.debug(f"[DEBUG] amount of nodes of created subnet: {node_count}")
         # Create case name - include timepoint in name if one was used
         if selected_timepoint is not None and used_profile:
             case_name = f"{network_id}_{case_type}_{case_idx}_ts{selected_timepoint}_n{node_count}"
@@ -359,142 +377,14 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
             case_name = f"{network_id}_{case_type}_{case_idx}_n{node_count}"
 
         switch_count = len(subnet.switch) if hasattr(subnet, 'switch') else 0
-        print(f"Added {case_type} case {case_name} with {switch_count} switches")
+        logger.debug(f"Added {case_type} case {case_name} with {switch_count} switches")
 
         return case_name, {"network": subnet, "nx_graph": nx_graph_subnet}
     except Exception as e:
-        print(f"Failed to create case for {network_id}: {e}")
+        logger.info(f"Failed to create case for {network_id}: {e}")
         return None, None
 
 def reset_timepoints():
-    """Reset the global registry of timepoints"""
     global network_timepoints
     network_timepoints = {}
 
-def extract_node_features2(net, nx_graph):
-    """Extract node features from the power grid network."""
-    nx_to_pp_bus_map = net.get("nx_to_pp_bus_map", {node: idx for idx, node in enumerate(net.bus.index)})
-    node_features = {}
-    for node in nx_graph.nodes:
-        pp_bus_idx = nx_to_pp_bus_map.get(node, node)
-        node_features[node] = {
-            "p": net.res_bus.p_mw.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None,
-            "q": net.res_bus.q_mvar.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None,
-            "v": net.res_bus.vm_pu.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None,
-            "theta": net.res_bus.va_degree.at[pp_bus_idx] if pp_bus_idx in net.res_bus.index else None
-        }
-    return node_features
-
-def extract_edge_features2(net, nx_graph):
-    """Extract edge features from the power grid network."""
-    nx_to_pp_bus_map = net.get("nx_to_pp_bus_map", {node: idx for idx, node in enumerate(net.bus.index)})
-    edge_features = {}
-    for idx, edge in enumerate(nx_graph.edges):
-        u, v = edge[:2]
-        pp_from_bus = nx_to_pp_bus_map.get(u, u)
-        pp_to_bus = nx_to_pp_bus_map.get(v, v)
-        matching_lines = net.line[(net.line.from_bus == pp_from_bus) & (net.line.to_bus == pp_to_bus)]
-        if matching_lines.empty:
-            continue
-        line_idx = matching_lines.index[0]
-        R = matching_lines.r_ohm_per_km.iloc[0]
-        X = matching_lines.x_ohm_per_km.iloc[0]
-        switch_status = int(net.switch[(net.switch.bus == pp_from_bus) & (net.switch.element == pp_to_bus)].closed.any())
-        edge_features[(u, v)] = {
-            "edge_idx": idx,
-            "line_idx": line_idx,
-            "R": R,
-            "X": X,
-            "switch_state": switch_status,
-        }
-    return edge_features
-
-def save_combined_data(dataset, set_name, base_dir):
-    """Save combined dataset to disk."""
-    # Create all required directories
-
-
-    nx_dir =  base_dir /set_name / "networkx_graphs"
-    pp_dir = base_dir / set_name / "pandapower_networks"
-    feat_dir = base_dir / set_name / "graph_features"
-    
-    for directory in [nx_dir, pp_dir, feat_dir]:
-        os.makedirs(directory, exist_ok=True)
-    
-    # Process each case separately
-    for case_name, data in dataset.items():
-        net = data["network"]
-        nx_graph = data["nx_graph"]
-
-        # Run power flow analysis
-        net.switch["closed"] = True
-        
-        try:
-            pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
-                    initialization="dc", calculate_voltage_angles=True)
-        except Exception as e:
-            print(f"Power flow did not converge for {case_name}: {e}")
-        pp.set_isolated_areas_out_of_service(net, respect_switches=True)
-        pp.drop_out_of_service_elements(net)
-        print("second run")
-        try:
-            pp.runpp(net, max_iteration=100, v_debug=False, run_control=True, 
-                    initialization="dc", calculate_voltage_angles=True)
-        except Exception as e:
-            print(f"Power flow did not converge for {case_name}: {e}")
-        print("second run done")
-        remaining = [b for b in net.bus.index
-             if not ((net.line.from_bus==b).any() or
-                     (net.line.to_bus  ==b).any() or
-                     ((net.switch.bus==b)&(net.switch.closed)).any())]
-        print("still isolated:", remaining)
-        # run a normal pandapower power flow
-        pp.runpp(net,
-                initialization="dc",
-                calculate_voltage_angles=True)
-
-        # mark any isolated areas out of service (so net.isolated_buses is populated)
-        pp.set_isolated_areas_out_of_service(net, respect_switches=True)
-        pp.drop_out_of_service_elements(net)
-
-        # now net.isolated_buses contains the bus indices with no connected branches
-        isolated_buses = list(net._isolated_buses) if hasattr(net, "_isolated_buses") else []
-        print("Isolated buses:", isolated_buses)
-        # Extract features
-        node_feats = extract_node_features2(net, nx_graph) if nx_graph is not None else None
-        edge_feats = extract_edge_features2(net, nx_graph) if nx_graph is not None else None
-        features = {"node_features": node_feats, "edge_features": edge_feats}
-            
-        # Save each graph separately
-        # 1. NetworkX graph
-        nx_file = os.path.join(nx_dir, f"{case_name}.pkl")
-        with open(nx_file, "wb") as f:
-            pkl.dump(nx_graph, f)
-            
-        # 2. PandaPower network
-        pp_file = os.path.join(pp_dir, f"{case_name}.json")
-        with open(pp_file, "w") as f:
-            json.dump(pp.to_json(net), f)
-            
-        # 3. Features
-        feat_file = os.path.join(feat_dir, f"{case_name}.pkl")
-        with open(feat_file, "wb") as f:
-            pkl.dump(features, f)
-    
-    print(f"Saved {len(dataset)} {set_name} cases individually to {base_dir}")
-
-def save_dataset(test_ds: Dict[str,Any],val_ds: Dict[str,Any],args, base_path: str,) -> str:
-    now = datetime.now()
-    day, month, year = now.day, now.month, now.year
-    min_bus_range = args.bus_range_test_val[0]
-    max_bus_range = args.bus_range_test_val[1]
-    bstr = f"{min_bus_range}-{max_bus_range}"
-    #base_name = f"test_val_real__range-{bstr}_nTest-{args.test_cases}_nVal-{args.val_cases}_{day}{month}{year}"
-    base_path = Path(base_path) 
-    os.makedirs(base_path, exist_ok=True)
-    with open(os.path.join(base_path, 'metadata.txt'), 'w') as f:
-        f.write(f"Created: {now}\nBus range: {args.bus_range}\nTest: {len(test_ds)}/{args.test_cases}\nVal: {len(val_ds)}/{args.val_cases}\n")
-    save_combined_data(test_ds, 'test', base_path)
-    save_combined_data(val_ds, 'validation', base_path)
-    logger.info(f"Dataset saved at {base_path}")
-    return base_path

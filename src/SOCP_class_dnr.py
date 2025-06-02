@@ -1,10 +1,12 @@
 from typing import Dict, Any, Optional, List
 import time
+from defusedxml import DTDForbidden
 import numpy as np
 import pandas as pd
 import logging
 import networkx as nx
 import matplotlib.pyplot as plt
+import math
 import pandapower as pp
 from pathlib import Path
 import os 
@@ -14,6 +16,7 @@ from pyomo.environ import (
     ConcreteModel, Set, Param, Var, Constraint, NonNegativeReals, Reals,
     Binary, Objective, Expression, minimize, Suffix, value as pyo_val,
 )
+
 from pyomo.opt import SolverFactory, check_optimal_termination
 from pyomo.util.model_size import build_model_size_report
 from pint import UnitRegistry
@@ -35,12 +38,15 @@ class SOCP_class:
                  logger: Optional[logging.Logger] = None,
                  switch_penalty: float = 0.0001,                     #0.001
                  slack_penalty: float = 0.1,
+                 voltage_slack_penalty = 0.1,
                  load_shed_penalty: float = 100,
                  toggles: Optional[Dict[str, bool]] = None,
                  debug_level= 0,
                  active_bus_mask: Optional[pd.Series] = None) -> None:
         self.voltage_bigM_factor =1
         self.bigM_factor = 1
+
+        
 
         self.net = net
         self.id = graph_id or "unnamed"
@@ -62,6 +68,7 @@ class SOCP_class:
         self.logger.info(f"SOCP toggles: {self.toggles}")
         self.switch_penalty = switch_penalty
         self.slack_penalty = slack_penalty
+        self.voltage_slack_penalty = voltage_slack_penalty
         self.load_shed_penalty = load_shed_penalty
         self.num_switches_changed = None
 
@@ -120,9 +127,15 @@ class SOCP_class:
         self.bus_df = self.net.bus.copy()
 
         # ------------------------------------------------ bus table
-        self.bus_df["v_base_V"] = (self.bus_df.vn_kv * 1e3) 
-        self.v_base_V = self.bus_df.v_base_V.to_dict()
-
+        self.bus_df["v_base_V_ll"] = (self.bus_df.vn_kv * 1e3)
+        
+        # Line-to-neutral voltage base (for impedance calculations)
+        self.bus_df["v_base_V_ln"] = (self.bus_df.vn_kv * 1e3) / math.sqrt(3)
+        self.v_base_V = self.bus_df.v_base_V_ln.to_dict()
+        
+        # Store both for reference
+        self.v_base_V_ll = self.bus_df.v_base_V_ll.to_dict()
+        self.v_base_V_ln = self.bus_df.v_base_V_ln.to_dict()
         # ------------------------------------------------ line table
         line = self.net.line.copy()
         # Ω values
@@ -132,11 +145,11 @@ class SOCP_class:
         # per-unit impedances 
         def _rz_pu(row):
             # Z_base = V_base² / S_base   
-            Z_base = (self.v_base_V[row.from_bus] ** 2) / self.S_base_VA
+            Z_base = (self.v_base_V_ln[row.from_bus] ** 2) / self.S_base_VA
             return row.r_ohm / Z_base
 
         def _xz_pu(row) -> float:
-            Z_base = (self.v_base_V[row.from_bus] ** 2) / self.S_base_VA
+            Z_base = (self.v_base_V_ln[row.from_bus] ** 2) / self.S_base_VA
             return row.x_ohm / Z_base
 
         line["r_pu"] = line.apply(_rz_pu, axis=1)
@@ -181,13 +194,14 @@ class SOCP_class:
         self.bigM = {}
         for l_idx, row in self.line_df.iterrows(): 
             if 'max_i_ka' in row and pd.notna(row.max_i_ka) and row.max_i_ka > 0:
-                v_ln_kv = self.bus_df.loc[row.from_bus, 'vn_kv'] 
-                s_max_mva_thermal = np.sqrt(3) * v_ln_kv * row.max_i_ka # 
+                # Use line-to-line voltage for 3-phase apparent power (this part was correct)
+                v_ll_kv = self.bus_df.loc[row.from_bus, 'vn_kv'] 
+                s_max_mva_thermal = math.sqrt(3) * v_ll_kv * row.max_i_ka
                 s_max_pu = s_max_mva_thermal / (self.S_base_VA / 1e6) 
                 self.bigM[l_idx] = s_max_pu 
             else:
                 max_total_system_load_pu = sum(abs(p) for p in self.bus_p_inj.values()) 
-                self.bigM[l_idx] = max_total_system_load_pu if max_total_system_load_pu > 0 else 10.0 
+                self.bigM[l_idx] = max_total_system_load_pu if max_total_system_load_pu > 0 else 10.0
         self.logger.info(f"bigM values: max {max(self.bigM.values()):.3f}, min {min(self.bigM.values()):.3f}")
         self.logger.info("Initialisation finished (%d buses, %d lines)",len(self.bus_df), len(self.line_df))
 
@@ -276,12 +290,12 @@ class SOCP_class:
 
         # -------------------- parameters
         v_upper_pu, v_lower_pu = 1.10, 0.90
-        model.voltage_upper_bound = Param( model.buses, initialize=lambda m, b: v_upper_pu ** 2)
-        model.voltage_lower_bound = Param(model.buses, initialize=lambda m, b: v_lower_pu ** 2)
         model.line_resistance_pu = Param(model.lines, initialize=lambda m, l: self.line_df.r_pu[l])
         model.line_reactance_pu = Param(model.lines, initialize=lambda m, l: self.line_df.x_pu[l])
         model.big_M_flow = Param(model.lines, initialize=lambda m, l: self.bigM[l] * self.bigM_factor)
-        model.big_M_flow =Param(model.lines, initialize=lambda m, l: max(self.bigM) * self.bigM_factor)
+        model.voltage_upper_bound = Param(model.buses, initialize=lambda m, b: v_upper_pu ** 2)
+        model.voltage_lower_bound = Param(model.buses, initialize=lambda m, b: v_lower_pu ** 2)
+        #model.big_M_flow =Param(model.lines, initialize=lambda m, l: max(self.bigM) * self.bigM_factor)
         self.logger.info(f"Big-M values: {self.bigM}")
         def calculate_voltage_bigM():
             v_upper_pu_squared = v_upper_pu ** 2
@@ -296,10 +310,13 @@ class SOCP_class:
         to_bus_map   = {l: int(self.line_df.to_bus[l])   for l in model.lines}
         model.from_bus = Param(model.lines, initialize=lambda m, l: from_bus_map[l])
         model.to_bus   = Param(model.lines, initialize=lambda m, l: to_bus_map[l])
-
+        
+        #DTDForbidden
+        # :TODO remove big_M voltage add  slack
         # ------------------------------------------------------------------
         #  Variables
         # ------------------------------------------------------------------
+        
         model.voltage_squared = Var(model.buses, model.times, within=NonNegativeReals, initialize=1.0)
         model.active_power_flow = Var(model.lines, model.times,within=Reals, initialize=0)
         model.reactive_power_flow = Var(model.lines, model.times,within=Reals, initialize=0)
@@ -319,9 +336,10 @@ class SOCP_class:
         # --------------------------------------------
         # Initialize slack variables
         # ---------------------------------------------
-        model.active_power_slack    = Var(model.buses,  model.times,within=Reals, initialize=0)
-        model.reactive_power_slack  = Var(model.buses,  model.times,within=Reals,initialize=0)
+
         model.voltage_drop_slack    = Var(model.lines,  model.times,within=NonNegativeReals, initialize=0)
+        model.voltage_upper_slack = Var(model.buses, model.times, within=NonNegativeReals, initialize=0)
+        model.voltage_lower_slack = Var(model.buses, model.times, within=NonNegativeReals, initialize=0)
 
         # ---------------------------------------------
         # Initialize line status variables
@@ -395,14 +413,14 @@ class SOCP_class:
             out_q = sum(m.active_power_flow[l, t] for l in m.lines if m.from_bus[l] == b)
             in_q  = sum(m.active_power_flow[l, t] for l in m.lines if m.to_bus[l]   == b)
             injection = self.bus_p_inj[b] * m.is_up[b]
-            return out_q - in_q ==injection * m.is_up[b] # + m.active_power_slack[b, t]
+            return out_q - in_q ==injection * m.is_up[b] 
         
         def reactive_power_balance(m, b, t):
             if b in self.substations: 
                 return Constraint.Skip
             out_q = sum(m.reactive_power_flow[l, t] for l in m.lines if m.from_bus[l] == b)
             in_q  = sum(m.reactive_power_flow[l, t] for l in m.lines if m.to_bus[l]   == b)
-            return out_q - in_q == self.bus_q_inj[b] * m.is_up[b] # + m.reactive_power_slack[b, t]
+            return out_q - in_q == self.bus_q_inj[b] * m.is_up[b] 
 
         if self.toggles["include_power_balance_constraint"]:
             model.ActivePowerBalance = Constraint(model.buses, model.times, rule=active_power_balance)
@@ -451,20 +469,21 @@ class SOCP_class:
             self.enabled_constraints["QFlowUB"] = True
             self.enabled_constraints["QFlowLB"] = True
 
-            
+        #voltag_upper_slack = v
+
         # -------- voltage bounds   ----------------------
         # (30)-(31) Voltage bounds with big‑M relaxation
-        def voltage_upper(m, b, t):
-            if b in self.substations:
-                return m.voltage_squared[b, t] <= m.voltage_upper_bound[b]
-            else:
-                return m.voltage_squared[b, t] <= m.voltage_upper_bound[b] + (1 - m.is_up[b]) * m.voltage_bigM
+        # def voltage_upper(m, b, t):
+        #     return m.voltage_squared[b, t] <= m.voltage_upper_bound[b]
 
+        # def voltage_lower(m, b, t):
+        #     return m.voltage_squared[b, t] >= m.voltage_lower_bound[b] 
+
+        def voltage_upper(m, b, t):
+            return m.voltage_squared[b,t] <= m.voltage_upper_bound[b] + m.voltage_upper_slack[b,t]
         def voltage_lower(m, b, t):
-            if b in self.substations:
-                return m.voltage_squared[b, t] >= m.voltage_lower_bound[b] 
-            else:
-                return m.voltage_squared[b, t] >= m.voltage_lower_bound[b] - (1 - m.is_up[b]) * m.voltage_bigM
+            return m.voltage_squared[b,t] >= m.voltage_lower_bound[b] - m.voltage_lower_slack[b,t]
+    
         
         if self.toggles["include_voltage_bounds_constraint"]:
             model.VoltageUpper = Constraint(model.buses, model.times, rule=voltage_upper)
@@ -523,105 +542,62 @@ class SOCP_class:
 
                     # Pre-calculate maximum possible downstream loads for each arc
                     arc_max_flows = self._calculate_arc_max_flows(model, designated_root)
-                    M_scf = max(self.bigM)
+                    M_scf = len(model.buses) - 1 if len(model.buses) > 0 else 0
                     # --- Flow Capacity Constraints ---
-                    def scf_capacity_rule(m, u, v, l):
-                        #max_flow = arc_max_flows.get((u, v, l), len(m.buses) - 1)
-                        return m.scf_flow_var[u,v,l] <= M_scf * m.line_status[l]
                     
-                    model.EnhancedSCFCapacity = Constraint(model.arcs, rule=scf_capacity_rule)
-                    self.enabled_constraints["EnhancedSCFCapacity"] = True
-
-                    # --- Flow Conservation ---
-                    def scf_flow_conservation_rule(m, b):
-                        inflow = sum(m.scf_flow_var[u,v,l] for (u,v,l) in m.arcs if v == b)
-                        outflow = sum(m.scf_flow_var[u,v,l] for (u,v,l) in m.arcs if u == b)
-                        
-                        if b == designated_root:
-                            # Root supplies exactly the number of energized non-root buses
-                            num_energized = sum(m.is_up[n] for n in m.buses if n != designated_root)
-                            return outflow - inflow == num_energized
+                    self.logger.info("Using single commodity flow for radiality constraints")
+                
+                    # --- Designate a Single Root for Commodity Flow ---
+                    active_model_substations = [s for s in self.substations if s in model.buses]
+                    
+                    if not active_model_substations:
+                        if not list(model.buses): # Check if model.buses is empty
+                            self.logger.error("SCF Radiality: No buses in the model. Cannot designate a root.")
+                            # This is a critical error, model building should probably stop or handle this.
+                            # For now, let's assume this won't happen if preprocessing is correct.
+                            designated_root = None 
                         else:
-                            # Non-root buses consume 1 unit if energized
-                            return inflow - outflow == m.is_up[b]
-                    
-                    model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
-                    print({arc: (len(model.buses)-1) for arc in model.arcs})
-                    model.flow_direction = Var(model.lines, within=Binary, initialize=1)
+                            designated_root = model.buses.first() # Pick the first bus in the set if no substations
+                            self.logger.warning(f"SCF Radiality: No active substations in the model. Designated {designated_root} as root.")
+                    else:
+                        designated_root = active_model_substations[0]
+                        self.logger.info(f"SCF Radiality: Designated root for commodity flow is {designated_root}")
 
-                    # Constraint 1: If flow goes from i to j, flow_direction = 1
-                    def flow_direction_ij_rule(m, l):
-                        i, j = m.from_bus[l], m.to_bus[l]
-                        max_flow = arc_max_flows.get((i, j, l), len(m.buses) - 1)
-                        return m.scf_flow_var[i,j,l] <= M_scf * m.flow_direction[l]
+                    if designated_root is not None:
+                        # --- Flow Capacity Constraint ---
+                        # Flow on an arc is only possible if the underlying line is active (line_status[l]=1)
+                        # Max flow on an arc is N_buses (or N_energized_buses - 1)
+                        # (ensures flow variable goes to zero if line is off)
+                        n_buses_total = len(model.buses) # Max possible demand
+                        def scf_capacity_rule(m, u, v, l):
+                            return m.scf_flow_var[u,v,l] <= (n_buses_total -1) * m.line_status[l]
+                        model.SCFCapacity = Constraint(model.arcs, rule=scf_capacity_rule)
+                        self.enabled_constraints["SCFCapacity"] = True
 
-                    model.FlowDirectionIJ = Constraint(model.lines, rule=flow_direction_ij_rule)
+                        # --- Flow Conservation Constraint ---
+                        def scf_flow_conservation_rule(m, b):
+                            # Sum of commodity flows into bus b
+                            inflow = sum(m.scf_flow_var[u,b_val,l_idx] for (u,b_val,l_idx) in m.arcs if b_val == b)
+                            # Sum of commodity flows out of bus b
+                            outflow = sum(m.scf_flow_var[b_val,v,l_idx] for (b_val,v,l_idx) in m.arcs if b_val == b)
 
-                    # Constraint 1: If line is inactive, no flow in either direction
-                    def no_flow_inactive_ij_rule(m, l):
-                        """No flow i->j if line is inactive"""
-                        i, j = m.from_bus[l], m.to_bus[l]
-                        max_flow = arc_max_flows.get((i, j, l), len(m.buses) - 1)
-                        return m.scf_flow_var[i,j,l] <= M_scf * m.line_status[l]
-
-                    model.NoFlowInactiveIJ = Constraint(model.lines, rule=no_flow_inactive_ij_rule)
-
-                    def no_flow_inactive_ji_rule(m, l):
-                        """No flow j->i if line is inactive"""
-                        i, j = m.from_bus[l], m.to_bus[l]
-                        max_flow = arc_max_flows.get((j, i, l), len(m.buses) - 1)
-                        return m.scf_flow_var[j,i,l] <= M_scf * m.line_status[l]
-
-                    model.NoFlowInactiveJI = Constraint(model.lines, rule=no_flow_inactive_ji_rule)
-
-                    model.flow_exists_ij = Var(model.lines, within=Binary, initialize=0)
-                    model.flow_exists_ji = Var(model.lines, within=Binary, initialize=0)
-
-                    # Small threshold for numerical stability
-                    eps = 1e-4
-
-                    def flow_exists_ij_rule(m, l):
-                        """If flow i->j exists, indicator = 1"""
-                        i, j = m.from_bus[l], m.to_bus[l]
-                        return m.scf_flow_var[i,j,l] >= eps * m.flow_exists_ij[l]
-
-                    model.FlowExistsIJ = Constraint(model.lines, rule=flow_exists_ij_rule)
-
-                    def flow_exists_ji_rule(m, l):
-                        """If flow j->i exists, indicator = 1"""
-                        i, j = m.from_bus[l], m.to_bus[l]
-                        return m.scf_flow_var[j,i,l] >= eps * m.flow_exists_ji[l]
-
-                    model.FlowExistsJI = Constraint(model.lines, rule=flow_exists_ji_rule)
-
-                    def at_most_one_direction_rule(m, l):
-                        """At most one direction can have flow"""
-                        return m.flow_exists_ij[l] + m.flow_exists_ji[l] <= 1
-
-                    model.AtMostOneDirection = Constraint(model.lines, rule=at_most_one_direction_rule)
-
-                    # Link flow existence to line status
-                    def flow_requires_active_line_rule(m, l):
-                        """Flow can only exist if line is active"""
-                        return m.flow_exists_ij[l] + m.flow_exists_ji[l] <= m.line_status[l]
-
-                    model.FlowRequiresActiveLine = Constraint(model.lines, rule=flow_requires_active_line_rule)
+                            if b == designated_root:
+                                # The designated root supplies 1 unit of commodity for each *other* energized bus.
+                                # These other energized buses become the "sinks" in the commodity flow model.
+                                num_other_energized_sinks = sum(m.is_up[n_bus] for n_bus in m.buses if n_bus != designated_root)
+                                return outflow - inflow == num_other_energized_sinks
+                            else:
+                                # Any other bus (non-root substations or partitioned buses) demands 1 unit of commodity if energized.
+                                return inflow - outflow == 1 * m.is_up[b]
+                        
+                        model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
                     # --- Spanning Tree Constraint with Load Shedding Support ---
                     def spanning_tree_rule(m):
                         total_energized_buses = sum(m.is_up[b] for b in m.buses)
                         return sum(m.line_status[l] for l in m.lines) == total_energized_buses - 1
                     
                     model.SpanningTree = Constraint(rule=spanning_tree_rule)
-                 
-                    # --- Flow Ordering Constraints for Better LP Relaxation ---
-                    def flow_ordering_rule(m, u, v, l):
-                        """Ensure some minimum flow if line is used"""
-                        min_flow = 0.1  # Minimum flow to avoid numerical issues
-                        max_flow = arc_max_flows.get((u, v, l), len(m.buses) - 1)
-                        # If line is active and flow exists in this direction, ensure minimum flow
-                        return m.scf_flow_var[u,v,l] >= min_flow * (m.scf_flow_var[u,v,l] >= 0.001)
                 
-                    #model.FlowOrdering = Constraint(model.arcs, rule=flow_ordering_rule)
 
                     # --- Bus Energization Logic ---
                     if not self.toggles.get("allow_load_shed", False):
@@ -641,9 +617,17 @@ class SOCP_class:
                 for l in m.lines)
         model.loss_term_expr = Expression(rule=loss_term_rule)
 
-        def slack_term_rule(m):
+        def voltage_drop_slack_term_rule(m):
             return self.slack_penalty * sum(m.voltage_drop_slack[l, 0]**2 for l in m.lines)   
-        model.slack_term_expr = Expression(rule=slack_term_rule)
+        model.voltage_drop_slack_term_rule = Expression(rule=voltage_drop_slack_term_rule)
+
+        
+        # and add into objective something like:
+        def voltage_bounds_slack_term_rule(m):
+            return self.voltage_slack_penalty * (
+                sum(m.voltage_upper_slack[b,0] + m.voltage_lower_slack[b,0] for b in m.buses)
+            )
+        model.voltage_bounds_slack_term_rule = Expression(rule=voltage_bounds_slack_term_rule)
       
          # Default if not included
         if self.toggles["include_switch_penalty"]:
@@ -660,24 +644,31 @@ class SOCP_class:
                      return self.switch_penalty * sum(
                          m.switch_initial[s] * (1 - m.switch_status[s]) +
                          (1 - m.switch_initial[s]) * m.switch_status[s]
-                         for sd in m.model_switches)
+                         for s in m.model_switches)
             model.switch_pen_expr = Expression(rule=switch_term_rule)
         else:
             model.switch_pen_expr = Expression(initialize=0.0)
-        # --- Combine Terms for Objective ---
-        def objective_rule(m):
-            slack_penalty = m.root_flow_slack_penalty if hasattr(m, 'root_flow_slack_penalty') else 0
-            shed_load_cost = 0
-            if self.toggles.get("allow_load_shed", False):
-                # Load shedding penalty
-                shed_load_cost = self.load_shed_penalty * sum(
+
+        def load_shed_costs(m):
+            # Load shedding penalty
+                return self.load_shed_penalty * sum(
                     abs(self.bus_p_inj[b]) * (1 - m.is_up[b]) 
                     for b in m.partitionedbuses if self.bus_p_inj.get(b, 0) < 0 )
-            return m.loss_term_expr + m.slack_term_expr + m.switch_pen_expr + slack_penalty +shed_load_cost
+        if self.toggles.get("allow_load_shed", False):
+            model.load_shed_cost = Expression(rule=load_shed_costs)
+            self.logger.info("Load shedding costs enabled with penalty %.2f", self.load_shed_penalty)
+
+            
+        # --- Combine Terms for Objective ---
+        def objective_rule(m):
+            load_shed_cost = 0
+            if self.toggles.get("allow_load_shed", False):
+                load_shed_cost = m.load_shed_cost
+            return m.loss_term_expr + m.voltage_drop_slack_term_rule + m.switch_pen_expr  +load_shed_cost + m.voltage_bounds_slack_term_rule
         model.objective = Objective(rule=objective_rule, sense=minimize)
-        def total_loss_constraint(m):
-            return m.loss_term_expr >= 0  # Ensure non-negative losses
-        model.TotalLossConstraint = Constraint(rule=total_loss_constraint)
+        
+
+
         self.model = model
         if self.debug_level >= 1:
             self.logger.debug("\n%s", build_model_size_report(model))
@@ -826,7 +817,6 @@ class SOCP_class:
         # Detect potential issues with the solution
         if switch_change_count == 0 and total_switches > 0:
             self.logger.warning("WARNING: NO SWITCHES CHANGED IN OPTIMIZATION SOLUTION!")
-            self.logger.warning("This likely indicates an issue with the radiality constraints or the optimization formulation.")
             
             # Additional diagnostics for radiality
             if self.toggles.get("use_spanning_tree_radiality", False) and hasattr(m, "SpanConstraint"):
@@ -913,11 +903,13 @@ class SOCP_class:
                     self.logger.warning(f"  Line {l}, t={t}: V-slack = {val:.6g}")
         
         # 5. Check objective components
+    
         self.logger.info("Objective function breakdown:")
+        self.logger.info(f"  Total objective value: { pyo_val(m.objective):.6g}")
         self.logger.info(f"  Loss term: {pyo_val(m.loss_term_expr):.6g}")
-        self.logger.info(f"  Slack penalty term: {pyo_val(m.slack_term_expr):.6g}")
+        self.logger.info(f"  Voltage drop slack term: {pyo_val(m.voltage_drop_slack_term_rule) :.6g}")
+        self.logger.info(f"  Voltage bounds slack term: {pyo_val(m.voltage_bounds_slack_term_rule):.6g}")
         self.logger.info(f"  Switch penalty term: {pyo_val(m.switch_pen_expr):.6g}")
-        self.logger.info(f"  Total objective: {pyo_val(m.objective):.6g}")
         
         # 6. Verify network structure
         active_lines = sum(1 for l in m.lines if line_status[l] > 0.5)
@@ -1097,7 +1089,7 @@ class SOCP_class:
         if isolated_buses:
             self.logger.warning(f"Found {len(isolated_buses)} isolated buses: {isolated_buses}")
         else:
-            self.logger.info("No isolated buses found - good!")
+            self.logger.info("No isolated buses found!")
         
         # Verify substations have connections
         for b in self.substations:
@@ -1467,7 +1459,7 @@ class SOCP_class:
             
         # Store violations for debugging
         self.debug_logs["flow_bound_violations"] = flow_bound_violations
-    def verify_radiality_topology(optimizer, net_opt):
+    def verify_radiality_topology(self, optimizer, net_opt):
         """Verify if the resulting network topology is radial by checking graph properties"""
         import networkx as nx
         
@@ -1507,7 +1499,7 @@ class SOCP_class:
                 cycles = cycle_basis
                 self.logger.warning(f"Found {len(cycles)} cycles in the network: {cycles}")
             else:
-                self.logger.info("Network has no cycles - good!")
+                self.logger.info("Network has no cycles!")
         except Exception as e:
             self.logger.warning(f"Error while checking for cycles: {e}")
         
@@ -1555,158 +1547,7 @@ class SOCP_class:
             "num_edges": total_edges,
             "expected_edges": expected_edges
         }
-    def progressively_build_model(self):
-        """
-        Progressively build the optimization model, adding constraints step by step
-        to identify which constraint causes infeasibility.
-        """
-        self.logger.info("Starting progressive model building to identify infeasibility...")
-        
-        # Define the constraints to add progressively
-        constraint_steps = [
-            ("PowerFlowBounds", ["PFlowUB", "PFlowLB", "QFlowUB", "QFlowLB"]),
-            ("VoltageConstraints", ["VoltageUpper", "VoltageLower"]),
-            ("VoltageDropConstraints", ["VoltageDropUp", "VoltageDropLo"]),
-            ("PowerBalanceConstraints", ["ActivePowerBalance", "ReactivePowerBalance"]),
-            ("LineBusLinkConstraints", ["LineBusLinkFrom", "LineBusLinkTo"]),
-            ("RadialityConstraints", ["BusConnectivity", "SpanConstraint", "RootCap", "RootBalance"])
-        ]
-        
-        # Enable slack variables for debugging
-        self.toggles["use_slack_variables"] = True
-        self.toggles["active_power_balance_slack"] = True
-        self.toggles["reactive_power_balance_slack"] = True
-        self.toggles["voltage_drop_slack"] = True
-        
-        # Store results for each step
-        step_results = []
-        
-        # Initialize first with minimal constraints
-        self.logger.info("Step 0: Initialize minimal model with only power flow bounds")
-        
-        # Reset enabled constraints
-        self.enabled_constraints = {name: False for name in [
-            "VoltageDropUp", "VoltageDropLo", "ActivePowerBalance", "ReactivePowerBalance",
-            "VoltageUpper", "VoltageLower", "PFlowUB", "PFlowLB", "QFlowUB", "QFlowLB",
-            "LineBusLinkFrom", "LineBusLinkTo", "BusConnectivity", "SpanConstraint",
-            "RootCap", "RootBalance"
-        ]}
-        
-        # Create minimal model
-        self.create_model()
-        
-        # Add constraints progressively
-        for step_idx, (step_name, constraints) in enumerate(constraint_steps):
-            self.logger.info(f"Step {step_idx + 1}: Adding {step_name}")
-            self.current_validation_step = step_name
-            
-            # Store current model state before adding new constraints
-            model_copy = self.model.clone()
-            
-            # Add constraints for this step
-            for constraint in constraints:
-                # Check if constraint is already enabled
-                if not self.enabled_constraints.get(constraint, False):
-                    # Enable constraint
-                    self.logger.info(f"  Enabling constraint: {constraint}")
-                    self.enabled_constraints[constraint] = True
-            
-            # Recreate model with new constraints
-            self.create_model()
-            
-            # Solve model
-            try:
-                self.solve()
-                
-                # Record results
-                step_results.append({
-                    "step": step_idx + 1,
-                    "name": step_name,
-                    "constraints_added": constraints,
-                    "feasible": True,
-                    "obj_value": pyo_val(self.model.objective),
-                    "slack_values": {
-                        "p_slack_max": max(abs(pyo_val(self.model.active_power_slack[b, 0])) for b in self.model.buses),
-                        "q_slack_max": max(abs(pyo_val(self.model.reactive_power_slack[b, 0])) for b in self.model.buses),
-                        "v_slack_max": max(abs(pyo_val(self.model.voltage_drop_slack[l, 0])) for l in self.model.lines)
-                    }
-                })
-                
-                self.logger.info(f"  Step {step_idx + 1} ({step_name}): Feasible, obj={pyo_val(self.model.objective):.6g}")
-                
-                # Analyze slack values
-                p_slack_max = step_results[-1]["slack_values"]["p_slack_max"]
-                q_slack_max = step_results[-1]["slack_values"]["q_slack_max"]
-                v_slack_max = step_results[-1]["slack_values"]["v_slack_max"]
-                
-                self.logger.info(f"  Max slack values - P: {p_slack_max:.6g}, Q: {q_slack_max:.6g}, V: {v_slack_max:.6g}")
-                
-                # Check if adding these constraints increased slack usage significantly
-                if p_slack_max > 1e-3 or q_slack_max > 1e-3 or v_slack_max > 1e-3:
-                    self.logger.warning(f"  Adding {step_name} required significant slack values.")
-                    self.logger.warning(f"  This indicates {step_name} may be problematic.")
-                    
-                    # Verify constraints that were just added
-                    if "ActivePowerBalance" in constraints or "ReactivePowerBalance" in constraints:
-                        self.verify_power_balance_constraints()
-                    if "VoltageDropUp" in constraints or "VoltageDropLo" in constraints:
-                        self.verify_voltage_drop_constraints()
-                
-            except Exception as e:
-                self.logger.error(f"  Step {step_idx + 1} ({step_name}): Infeasible or error - {e}")
-                
-                # Record failure
-                step_results.append({
-                    "step": step_idx + 1,
-                    "name": step_name,
-                    "constraints_added": constraints,
-                    "feasible": False,
-                    "error": str(e)
-                })
-                
-                # Restore previous model state
-                self.model = model_copy
-                
-                # Update enabled constraints to reflect actual model
-                for constraint in constraints:
-                    self.enabled_constraints[constraint] = False
-        
-        # Summarize results
-        self.logger.info("Progressive model building summary:")
-        for result in step_results:
-            status = "✓ Feasible" if result["feasible"] else "✗ Infeasible"
-            self.logger.info(f"  Step {result['step']} ({result['name']}): {status}")
-            
-            if result["feasible"]:
-                self.logger.info(f"    Objective: {result['obj_value']:.6g}")
-                
-                # Report significant slack values
-                p_slack = result["slack_values"]["p_slack_max"]
-                q_slack = result["slack_values"]["q_slack_max"]
-                v_slack = result["slack_values"]["v_slack_max"]
-                
-                if p_slack > 1e-3:
-                    self.logger.info(f"    P-slack: {p_slack:.6g}")
-                if q_slack > 1e-3:
-                    self.logger.info(f"    Q-slack: {q_slack:.6g}")
-                if v_slack > 1e-3:
-                    self.logger.info(f"    V-slack: {v_slack:.6g}")
-        
-        # Store results
-        self.debug_logs["progressive_build_results"] = step_results
-        
-        # Reset toggles
-        self.toggles["use_slack_variables"] = False
-        self.toggles["active_power_balance_slack"] = False
-        self.toggles["reactive_power_balance_slack"] = False
-        self.toggles["voltage_drop_slack"] = False
-        
-        # Return the step that caused infeasibility if any
-        infeasible_steps = [result for result in step_results if not result["feasible"]]
-        if infeasible_steps:
-            return infeasible_steps[0]["name"]
-        else:
-            return None
+
     def extract_scf_flows(self):
         """Extract SCF flow values for debugging"""
         scf_flows = {}
@@ -1729,7 +1570,7 @@ class SOCP_class:
             return False
         
         # Extract flows
-        scf_flows = self.extract_scf_flows(model, optimizer)
+        scf_flows = self.extract_scf_flows()
         
         # Build directed graph from flows
         import networkx as nx
@@ -1856,7 +1697,9 @@ class SOCP_class:
             # Print objective breakdown for debugging
             lg.info("Objective breakdown:")
             lg.info(f"  Loss Term Value : {pyo_val(self.model.loss_term_expr):.6f}")
-            lg.info(f"  Slack Term Value: {pyo_val(self.model.slack_term_expr):.6f}")
+            lg.info(f"  voltagebounds slack Term Value: {pyo_val(self.model.voltage_bounds_slack_term_rule):.6f}")
+            lg.info(f"  Load shed cost: {pyo_val(self.model.load_shed_cost):.6f}")
+            lg.info(f"  voltage dropslack penalty:{pyo_val(self.model.voltage_drop_slack_term_rule)}")
             if self.toggles.get("include_switch_penalty", False):
                 lg.info(f"  Switch Penalty Term Value: {pyo_val(self.model.switch_pen_expr):.6f}")
             lg.info(f"  Total Objective Value: {result['obj_value']:.6f}")
@@ -2217,8 +2060,6 @@ class SOCP_class:
 
 
 def get_reactive_injection(df, bus, assumed_pf=0.9):
-
-    # Filter entries for this bus
     sub = df.loc[df.bus == bus]
     if sub.empty:
         return 0
@@ -2226,16 +2067,11 @@ def get_reactive_injection(df, bus, assumed_pf=0.9):
     if "q_mvar" in df.columns:
         non_null = sub["q_mvar"].count()
         total = len(sub)
-        # If most entries have a q_mvar value, use them (fill missing with derived estimate)
         if non_null >= total * 0.5:
-            # Compute derived reactive power for each row (used to fill missing values)
             derived = sub["p_mw"] * np.tan(np.arccos(assumed_pf))
-            # Fill NaN values with the derived reactive power
             q_values = sub["q_mvar"].fillna(derived)
             return q_values.sum()
         else:
-            # Not enough q_mvar values, so derive for all rows
             return (sub["p_mw"] * np.tan(np.arccos(assumed_pf))).sum()
     else:
-        # q_mvar column does not exist; derive reactive power from p_mw
         return (sub["p_mw"] * np.tan(np.arccos(assumed_pf))).sum()

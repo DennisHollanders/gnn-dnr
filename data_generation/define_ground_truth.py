@@ -1,10 +1,8 @@
 import matplotlib
 matplotlib.use("Agg")
 
-import json
 import pandas as pd
 import pandapower as pp
-import pickle as pkl
 import numpy as np
 import os
 import sys
@@ -15,9 +13,7 @@ import networkx as nx
 import logging
 import matplotlib.pyplot as plt
 import traceback
-import random
 import copy 
-import pdb 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from pandapower.powerflow import LoadflowNotConverged
@@ -33,9 +29,8 @@ if load_data_path not in sys.path:
 
 from SOCP_class_dnr import SOCP_class
 from load_data import load_graph_data_old
-from electrify_subgraph import extract_node_features, extract_edge_features
 from optimization_logging import setup_logging, get_logger
-
+from pyomo.environ import (value as pyo_val)
 
 SHARED_LOG_PATH = Path(__file__).parent / "logs"/ "define_ground_truth.log"
 
@@ -339,29 +334,50 @@ def plot_voltage_profile(voltage_data, ax, bus_labels=None, title="Voltage profi
 
 
 def find_disconnected_buses(G):
+    G_closed = nx.Graph()
+    G_closed.add_nodes_from(G.nodes())
+    
+    # Only include closed edges
+    for u, v, data in G.edges(data=True):
+        if data.get('closed', True):
+            G_closed.add_edge(u, v)
+    
     disconnected_buses = set()
-    for component in nx.connected_components(G):
-        if len(component) <= 2:  
+    
+    for component in nx.connected_components(G_closed):
+        if len(component) <= 2:
             disconnected_buses.update(component)
         for node in component:
-            if G.degree(node) == 0:
+            if G_closed.degree(node) == 0:
                 disconnected_buses.add(node)
     
     return disconnected_buses
 
-def loss_improvement(net_before, net_after, include_trafos=True,):
+
+def loss_improvement(net_before, net_after, include_trafos=True,logger=None):
     pp.runpp(net_before, enforce_q_lims=False)
     pp.runpp(net_after,  enforce_q_lims=False)
 
     def active_loss(net):
         loss = net.res_line["pl_mw"].abs().sum()
-        if include_trafos and "res_trafo" in net:
-            loss += net.res_trafo["pl_mw"].abs().sum()
+        #if include_trafos and "res_trafo" in net:
+        #    loss += net.res_trafo["pl_mw"].abs().sum()
+
         return float(loss)
 
     l0 = active_loss(net_before)
     l1 = active_loss(net_after)
 
+    def manual_loss(net):
+        manual_loss =[ ]
+        for idx, ln in net.line.iterrows():
+            R_tot = ln.r_ohm_per_km * ln.length_km
+            I_amp = net.res_line.at[idx, "i_ka"] * 1000
+            p_loss_mw = (R_tot * I_amp**2) / 1e6
+            manual_loss.append(p_loss_mw)
+        return sum(manual_loss)
+    l0 = manual_loss(net_before)
+    l1 = manual_loss(net_after)
     return {
         "loss_before":       l0,
         "loss_after":        l1,
@@ -425,6 +441,7 @@ def is_radial_and_connected(net, y_mask=None, include_switches=False, include_tr
     connected = len(disconnected_buses) == 0
     
     return radial, connected
+
 def visualize_network_states(snapshots, graph_id, output_dir=None, debug=False, logger=None):   
     if logger is None:
         logger = get_logger(SHARED_LOG_PATH, debug=debug)
@@ -751,8 +768,13 @@ def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, l
                           logger=logger, debug_level=debug_level)
     optimizer.initialize()
     optimizer.model = optimizer.create_model()
+    manual_loss_check = sum(    pyo_val(optimizer.model.line_resistance_pu[l]) * pyo_val(optimizer.model.squared_current_magnitude[l, 0]) for l in optimizer.model.lines
+    ) * optimizer.S_base_VA / 1e6
+
+    logger.info(f"BEFORE OPT Manual loss check (MW): {manual_loss_check:.6f}")
+    logger.info(f"BEFORE OPT SOCP objective loss term (MW): {pyo_val(optimizer.model.loss_term_expr) * optimizer.S_base_VA / 1e6:.6f}")
     
-    
+   
     # Save LP file if in debug mode 
     if debug and lp_dir:
         lp_dir = Path(lp_dir)
@@ -767,15 +789,20 @@ def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, l
     opt_time = time.time() - t0
     
     # Run verification
-    if debug:
-        logger.info("Running detailed constraint verification...")
-        optimizer.verify_power_balance_constraints()
-        optimizer.verify_voltage_drop_constraints()
-        optimizer.verify_socp_cone_constraints()
-        optimizer.verify_line_flow_bounds()
+    # if debug:
+    #     logger.info("Running detailed constraint verification...")
+    #     optimizer.verify_power_balance_constraints()
+    #     optimizer.verify_voltage_drop_constraints()
+    #     optimizer.verify_socp_cone_constraints()
+    #     optimizer.verify_line_flow_bounds()
+    logger.info(f"net line losses before optimized calculated same as obj:{net}")
     # Update the network with optimization results
     net_opt = optimizer.update_network()
-    
+    manual_loss_check = sum(    pyo_val(optimizer.model.line_resistance_pu[l]) * pyo_val(optimizer.model.squared_current_magnitude[l, 0]) for l in optimizer.model.lines
+    ) * optimizer.S_base_VA / 1e6
+
+    logger.info(f"Manual loss check (MW): {manual_loss_check:.6f}")
+    logger.info(f"SOCP objective loss term (MW): {pyo_val(optimizer.model.loss_term_expr) * optimizer.S_base_VA / 1e6:.6f}")
     # Try to run power flow on the optimized network
     pf_converged = False
     try:
@@ -790,8 +817,8 @@ def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, l
     rad_after = is_radial_and_connected(net_opt, include_switches=True) 
     loss_impr = None
     if pf_converged:
-        loss_impr = loss_improvement(net_before_opt, net_opt)
-        logger.info(f"Loss before: {loss_impr['loss_before']:.2f} MW, "f"Loss after: {loss_impr['loss_after']:.2f} MW")
+        loss_impr = loss_improvement(net_before_opt, net_opt, logger)
+        logger.info(f"Loss before: {loss_impr['loss_before']:.5f} MW, "f"Loss after: {loss_impr['loss_after']:.5f} MW")
     metrics = {
         "graph_id": graph_id,
         "total_switches": net.switch.shape[0],
@@ -878,7 +905,7 @@ def process_single_graph(graph_id, net_json, folder_path, toggles=None, vis_dir=
         "original": net_orig,
         "processed": processed_net,
         "mst": net_mst,
-        "optimised_mst": net_opt_mst,
+        "mst_opt": net_opt_mst,
     }
     if debug:
         try:
@@ -902,7 +929,7 @@ def process_single_graph(graph_id, net_json, folder_path, toggles=None, vis_dir=
                 "loss_improvement_orig_opt": metrics_orig["loss_improvement"],
                 "rad_origPF_opt": (metrics_orig["after_radial"], metrics_orig["after_connected"])
             })
-            snapshots["optimised_orig"] = net_opt_orig
+            snapshots["original_opt"] = net_opt_orig
             logger.info(
                 f"{graph_id}: MST→OPT={flips_mst_to_opt} flips; origPF→OPT={metrics_orig['switches_changed']} flips; diff={flips_mst_vs_orig}"
             )
@@ -911,7 +938,7 @@ def process_single_graph(graph_id, net_json, folder_path, toggles=None, vis_dir=
             logger.debug(traceback.format_exc())
     else:
         logger.info(f"{graph_id}: MST only, MST→OPT={flips_mst_to_opt} flips")
-    
+
     visualize_network_states(snapshots, graph_id, output_dir=vis_dir, debug=debug, logger=logger)
     logger.info("network states visualized")
     store_snapshots(graph_id, folder_path, logger, **snapshots)
@@ -1040,8 +1067,9 @@ def apply_optimization(folder_path, toggles=None, debug=False, serialize=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test\original",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test/original",
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_22052025_range-130-100_10\original",
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_22052025_range-130-100_10\original",
                         #default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_14\test",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_2\test",
                         type=str, help='Dataset folder path')

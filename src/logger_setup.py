@@ -9,13 +9,9 @@ from logging.handlers import QueueHandler, QueueListener
 def setup_logging(
     log_dir: str | Path = "data_generation/logs",
     run_tag: str | None = None,
-    level_file: int = logging.INFO,
-    level_console: int = logging.INFO,
-) -> tuple[QueueHandler, QueueListener]:  # Return the queue handler and listener
-    """
-    Configure root logging using QueueHandler and QueueListener.
-    The main process starts the listener; worker processes just use the handler.
-    """
+    level_file: int = logging.DEBUG,
+    level_console: int = logging.DEBUG,
+) -> tuple[QueueHandler, QueueListener]:  
 
     if run_tag is None:
         run_tag = os.environ.get("RUN_TAG")
@@ -28,7 +24,7 @@ def setup_logging(
     logfile = log_dir / f"{run_tag}.log"
 
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
     root.handlers.clear()  # Crucial: remove default handlers
 
     fmt_file = logging.Formatter(
@@ -42,7 +38,7 @@ def setup_logging(
 
     log_queue = multiprocessing.Queue(-1)  # Create a queue for logging
     queue_handler = QueueHandler(log_queue)  # Handler for queue
-    queue_handler.setLevel(logging.INFO)
+    queue_handler.setLevel(logging.DEBUG)
     root.addHandler(queue_handler)  # Add to root logger
 
     file_handler = logging.FileHandler(logfile, mode="a", encoding="utf-8") # Handler for file

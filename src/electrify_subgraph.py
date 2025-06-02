@@ -20,7 +20,6 @@ import pandas as pd
 import pickle as pkl
 import pandapower as pp
 import pandapower.networks as pn 
-import pandapower.networks as pn
 import pandapower.topology as top
 from pathlib import Path
 import random 
@@ -31,23 +30,16 @@ import string
 import simbench as sb
 from typing import List, Dict, Tuple, Any
 import time
-import tqdm
-tqdm.tqdm.monitor_interval = 0
-
 from tqdm import tqdm
-from tqdm import _monitor
+
 import sys 
 
 random.seed(0)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("data_generation")
 
 SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if SRC_PATH not in sys.path:
     sys.path.append(SRC_PATH)
-
-from logger_setup import setup_logging
-#from debug_pp import report_bad_lines, report_bad_ybus
-
 
 
 STANDARD_CABLE_MAPPING = {
@@ -91,7 +83,7 @@ def sample_from_distribution_global(dist_name: str, distribution: Dict[str, Any]
 
     else:
         raise ValueError(f"Unsupported distribution type: {dist_type}")
-    logger.info(f"Sampled {dist_name} -> {sample}")
+    logger.debug(f"Sampled using distcallable: {dist_name} -> {sample}")
     return sample
 
 def initialize_distributions(distributions: Dict[str, dict]) -> Dict[str, Any]:
@@ -103,17 +95,24 @@ def initialize_distributions(distributions: Dict[str, dict]) -> Dict[str, Any]:
         for name, params in distributions.items()
     }
 
-def retrieve_standard_production(timestamp,df):
+def retrieve_standard_production(timestamp, df):
+    """Enhanced version with better scaling"""
     timestamp = pd.to_datetime(timestamp)
     A_columns = [col for col in df.columns if col.endswith("_A")]
     A_col = random.choice(A_columns)
     I_col = A_col.rsplit("_A",1)[0] +"_I"
     row = df[pd.to_datetime(df["from"]) == timestamp]
-    consumption = row[A_col].values[0] + 1e-6
-    production = row[I_col].values[0] + 1e-6
-    max_consumption = row[A_col].values.sum()
-    max_production = row[I_col].values.sum()
-    return consumption,production, max_consumption,max_production
+    
+    consumption = row[A_col].values[0] if len(row) > 0 else 0.1
+    production = row[I_col].values[0] if len(row) > 0 else 0.05
+    
+    all_consumption = df[A_col].values
+    all_production = df[I_col].values
+    
+    p75_consumption = np.percentile(all_consumption[all_consumption > 0], 75)
+    p75_production = np.percentile(all_production[all_production > 0], 75)
+    
+    return consumption, production, p75_consumption, p75_production
 
 def sample_timeframes(num_intervals, interval_duration_minutes=15):
     start_of_year = pd.Timestamp("2025-01-01 00:00:00")
@@ -125,6 +124,227 @@ def sample_timeframes(num_intervals, interval_duration_minutes=15):
     timeframes = [ random_start_time + timedelta(minutes=i * interval_duration_minutes) for i in range(num_intervals)]
     
     return timeframes
+def runpp_with_auto_scale(net, args, max_iterations=5, scale_floor=0.5):
+    scale_factor = 1
+    for it in range(max_iterations):
+        logger.info("scalin down loads by factor: {scale_factor:.2f}")
+        pp.runpp(net, algorithm='nr', max_iteration=50)
+        if not net.converged:
+            scale_factor *= 0.75
+            if scale_factor < scale_floor:
+                return False, net, scale_factor
+            net.load["p_mw"] *= 0.75
+            net.sgen["p_mw"] *= 0.75
+            net.gen.loc[net.gen.slack == False, "p_mw"] *= 0.8
+            continue
+
+        # Check voltages and line loadings
+        vm_min = net.res_bus.vm_pu.min()
+        max_line_load = net.res_line.loading_percent.max()
+
+        if vm_min < 0.90 or max_line_load > args.max_line_loading:
+     
+            scale_factor *= 0.9
+            if scale_factor < scale_floor:
+                return False, net, scale_factor
+            net.load["p_mw"] *= 0.9
+            net.sgen["p_mw"] *= 0.9
+            net.gen.loc[net.gen.slack == False, "p_mw"] *= 0.9
+        else:
+            return True, net, scale_factor
+
+    return False, net, scale_factor
+
+def assign_realistic_loads(modified_subgraph, args, dist_callables, timeframes, dfs):
+
+    date_time = timeframes[0]
+    consumption, production, p75_cons, p75_prod = retrieve_standard_production(date_time, dfs[3])
+    hour = pd.to_datetime(date_time).hour
+    if 6 <= hour < 10:
+        time_factor = 0.7  
+    elif 17 <= hour < 21:
+        time_factor = 1.0  
+    elif 22 <= hour < 6:
+        time_factor = 0.3  
+    else:
+        time_factor = 0.5  
+    
+ 
+    global_scale = (consumption / p75_cons if p75_cons > 0 else 0.5) * time_factor
+    global_scale = np.clip(global_scale, 0.3, 0.8)
+   
+    node_cable_capacities = analyze_node_cable_capacity(modified_subgraph)
+ 
+    total_capacity = sum(node_cable_capacities.values())
+    avg_capacity = np.mean(list(node_cable_capacities.values()))
+
+    target_loading_min = 0.2 * args.max_line_loading  
+    target_loading_max = 0.6 * args.max_line_loading 
+    
+    # Assign loads based on cable capacity
+    node_loads = {}
+    total_load_preliminary = 0
+    for node in modified_subgraph.nodes:
+        node_capacity = node_cable_capacities.get(node, avg_capacity)
+ 
+        voltage_kv = 10.0  
+        
+        # P = sqrt(3) * V * I * cos(phi)
+        # For balanced three-phase: P = 1.732 * V * I * pf
+        power_factor = random.uniform(0.85, 0.90)  #
+        
+        # safety factor 0.6
+        max_node_power = 1.732 * voltage_kv * node_capacity * power_factor* 0.6  # MW
+    
+        loading_fraction = random.uniform(target_loading_min / 100, target_loading_max / 100)
+        base_load = max_node_power * loading_fraction
+
+        load_variation = random.uniform(0.8, 1.2)
+        raw_load = base_load * load_variation * global_scale
+        consumption_value = float(np.minimum(raw_load, max_node_power))
+
+        consumption_value = max(consumption_value, 1e-4)
+
+        node_degree = modified_subgraph.degree(node)
+        dg_global = dist_callables["dg_penetration"]()
+        weight = 0.5 + 0.5 * (node_degree / max(1, max(dict(modified_subgraph.degree()).values())))
+        production_value = 0.0
+        logger.info("dg_value: {dg_global}, weight: {weight}, node_degree: {node_degree}")
+        if random.random() < dg_global * weight:
+            dg_factor = random.uniform(0.1, 0.3) 
+            production_value = consumption_value * dg_factor * random.uniform(0.3, 1.0)
+  
+        net_load = consumption_value - production_value
+        
+        # Store the values
+        node_loads[node] = {
+            'net_load': net_load,
+            'consumption': consumption_value,
+            'production': production_value,
+            'power_factor': power_factor,
+            'cable_capacity': node_capacity
+        }
+        
+        total_load_preliminary += consumption_value - production_value
+    
+    # Ensure total network loading is reasonable
+    total_cable_capacity_mw = 1.732 * 10.0 * total_capacity * 0.9 * 0.6  
+    max_network_load = total_cable_capacity_mw * 0.4  
+    
+    if total_load_preliminary > max_network_load:
+        scale_factor = max_network_load / total_load_preliminary
+        logger.info(f"Scaling down loads by factor {scale_factor:.2f} to ensure convergence")
+        
+        for node in node_loads:
+            node_loads[node]['consumption'] *= scale_factor
+            node_loads[node]['production'] *= scale_factor
+            node_loads[node]['net_load'] = (node_loads[node]['consumption'] - 
+                                           node_loads[node]['production'])
+    
+    # Apply simplified power flow constraints
+    adjusted_loads = apply_power_flow_constraints(
+        modified_subgraph, node_loads, args.max_line_loading
+    )
+    
+    # Assign the adjusted loads to the graph
+    for node, load_data in adjusted_loads.items():
+        modified_subgraph.nodes[node]["net_load"] = load_data['net_load']
+        modified_subgraph.nodes[node]["power_factor"] = load_data['power_factor']
+        modified_subgraph.nodes[node]["cable_capacity"] = load_data['cable_capacity']
+    
+    # ensure at least some load exists
+    total_final_load = sum(data['net_load'] for data in adjusted_loads.values() if data['net_load'] > 0)
+    logger.info(f"Final total load: {total_final_load:.3f} MW")
+    
+    return modified_subgraph
+
+def analyze_node_cable_capacity(subgraph):
+    node_capacities = {}
+    
+    for node in subgraph.nodes:
+        total_capacity = 0
+        connected_capacities = []
+        
+        for neighbor in subgraph.neighbors(node):
+            edge_data = subgraph.edges[node, neighbor]
+      
+            cable_props = edge_data.get("pandapower_type", {})
+            if isinstance(cable_props, dict):
+                max_i_ka = cable_props.get("max_i_ka", 0.3)  
+            else:
+                max_i_ka = 0.3
+            
+            connected_capacities.append(max_i_ka)   
+        if connected_capacities:
+            total_capacity = sum(connected_capacities)
+            avg_capacity = np.mean(connected_capacities)
+            node_capacities[node] = 0.7 * avg_capacity + 0.3 * (total_capacity / len(connected_capacities))
+        else:
+            node_capacities[node] = 0.1
+    
+    return node_capacities
+
+def add_reactive_compensation(net):
+    if len(net.load) > 0 and len(net.res_bus) > 0:
+        high_load_buses = net.load.groupby('bus')['p_mw'].sum().nlargest(5).index    
+        for bus in high_load_buses:
+            if bus in net.res_bus.index:
+                bus_load = net.load[net.load.bus == bus]['q_mvar'].sum()
+                if bus_load > 0.5: 
+                    cap_size = bus_load * 0.3
+                    pp.create_shunt(net, bus=bus, q_mvar=-cap_size, p_mw=0)
+                    logger.debug(f"Added {cap_size:.2f} MVar capacitor at bus {bus}")
+
+
+def apply_power_flow_constraints(subgraph, node_loads, max_loading_percent):
+    conservative_max_loading = max_loading_percent * 0.7 
+    edge_loadings = estimate_edge_loadings(subgraph, node_loads)
+
+    problem_edges = []
+    for edge, loading in edge_loadings.items():
+        if loading > conservative_max_loading:
+            problem_edges.append((edge, loading))
+    
+    if not problem_edges:
+        return node_loads
+    
+    logger.info(f"Found {len(problem_edges)} edges that might cause convergence issues")
+    adjusted_loads = copy.deepcopy(node_loads)
+    for (u, v), loading in problem_edges:
+        reduction_factor = (conservative_max_loading / loading) * 0.8  
+        
+        for node in [u, v]:
+            if node in adjusted_loads and adjusted_loads[node]['net_load'] > 0:
+                adjusted_loads[node]['net_load'] *= reduction_factor
+                adjusted_loads[node]['consumption'] *= reduction_factor
+                logger.debug(f"Reduced load at node {node} by factor {reduction_factor:.2f}")
+    return adjusted_loads
+
+
+def estimate_edge_loadings(subgraph, node_loads):
+    edge_loadings = {}
+    for u, v, edge_data in subgraph.edges(data=True):
+
+        cable_props = edge_data.get("pandapower_type", {})
+        if isinstance(cable_props, dict):
+            max_i_ka = cable_props.get("max_i_ka", 0.3)
+        else:
+            max_i_ka = 0.3
+        u_load = node_loads[u]['net_load'] if u in node_loads else 0
+        v_load = node_loads[v]['net_load'] if v in node_loads else 0
+
+        load_diff = abs(u_load - v_load)
+        
+        # Estimate current (very simplified)
+        # P = sqrt(3) * V * I * pf -> I = P / (sqrt(3) * V * pf)
+        voltage_kv = 10.0  
+        avg_pf = 0.9
+        estimated_current = load_diff / (1.732 * voltage_kv * avg_pf)
+        loading_percent = (estimated_current / max_i_ka) * 100
+        edge_loadings[(u, v)] = loading_percent
+    
+    return edge_loadings
+
 
 def find_switch_edges_in_non_radial(subgraph_to_adapt):
     for u, v, data in subgraph_to_adapt.edges(data=True):
@@ -140,21 +360,14 @@ def find_switch_edges_in_non_radial(subgraph_to_adapt):
     for u, v in switch_edges:
         subgraph_to_adapt.edges[u, v]['is_switch'] = True
         subgraph_to_adapt.edges[u, v]['is_synthetic'] = False
-
     return subgraph_to_adapt, len(switch_edges)
 
 
 def load_subgraphs(args) -> List[Any]:
-    """
-    Load only those .pkl files whose embedded node-range overlaps with args.node_range.
-    Filenames include a numeric range string (e.g., '130140' means 130 to 140).
-    """
+
     folder_path = args.subgraph_folder
     logger.info(f"Loading from folder: {folder_path}")
     file_names = os.listdir(folder_path)
-
-    # simple args holder
-
     subgraphs = []
 
     if args.iterate_all:
@@ -176,7 +389,6 @@ def load_subgraphs(args) -> List[Any]:
         bus_range_min = args.target_busses - args.bus_range
         logger.info(f"Filtering by node range {bus_range_min}-{bus_range_max}")
         for file_name in tqdm(file_names, desc= "Loading files", unit="file"):
-            # extract first numeric token
             nums = re.findall(r"(\d+)", file_name)
             if not nums:
                 continue
@@ -227,6 +439,7 @@ def modify_subgraph(subgraph, args, dist_callable):
         else:
             convex_layers_to_use = list(set([layer + 1 for layer in convex_layers_to_use]) | set([layer - 1 for layer in convex_layers_to_use]) | {0})
             failed_attempts += 1
+            logger.debug(f"failed attempt to add an edge updated convex layers to use:{convex_layers_to_use}")
             if failed_attempts > 10:
                 logger.info("Failed to add edges. Stopping.")
                 break
@@ -344,7 +557,7 @@ def add_edge_via_convex_layers(subgraph_to_adapt, layers, layer_list, max_distan
         is_switch=True,
         is_synthetic=True,
         order_added=order_added,
-        geodata=[pos[best_edge[0]], pos[best_edge[1]]]
+        geodata=(pos[best_edge[0]], pos[best_edge[1]])
     )
 
     return subgraph_to_adapt, True
@@ -398,28 +611,22 @@ def compute_slack_metric(subgraph, node):
 def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_data, line_sources, subgraph=None):
     """
     Interpolate failed lines by selecting appropriate line types from existing lines
-    rather than averaging parameters.
     """
     logger.info("Interpolating failed lines")
-    
-    # First collect all existing line types in the network
+
     existing_line_types = []
     if len(net.line) > 0:
-        # Group lines by their electrical parameters to identify distinct types
         line_params = net.line[["r_ohm_per_km", "x_ohm_per_km", "c_nf_per_km", 
                                 "max_i_ka", "q_mm2", "alpha"]].copy()
         line_params["type"] = net.line.get("type", "cs")
-        
-        # Round slightly to handle floating point variations
+
         line_params = line_params.round(6)
-        
-        # Get unique parameter combinations
+
         unique_params = line_params.drop_duplicates().to_dict('records')
         existing_line_types = unique_params
         
         logger.info(f"Found {len(existing_line_types)} unique line types in network")
-    
-    # If no existing line types, use the provided standard cable
+
     if not existing_line_types:
         logger.info("No existing line types found, using standard cable")
         for u, v in failed_lines:
@@ -428,8 +635,7 @@ def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_d
             create_line_and_switch(net, from_bus, to_bus, random_cable_data, line_sources,
                                   line_type="standard_cable", line_name=f"{u}--{v}: interpolated->standard")
         return net, line_sources
-    
-    # For each failed line, find the most appropriate line type
+
     for u, v in failed_lines:
         from_bus = nx_to_pp_bus_map[u]
         to_bus = nx_to_pp_bus_map[v]
@@ -444,13 +650,10 @@ def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_d
                             adjacent_edge_types.append(edge_data["pandapower_type"])
             
             if adjacent_edge_types:
-                # If we have adjacent edge types, pick the most common one
                 selected_line_type = adjacent_edge_types[0]
                 print(f"Using adjacent line type for {u}--{v}")
         
-        # APPROACH 2: If no adjacent line types or no subgraph, use most common line type
         if not selected_line_type:
-            # If multiple line types exist, use the most common one
             if len(existing_line_types) == 1:
                 selected_line_type = existing_line_types[0]
             else:
@@ -469,6 +672,50 @@ def interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, random_cable_d
     
     return net, line_sources
 
+def create_line_and_switch(net, from_bus, to_bus, line_params, line_sources, 
+                                   line_type, line_name, is_switch=True):
+    """
+    Improved version that validates parameters before creating line.
+    """
+    try:
+        # Validate and fix parameters
+        fixed_params = validate_and_fix_cable_parameters(line_params)
+        
+        # Calculate line length from bus geodata
+        if hasattr(net, 'bus_geodata') and from_bus in net.bus_geodata.index and to_bus in net.bus_geodata.index:
+            dx = net.bus_geodata.loc[from_bus, "x"] - net.bus_geodata.loc[to_bus, "x"]
+            dy = net.bus_geodata.loc[from_bus, "y"] - net.bus_geodata.loc[to_bus, "y"]
+            length_km = max(np.sqrt(dx**2 + dy**2), 0.0001)
+        else:
+            length_km = 1.0  # Default 1 km
+        
+        # Create line
+        line_index = pp.create_line_from_parameters(
+            net,
+            from_bus=from_bus,
+            to_bus=to_bus,
+            length_km=length_km,
+            r_ohm_per_km=fixed_params["r_ohm_per_km"],
+            x_ohm_per_km=fixed_params["x_ohm_per_km"],
+            c_nf_per_km=fixed_params["c_nf_per_km"],
+            max_i_ka=fixed_params["max_i_ka"],
+            type=fixed_params.get("type", "cs"),
+            q_mm2=fixed_params.get("q_mm2", 150),
+            alpha=fixed_params.get("alpha", 0.004),
+            name=line_name
+        )
+        
+        line_sources[line_type] += 1
+        
+        # Create switch
+        pp.create_switch(net, bus=from_bus, element=line_index, et="l", closed=is_switch)
+        
+        logger.debug(f"Successfully created {line_type} line: {line_name}")
+        
+    except Exception as e:
+        logger.error(f"Failed to create line {line_name}: {e}")
+        line_sources["failed"] += 1
+
 def find_operating_voltage(subgraph):
     for _, _, data in subgraph.edges(data=True):
         if 'operatingvoltage' in data and not pd.isna(data['operatingvoltage']):
@@ -480,30 +727,6 @@ def find_operating_voltage(subgraph):
                 return data['operatingvoltage']
     return 10
 
-def create_line_and_switch(net, from_bus, to_bus, line_params, line_sources, line_type, line_name, is_switch=True):
-    try:
-        line_index = pp.create_line_from_parameters(
-            net,
-            from_bus=from_bus,
-            to_bus=to_bus,
-            r_ohm_per_km=line_params["r_ohm_per_km"],
-            x_ohm_per_km=line_params["x_ohm_per_km"],
-            c_nf_per_km=line_params["c_nf_per_km"],
-            max_i_ka=line_params["max_i_ka"],
-            type=line_params.get("type", "cs"),
-            q_mm2=line_params["q_mm2"],
-            alpha=line_params["alpha"],
-            length_km =max(np.sqrt((net.bus_geodata.loc[from_bus, "x"] - net.bus_geodata.loc[to_bus, "x"])**2 + (net.bus_geodata.loc[from_bus, "y"] - net.bus_geodata.loc[to_bus, "y"])**2),0.0001),
-            name=line_name
-        )
-        line_sources[line_type] += 1
-        net.line.loc[line_index, ["r_ohm_per_km","x_ohm_per_km"]] = net.line.loc[line_index, ["r_ohm_per_km","x_ohm_per_km"]].clip(lower=0.05)
-        pp.create_switch(net, bus=from_bus, element=line_index, et="l", closed=is_switch)
-    except Exception as e:
-        logger.error(f"Failed to create line {line_name}: {e}")
-        line_sources["failed"] += 1
-
-
 def scale_slack_buses(base_value, node_count, min_slack=1, max_slack=None):
     if max_slack is None:
         max_slack = min(int(node_count * 0.1), 20)
@@ -512,7 +735,6 @@ def scale_slack_buses(base_value, node_count, min_slack=1, max_slack=None):
     max_slack = max(min_slack + 1, max_slack)
     
     small_graph = 50    
-    large_graph = 500   
     if node_count <= small_graph:
         scale_factor = 1.0
     else:
@@ -546,7 +768,6 @@ def select_top_slack_nodes(subgraph, candidate_nodes, num_slack):
                     too_close = True
                     break
             except nx.NetworkXNoPath:
-
                 pass
         
         if not too_close:
@@ -564,18 +785,89 @@ def select_top_slack_nodes(subgraph, candidate_nodes, num_slack):
             logger.info(f"Added additional slack node {node} with metric {metrics[node]}")
     return selected_slack_nodes
 
-def sanitize_edge_data(edge_data: dict, dist_callable) -> dict:
-    if not edge_data:                      
+def validate_and_fix_cable_parameters(cable_data: dict) -> dict:
+    fixed_data = cable_data.copy()
+    
+    r_ohm = fixed_data.get('r_ohm_per_km', 0.1)
+    x_ohm = fixed_data.get('x_ohm_per_km', 0.1)
+    max_i_ka = fixed_data.get('max_i_ka', 0.3)
+    q_mm2 = fixed_data.get('q_mm2', 150)
+
+    rx_ratio = r_ohm / x_ohm if x_ohm > 0 else float('inf')
+    
+    if rx_ratio > 8: 
+        logger.debug(f"Suspicious R/X ratio: {rx_ratio:.1f}. X might be in wrong units.")
+        if x_ohm < 0.05: 
+            fixed_data['x_ohm_per_km'] = x_ohm * 10
+            logger.debug(f"Fixed X from {x_ohm:.4f} to {fixed_data['x_ohm_per_km']:.4f} Ω/km")
+    expected_current_range = (q_mm2 * 0.5, q_mm2 * 3.0)
+    current_in_amps = max_i_ka * 1000
+    
+    if current_in_amps < expected_current_range[0]:
+        suggested_current = q_mm2 * 1.5 / 1000
+        logger.debug(f"Current rating {max_i_ka:.3f} kA seems low for {q_mm2} mm² cable")
+        fixed_data['max_i_ka'] = suggested_current
+        logger.debug(f"Fixed current rating to {suggested_current:.3f} kA")
+    
+    fixed_data['r_ohm_per_km'] = max(fixed_data['r_ohm_per_km'], 0.01)
+    fixed_data['x_ohm_per_km'] = max(fixed_data['x_ohm_per_km'], 0.01)
+
+    fixed_data['c_nf_per_km'] = fixed_data.get('c_nf_per_km', 200)
+    fixed_data['alpha'] = fixed_data.get('alpha', 0.004)
+    
+    return fixed_data
+
+
+def sanitize_edge_data(edge_data: dict, dist_callable, existing_line_types) -> dict:
+    if not edge_data:
+        logger.debug("No edge data provided, using standard cable")
         return STANDARD_CABLE_MAPPING[dist_callable["standard_cables"]()].copy()
 
     cleaned = edge_data.copy()
-    for k in ["r_ohm_per_km", "x_ohm_per_km", "c_nf_per_km","max_i_ka","q_mm2","alpha" ]:
-        if k not in cleaned or cleaned[k] == 0:
-            default_cable = STANDARD_CABLE_MAPPING[ dist_callable["standard_cables"]()]
-            logger.warning(f"Missing or zero value for {k} in edge data. Using default value: {default_cable}")
-            cleaned[k] =  max(default_cable[k], 0.001)
+
+    required_params = ["r_ohm_per_km", "x_ohm_per_km", "c_nf_per_km", "max_i_ka", "q_mm2", "alpha"]
+    
+    for param in required_params:
+        if param not in cleaned or cleaned[param] == 0:
+            default_cable = STANDARD_CABLE_MAPPING[dist_callable["standard_cables"]()]
+            logger.warning(f"Missing or zero value for {param}. Using default: {default_cable[param]}")
+            cleaned[param] = default_cable[param]
+    cleaned = validate_and_fix_cable_parameters(cleaned)
     return cleaned
 
+
+def analyze_network_issues(net, info):
+    logger.info("=== NETWORK ANALYSIS ===")
+    
+    # Check for overloaded lines
+    if not net.res_line.empty:
+        overloaded = net.res_line[net.res_line.loading_percent > 100]
+        if len(overloaded) > 0:
+            logger.warning(f"Found {len(overloaded)} overloaded lines (>{len(overloaded)/len(net.res_line)*100:.1f}% of total)")
+            worst_lines = overloaded.nlargest(5, 'loading_percent')
+            for idx, row in worst_lines.iterrows():
+                logger.warning(f"Line {idx}: {row.loading_percent:.1f}% loaded, {row.pl_mw*1000:.1f}W losses")
+        
+        # Check for very lightly loaded lines
+        light_loaded = net.res_line[net.res_line.loading_percent < 1.0]
+        if len(light_loaded) > 0:
+            logger.info(f"Found {len(light_loaded)} very lightly loaded lines (<1%)")
+    
+    # Check voltage issues
+    if not net.res_bus.empty:
+        voltage_issues = net.res_bus[(net.res_bus.vm_pu < 0.95) | (net.res_bus.vm_pu > 1.05)]
+        if len(voltage_issues) > 0:
+            logger.warning(f"Found {len(voltage_issues)} buses with voltage issues")
+    
+    # Check generation/load balance
+    total_gen = info.get('total_active_generation', 0)
+    total_load = info.get('total_active_load', 0)
+    if total_load > 0:
+        gen_load_ratio = total_gen / total_load
+        if gen_load_ratio > 3:
+            logger.warning(f"Very high generation/load ratio: {gen_load_ratio:.2f}")
+        elif gen_load_ratio < 0.8:
+            logger.warning(f"Low generation/load ratio: {gen_load_ratio:.2f}")
 
 def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dict) -> pp.pandapowerNet:
     net = pp.create_empty_network()
@@ -586,6 +878,12 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
     logger.info(f"Graph has {len(subgraph.nodes)} nodes. Base slack buses: {base_num_slack}, Scaled slack buses: {num_slack}")
     
     vn_kv = find_operating_voltage(subgraph)
+    if vn_kv != 10.0: 
+        voltage_correction = vn_kv / 10.0
+        for node in subgraph.nodes:
+            if "net_load" in subgraph.nodes[node]:
+                subgraph.nodes[node]["net_load"] *= voltage_correction
+
     logger.info(f"Operating voltage: {vn_kv} kV")
     
     nx_to_pp_bus_map = {}
@@ -602,13 +900,13 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
     net["nx_to_pp_bus_map"] = nx_to_pp_bus_map
 
     selected_slack_nodes = select_top_slack_nodes(subgraph, candidate_nodes, num_slack)
-
     total_load = sum(data.get("net_load", 0) for node, data in subgraph.nodes(data=True) if data.get("net_load", 0) > 0)
     slack_power = total_load / len(selected_slack_nodes) if selected_slack_nodes else 0
     for slack_node in selected_slack_nodes:
         logger.info(f"Creating slack generator for {slack_node}")
         bus_id = nx_to_pp_bus_map[slack_node]
-        pp.create_gen(net, slack=True, bus=bus_id, vm_pu=1.02, p_mw=slack_power)
+        vm_set = dist_callable["slack_vm_set"]()
+        pp.create_gen(net, slack=True, bus=bus_id, vm_pu=vm_set, p_mw=slack_power, min_q_mvar=-0.1, max_q_mvar=0.1)
         net.bus.loc[bus_id, "name"] = f"{slack_node}_Slack"
         if slack_node in remaining_nodes:
             remaining_nodes.remove(slack_node)
@@ -617,40 +915,102 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
         if node in remaining_nodes:
             bus_id = nx_to_pp_bus_map[node]
             net_load = data.get("net_load", 0)
+            power_factor = data.get("power_factor", 0.9)
+            
             if net_load > 0:
-                pp.create_load(net, bus=bus_id, p_mw=net_load, 
-                               q_mvar=abs(net_load) * np.tan(np.arccos(0.9)))
+                # Calculate reactive power based on power factor
+                q_mvar = net_load * np.tan(np.arccos(power_factor))
+                pp.create_load(net, bus=bus_id, p_mw=net_load, q_mvar=q_mvar,
+                             scaling=1.0, controllable=False)
                 net.bus.loc[bus_id, "name"] = f"{node}_Load"
             elif net_load < 0:
-                pp.create_gen(net, bus=bus_id, vm_pu=1.02, p_mw=abs(net_load))
-                net.bus.loc[bus_id, "name"] = f"{node}_Gen"
+                # For generators, assume better power factor
+                pp.create_gen(net, bus=bus_id, vm_pu=1.01, p_mw=abs(net_load),
+                            min_p_mw=0, max_p_mw=abs(net_load)*1.2)
+                net.bus.loc[bus_id, "name"] = f"{node}_DG"
             else:
-                net.bus.loc[bus_id, "name"] = f"{node}_Neutral"
+                net.bus.loc[bus_id, "name"] = f"{node}_NoLoad"
                 
-    failed_lines = []
+  # Collect existing line types BEFORE processing edges
+    existing_line_types = []
+    complete_line_count = 0
+    
+    for u, v, edge_data in subgraph.edges(data=True):
+        logger.debug(f"Processing edge {u}--{v} with data: {edge_data}")
+        pandapower_data = edge_data.get("pandapower_type", {})
+        if isinstance(pandapower_data, dict) and pandapower_data:
+            required_params = ["r_ohm_per_km", "x_ohm_per_km", "c_nf_per_km", "max_i_ka", "q_mm2", "alpha"]
+            if all(pandapower_data.get(param, 0) > 0 for param in required_params):
+                existing_line_types.append(pandapower_data)
+                complete_line_count += 1
 
+    logger.info(f"Found {len(existing_line_types)} complete line types from {complete_line_count} edges in original network")
+    
+    # Initialize line_sources properly
+    line_sources = {"original_data": 0, "interpolated": 0, "standard_cable": 0, "failed": 0}
+    failed_lines = []
+    
+    # Process each edge with proper categorization
     for u, v, edge_data in subgraph.edges(data=True):
         from_bus = nx_to_pp_bus_map[u]
         to_bus = nx_to_pp_bus_map[v]
-        line_data = sanitize_edge_data(edge_data.get("pandapower_type", {}), dist_callable)
+        
+        # Determine line type and source
+        pandapower_data = edge_data.get("pandapower_type", {})
+        if isinstance(pandapower_data, dict) and pandapower_data:
+            required_params = ["r_ohm_per_km", "x_ohm_per_km", "c_nf_per_km", "max_i_ka", "q_mm2", "alpha"]
+            if all(pandapower_data.get(param, 0) > 0 for param in required_params):
+                # Complete original data
+                line_data = pandapower_data
+                source_type = "original_data"
+                logger.debug(f"Using complete original data for edge {u}--{v}")
+            else:
+                # Incomplete data - needs interpolation
+                line_data = sanitize_edge_data(pandapower_data, dist_callable, existing_line_types)
+                if existing_line_types:
+                    source_type = "interpolated"
+                    logger.debug(f"Using interpolated data for edge {u}--{v}")
+                else:
+                    source_type = "standard_cable"
+                    logger.debug(f"Using standard cable for edge {u}--{v}")
+        else:
+            # No pandapower data at all
+            line_data = sanitize_edge_data({}, dist_callable, existing_line_types)
+            source_type = "standard_cable"
+            logger.debug(f"No pandapower data for edge {u}--{v}, using standard cable")
+        
         label = edge_data.get("label", "Unknown")
         is_switch = not edge_data.get("is_switch", False)
+        
         try:
             create_line_and_switch(net, from_bus, to_bus, line_data, line_sources,
-                                     line_type="original_data", line_name=f"{u}--{v}:{label}",
-                                     is_switch=is_switch)
+                                 line_type=source_type, line_name=f"{u}--{v}:{label}",
+                                 is_switch=is_switch)
         except Exception as e:
+            logger.warning(f"Failed to create line {u}--{v}: {e}")
             failed_lines.append((u, v))
-    logger.info(f"succesfull lines: {(len(subgraph.edges) - len(failed_lines) )/ len(subgraph.edges)} %")
 
-    if failed_lines:
-        chosen_cable_type = dist_callable["standard_cables"]()
-        cable_data = STANDARD_CABLE_MAPPING[chosen_cable_type]
-        net, line_sources = interpolate_failed_lines(net, failed_lines, nx_to_pp_bus_map, cable_data, line_sources)
+    # Calculate and log success rate
+    total_edges = len(subgraph.edges)
+    successful_lines = sum(line_sources[k] for k in ["original_data", "interpolated", "standard_cable"])
+    success_rate = (successful_lines / total_edges) * 100 if total_edges > 0 else 0
     
-    logging.info(f"line_sources: {line_sources}")
+    logger.info(f"Line creation success rate: {success_rate:.1f}% ({successful_lines}/{total_edges})")
+    logger.info(f"Line sources breakdown: {line_sources}")
+   
     net.gen.loc[net.gen.slack, 'slack_weight'] = 1.0/len(net.gen[net.gen.slack])   
-
+    
+    add_reactive_compensation(net)
+    converged =net.converged
+    try:
+        pp.runpp(net, max_iteration=100, v_debug=True, run_control=True, initialization="dc", 
+                 calculate_voltage_angles=True)
+        converged = net.converged
+        logger.info("Initial power flow calculation completed.")
+    except Exception as e:
+        err_msg = str(e)
+        logger.warning(f"Initial power flow failed: {err_msg}")
+        net.converged = False
 
     r_ohm = net.line["r_ohm_per_km"]
     x_ohm = net.line["x_ohm_per_km"]
@@ -659,32 +1019,14 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
     if not r_ohm.empty and not x_ohm.empty:
         min_r = r_ohm.min()
         min_x = x_ohm.min()
-        print("Minimum r and x values: ", min_r, min_x)
+        logger.info(f"Minimum r and x values: {min_r}, {min_x}")
     else:
-        print("No resistance or reactance values found")
-    max_attempts = 5
-    attempt = 0
-    converged = False
-    while attempt < max_attempts and not converged:
-        logger.info(f"Attempting power flow calculation, attempt {attempt + 1}")
-        try:
-            pp.runpp(net, max_iteration=100, v_debug=True, run_control=True, initialization="dc",
-                     calculate_voltage_angles=True)
-            if net.converged:
-                converged = True
-                print("Successfully ran PP network after adjustments.")
-                break
-        except Exception as e:
-            err_msg = str(e)
-            print(f"Attempt {attempt+1}: Power flow failed with error: {err_msg}")
-        for load_idx in net.load.index:
-            net.load.at[load_idx, 'p_mw'] *= 0.50
-        attempt += 1
+        logger.info("No resistance or reactance values found")
+
 
     if not converged:
         logger.info("Power flow calculation failed after multiple attempts.")
         logger.info("Adding additional slack generator to improve convergence.")
-        # Identify candidate nodes (excluding existing slack) and add an additional slack generator.
         non_slack_nodes = [node for node in candidate_nodes if node not in selected_slack_nodes]
         if non_slack_nodes:
             non_slack_metrics = {node: compute_slack_metric(subgraph, node) for node in non_slack_nodes}
@@ -705,15 +1047,11 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
             except Exception as e:
                 logger.warning(f"Final attempt after adding extra slack failed: {e}")
 
-
     try:
         pp.runpp(net, max_iteration=100, v_debug=True, run_control=True, initialization="dc", 
-                 #distributed_slack=True, 
                  calculate_voltage_angles=True)
         logger.info("SUCCESFULLY RAN PP NETWORK!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     except Exception as e:
-        #report_bad_lines(net, graph_id)   # ① inspect branch table
-        #report_bad_ybus(net, graph_id)
         err_msg = str(e)
         logger.warning(f"Initial power flow failed: {err_msg}")
         net.converged = False
@@ -725,8 +1063,6 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
                 island_nodes = [int(x) for x in island_nodes]
             except Exception as e:
                 logger.warning(f"Error converting island node strings to integers: {e}")
-    #if island_nodes is not None: 
-    #    plot_network(net, island_nodes)
     if args.show_pandapower_report:
         result = pp.diagnostic(net, detailed_report= True,warnings_only=False)
         logger.info(result)
@@ -758,8 +1094,46 @@ def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dic
         "failed_lines_count": len(failed_lines),
         "failed_lines_ratio": len(failed_lines) / len(list(subgraph.edges)) if len(list(subgraph.edges)) > 0 else None,
     }
-    #print(info)
-    return net, info
+    logger.info(info)
+    analyze_network_issues(net, info)
+    
+    return net, info 
+
+def add_voltage_regulators(net):
+    slack_buses = net.gen[net.gen.slack == True].bus.values
+    if len(slack_buses) > 0 and len(net.bus) > 20:
+        candidate_buses = []
+        
+        for bus in net.bus.index:
+            if bus not in slack_buses:
+                # Check if bus is suitable for transformer
+                connected_lines = len(net.line[(net.line.from_bus == bus) | 
+                                              (net.line.to_bus == bus)])
+                if connected_lines >= 3:  # Junction point
+                    candidate_buses.append(bus)
+      
+        num_trafos = min(2, len(candidate_buses))
+        selected_buses = random.sample(candidate_buses, num_trafos) if candidate_buses else []
+        
+        for bus in selected_buses:
+            vn_kv= net.bus.at[bus, "vn_kv"]
+            new_bus = pp.create_bus(
+                net,
+                vn_kv= vn_kv* 0.95,
+                geodata=(net.bus_geodata.at[bus, "x"],  net.bus_geodata.at[bus, "y"]))
+            # Add transformer
+            pp.create_transformer_from_parameters(
+                net, hv_bus=bus, lv_bus=new_bus,
+                sn_mva=10, vn_hv_kv=vn_kv, vn_lv_kv=vn_kv*0.95,
+                vkr_percent=0.5, vk_percent=4, pfe_kw=0, i0_percent=0,
+                tap_pos=0, tap_neutral=0, tap_min=-2, tap_max=2,
+                tap_step_percent=2.5
+            )
+            
+            # Move some loads to the new bus
+            loads_to_move = net.load[net.load.bus == bus].index[:len(net.load)//4]
+            for load_idx in loads_to_move:
+                net.load.at[load_idx, "bus"] = new_bus
 
 def process_single_subgraph(graph_id, subgraph, dfs, args, dist_callables, save_location):
     logger.debug("inside process_single_subgraph")
@@ -775,383 +1149,173 @@ def process_single_subgraph(graph_id, subgraph, dfs, args, dist_callables, save_
         base = copy.deepcopy(original_subgraph)
         modified_subgraph = modify_subgraph(base, args, dist_callables)
 
-        #if not nx.is_connected(modified_subgraph):
-        #    logger.debug("Skip: disconnected after modify()")
-        #    continue
-
-        # Sample timeframes
-        #timeframes = sample_timeframes(kwargs["n_loadcase_time_intervals"], kwargs["interval_duration_minutes"])
-                
-        # Process each timeframe and save immediately
-        #for idx,date_time in enumerate(timeframes):
-        consumption, production, max_consumption,max_production = retrieve_standard_production(date_time, dfs[3])
-        
-        # Scale consumption and production based on average consumption per node
-        consumption = 0.03 * consumption/ max_consumption
-        production =  0.03 * production/max_production
-
-        for node in modified_subgraph.nodes:
-            consumption_value = np.random.normal(consumption, consumption * args.consumption_std)
-            production_value = np.random.normal(production, production * args.production_std)
-            net_load = np.random.normal(consumption_value - production_value, abs(consumption_value - production_value)* args.net_load_std)                      
-            modified_subgraph.nodes[node]["net_load"] = net_load
+        modified_subgraph = assign_realistic_loads(
+            modified_subgraph, args, dist_callables, timeframes, dfs
+        )
 
         electrified_network, info = create_pandapower_network(modified_subgraph, args, dist_callables)
+        # Log the line loading statistics
+        if electrified_network.converged and info.get('max_line_loading') is not None:
+            logger.info(f"Max line loading: {info['max_line_loading']:.1f}%, "
+                       f"Mean: {info['mean_line_loading']:.1f}%")
+            
+            # Check if any line exceeds threshold
+            if info['max_line_loading'] > args.max_line_loading:
+                logger.warning(f"Line loading exceeds threshold: {info['max_line_loading']:.1f}% > {args.max_line_loading}%")
+        
         if electrified_network.converged:
             succ += 1
             name = f"{graph_id}_mod_{suffix}"
-            save_single_graph(name, modified_subgraph, electrified_network, info, save_location)
+            save_single_graph(name, electrified_network, save_location)
             logger.info(f"[Worker {os.getpid()}]  Converged - about to save {graph_id}")
         else:
             fail += 1
             logger.info(f"Power flow failed for {graph_id}@{date_time}")
             logger.info(f"[Worker {os.getpid()}]  Did *not* converge for {graph_id}@{date_time}")
                             
-        #except Exception as e:
-        #    logger.error(f"Error processing subgraph {subgraph_counter}: {e}")
-        #    processed_counts["failed"] += 1
-        #    continue
     logger.info(f"[Worker {os.getpid()}] Finished processing subgraph {graph_id} with {succ} successes and {fail} failures.")
     return succ,fail
 
 def get_n_workers():
-    try:
-        return multiprocessing.cpu_count()
-    except NotImplementedError:
-        return 1  # Fallback to 1 if cpu_count is not implemented    
-
+    return int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1)) # Fallback to 1 if cpu_count is not implemented    
 
 def _worker(graph_id, subgraph, dfs, args, dist_callables, save_location):
+    """Enhanced worker with better error handling and cleanup"""
     pid = os.getpid()
-    random.seed()
-    np.random.seed(int.from_bytes(os.urandom(4), 'little'))
-    logger.info(f"[Worker {pid}] , subgraph.nodes={len(subgraph.nodes)}")
-    return process_single_subgraph(graph_id,subgraph, dfs, args, dist_callables, save_location)
-
-
+    try:
+        # Set up process-specific random seeds
+        random.seed()
+        np.random.seed(int.from_bytes(os.urandom(4), 'little'))
+        
+        # Set up minimal logging for this process
+        logging.getLogger("data_generation")
+        logger.setLevel(logging.DEBUG)
+        
+        logger.info(f"[Worker {pid}] Processing subgraph {graph_id}, nodes={len(subgraph.nodes)}")
+        
+        result = process_single_subgraph(graph_id, subgraph, dfs, args, dist_callables, save_location)
+        logger.info(f"[Worker {pid}] Completed subgraph {graph_id}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"[Worker {pid}] Failed processing subgraph {graph_id}: {e}")
+        return 0, 1  # 0 success, 1 failure
+    finally:
+        # Cleanup logging handlers to prevent conflicts
+        for handler in logging.getLogger().handlers[:]:
+            handler.close()
+            logging.getLogger().removeHandler(handler)
 def transform_subgraphs(
     distributions: Dict[str, Any],
     dfs: Any,
     args: Any,
 ) -> Dict[str, int]:
-
+   
     # initialize distributions
     dist_callables = initialize_distributions(distributions)
 
     # prepare save location
     save_dir = Path(args.save_dir or os.getcwd())
-    total_required = len(raw_subgraphs) if args.iterate_all else args.num_subgraphs
-    date_str = datetime.now().strftime("%d%m%Y")   
+    date_str = datetime.now().strftime("%d%m%Y")
     mode_str = "all" if args.iterate_all else f"range-{args.target_busses}-{args.bus_range}"
-    save_name =  f"_synthetic-train-data_{date_str}_{mode_str}_{total_required}"
+    save_name = f"_synthetic-train-data_{date_str}_{mode_str}_{args.num_subgraphs}"
     save_location = save_dir / save_name / "original"
     save_location.mkdir(parents=True, exist_ok=True)
     logger.info(f"Saving results to {save_location}")
 
-    
-    nx_dir = save_location / "networkx_graphs"
-    pp_dir = save_location/  "pandapower_networks"
-    feat_dir = save_location/ "graph_features"
-    for directory in [nx_dir, pp_dir, feat_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
+    pp_dir = save_location / "pandapower_networks"
+    pp_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("start loading  subgraphs")
+    logger.info("start loading subgraphs")
 
     # load all subgraphs once
     raw_subgraphs = load_subgraphs(args)
     if not raw_subgraphs:
         raise RuntimeError("No subgraphs found to process.")
-    node_range = []
-    for idx, subgraph in enumerate(raw_subgraphs):
-        node_range.append(len(subgraph.nodes))
+
+    node_range = [len(sg.nodes) for sg in raw_subgraphs]
     logger.info(f"Subgraph node ranges for {len(node_range)} graphs: {node_range}")
 
     total_required = len(raw_subgraphs) if args.iterate_all else args.num_subgraphs
+    logger.info(f"\n\n start transforming subgraphs need to process {total_required} \n \n ")
 
-    processed = {"total": 0, "successful": 0, "failed": 0}
-    logger.info(" \n \n start transforming subgraphs")
-
-    # Determine which subgraphs to process - SAMPLE WITH REPLACEMENT
-    if args.iterate_all:
-        # Process each subgraph exactly once
-        to_do = [(i, sg) for i, sg in enumerate(raw_subgraphs)]
-    else:
-        # Sample from available subgraphs to reach the target number
-        sampled_subgraphs = random.choices(raw_subgraphs, k=args.num_subgraphs)
-        to_do = [(i, sg) for i, sg in enumerate(sampled_subgraphs)]
-    
-    logger.info(f"Will process {len(to_do)} jobs from {len(raw_subgraphs)} available subgraphs")
-    
-    # parallel execution
-    processed = {"total": 0, "successful": 0, "failed": 0}
-    logger.info(" \n \n start transforming subgraphs")
-
-
-    # # serialize execution
-    # for idx, subgraph in enumerate(raw_subgraphs):
-    #     _worker(subgraph,  graph_id, sg, dfs, args, dist_callables, save_location)
-
-        # Determine which subgraphs to process
+    # Determine which subgraphs to process
     if args.iterate_all:
         to_do = [(i, sg) for i, sg in enumerate(raw_subgraphs)]
     else:
         sampled_subgraphs = random.choices(raw_subgraphs, k=args.num_subgraphs)
         to_do = [(i, sg) for i, sg in enumerate(sampled_subgraphs)]
-    _monitor.monitor.daemon = False
 
     logger.info(f"Will process {len(to_do)} jobs from {len(raw_subgraphs)} available subgraphs")
+
+    processed = {"total": 0, "successful": 0, "failed": 0}
     pbar = tqdm(total=len(to_do), desc="Processing subgraphs", unit="subgraph")
 
-    # Enhanced parallel execution with timeout
-    try:
-        with ProcessPoolExecutor(max_workers=get_n_workers(), initializer=setup_logging, initargs=()) as ex:
-            # Submit all jobs
+    if args.multiprocessing:
+        logger.info("Using multiprocessing with ProcessPoolExecutor")
+        with ProcessPoolExecutor(max_workers=get_n_workers(), initializer=setup_logging) as ex:
             futures = [
-                ex.submit(_worker, graph_id, sg, dfs, args, dist_callables, save_location)
-                for graph_id, sg in to_do
+                ex.submit(_worker, graph_id, subgraph, dfs, args, dist_callables, save_location)
+                for graph_id, subgraph in to_do
             ]
-            
-            # Process with timeout
-            for i, fut in enumerate(as_completed(futures)):
+
+            for i, fut in enumerate(as_completed(futures), start=1):
                 try:
-                    suc, fl = fut.result(timeout=180)  
+                    suc, fl = fut.result(timeout=180)
                     processed["successful"] += suc
                     processed["failed"] += fl
                     processed["total"] += (suc + fl)
-                    logger.debug(f"Job {i+1} completed: {suc} success, {fl} failed")
-                except concurrent.futures.TimeoutError:
-                    logger.warning(f"Job {i+1} timed out after 3 minutes")
-                    processed["failed"] += 1
-                    processed["total"] += 1
+                    logger.debug(f"Job {i} completed: {suc} success, {fl} failed")
                 except Exception as e:
-                    logger.error(f"Job {i+1} failed: {e}")
+                    if isinstance(e, concurrent.futures.TimeoutError):
+                        logger.warning(f"Job {i} timed out after 3 minutes")
+                    else:
+                        logger.error(f"Job {i} failed: {e}")
                     processed["failed"] += 1
                     processed["total"] += 1
                 finally:
                     pbar.update(1)
-                    
-    except KeyboardInterrupt:
-        logger.info("Processing interrupted")
-        raise
-    finally:
+
         pbar.close()
-    for bar in list(tqdm.tqdm._instances):
-        bar.close()
-    _monitor.monitor.join(timeout=1)
-    logger.info(f"Finished: {processed}")
+        for bar in list(tqdm._instances):
+            bar.close()
+
+        logger.info(f"Finished: {processed}")
+    else:
+        logger.info("Using single-threaded processing")
+        for graph_id, subgraph in to_do:
+            try:
+                suc, fl = _worker(graph_id, subgraph, dfs, args, dist_callables, save_location)
+                processed["successful"] += suc
+                processed["failed"] += fl
+                processed["total"] += (suc + fl)
+            
+            except Exception as e:
+                logger.error(f"Job {graph_id} failed: {e}")
+                processed["failed"] += 1
+                processed["total"] += 1
+            finally:
+                pbar.update(1)
+
+        pbar.close()
+
+        logger.info(f"Finished: {processed}")
+
     return processed
 
-def extract_node_features(net, nx_graph, nx_to_pp_bus_map= None):
-    if nx_to_pp_bus_map is None:
-        nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
-    node_features = {}
-    for node in nx_graph.nodes:
-        pp_bus_idx = nx_to_pp_bus_map[node]
-        node_features[node] = {
-            "p": net.res_bus.p_mw.at[pp_bus_idx],
-            "q": net.res_bus.q_mvar.at[pp_bus_idx],
-            "v": net.res_bus.vm_pu.at[pp_bus_idx],
-            "theta": net.res_bus.va_degree.at[pp_bus_idx]
-        }
-    logger.debug(node_features)
-    return node_features
 
-def extract_edge_features(net, nx_graph, nx_to_pp_bus_map=None):
-    if nx_to_pp_bus_map is None:
-        nx_to_pp_bus_map = net["nx_to_pp_bus_map"]
-    edge_features = {}
-    for idx, (u, v) in enumerate(nx_graph.edges):
-        pp_from_bus = nx_to_pp_bus_map[u]
-        pp_to_bus = nx_to_pp_bus_map[v]
-        matching_lines = net.line[(net.line.from_bus == pp_from_bus) & (net.line.to_bus == pp_to_bus)]
-        if matching_lines.empty:
-            continue
-        line_idx = matching_lines.index[0]
-        R = matching_lines.r_ohm_per_km.iloc[0]
-        X = matching_lines.x_ohm_per_km.iloc[0]
-        switch_status = int(net.switch[(net.switch.bus == pp_from_bus) & (net.switch.element == pp_to_bus)].closed.any())
-        edge_features[(u, v)] = {
-            "edge_idx": idx,
-            "line_idx": line_idx,
-            "R": R,
-            "X": X,
-            "switch_state": switch_status,
-        }
-    logger.debug(edge_features)
-    return edge_features
-
-def print_feature_statistics(node_feats, edge_feats):
-    # Collect node feature values
-    node_features = {
-        "p": [],
-        "q": [],
-        "v": [],
-        "theta": []
-    }
+def save_single_graph(graph_name, pp_network, save_location):
     
-    for node_id, features in node_feats.items():
-        for feature in node_features:
-            if feature in features:
-                value = features[feature]
-                if not np.isnan(value):
-                    node_features[feature].append(value)
-    
-    # Collect edge feature values
-    edge_features = {
-        "R": [],
-        "X": [],
-        "switch_state": []
-    }
-    
-    for edge_id, features in edge_feats.items():
-        for feature in edge_features:
-            if feature in features:
-                value = features[feature]
-                if not np.isnan(value):
-                    edge_features[feature].append(value)
-    
-    # Print node statistics
-    logger.debug("\n---- Node Feature Statistics ----")
-    for feature, values in node_features.items():
-        if values:
-            logger.debug(f"{feature:>6}: avg={np.mean(values):.4f}, min={np.min(values):.4f}, "
-                  f"max={np.max(values):.4f}, std={np.std(values):.4f}, count={len(values)}")
-        else:
-            logger.debug(f"{feature:>6}: No valid values")
-    
-    # Print edge statistics
-    logger.debug("\n---- Edge Feature Statistics ----")
-    for feature, values in edge_features.items():
-        if values:
-            logger.debug(f"{feature:>12}: avg={np.mean(values):.4f}, min={np.min(values):.4f}, "
-                  f"max={np.max(values):.4f}, std={np.std(values):.4f}, count={len(values)}")
-        else:
-            logger.debug(f"{feature:>12}: No valid values")
-    
-    # Print switch state counts
-    switch_states = edge_features["switch_state"]
-    if switch_states:
-        switch_closed = sum(1 for s in switch_states if s > 0.5)
-        switch_open = len(switch_states) - switch_closed
-        logger.debug(f"\nSwitch states: {switch_closed} closed, {switch_open} open "
-              f"({switch_closed/len(switch_states)*100:.1f}% closed)")
-        
-def build_clean_graph(nx_graph, node_feats, edge_feats):
-    # Define the essential attributes we need
-    essential_node_attrs = ["p", "q", "v", "theta"]
-    essential_edge_attrs = ["R", "X", "switch_state"]
-    
-    clean_graph = nx.Graph()
-    
-    if hasattr(nx_graph, "name"):
-        clean_graph.name = nx_graph.name
-    
-    # Relabel the graph nodes to consecutive integers
-    node_mapping = {node: i for i, node in enumerate(nx_graph.nodes())}
-    missing_node_attrs_count = 0
-    
-    for node in nx_graph.nodes():
-        new_node_id = node_mapping[node]
-        node_attrs = {"p": 0.0, "q": 0.0, "v": 0.0, "theta": 0.0}
-        
-        # Process each required attribute
-        for attr in essential_node_attrs:
-            if node_feats and node in node_feats and attr in node_feats[node]:
-                node_attrs[attr] = node_feats[node][attr]
-            # If not in node_feats, try original graph
-            elif attr in nx_graph.nodes[node]:
-                node_attrs[attr] = nx_graph.nodes[node][attr]
-        
-        clean_graph.add_node(new_node_id, **node_attrs)
-
-    missing_edge_attrs_count = 0
-    
-    for u, v in nx_graph.edges():
-        new_u = node_mapping[u]
-        new_v = node_mapping[v]
-        
-        edge_attrs = {
-            "R": 0.00,
-            "X": 0.00,
-            "switch_state": 0.0
-        }
-        
-        # Check both possible edge orientations in edge_feats
-        edge = (u, v)
-        reverse_edge = (v, u)
-        edge_found = False
-        
-        # Process each required attribute
-        for attr in essential_edge_attrs:
-            # Try edge_feats first
-            if edge_feats:
-                if edge in edge_feats and attr in edge_feats[edge]:
-                    edge_attrs[attr] = edge_feats[edge][attr]
-                    edge_found = True
-                elif reverse_edge in edge_feats and attr in edge_feats[reverse_edge]:
-                    edge_attrs[attr] = edge_feats[reverse_edge][attr]
-                    edge_found = True
-                # If not in edge_feats, try the original graph
-                elif attr in nx_graph[u][v]:
-                    edge_attrs[attr] = nx_graph[u][v][attr]
-                    edge_found = True
-            # If edge_feats isn't available, try the original graph
-            elif attr in nx_graph[u][v]:
-                edge_attrs[attr] = nx_graph[u][v][attr]
-                edge_found = True
-                
-        clean_graph.add_edge(new_u, new_v, **edge_attrs)
-        
-        if not edge_found:
-            missing_edge_attrs_count += 1
-    
-    assert missing_node_attrs_count == 0, f"Missing node attributes: {missing_node_attrs_count}"
-    assert missing_edge_attrs_count == 0, f"Missing edge attributes: {missing_edge_attrs_count}"
-    return clean_graph
-    
-
-def save_single_graph(graph_name, nx_graph, pp_network, info, save_location):
-    
-    nx_dir = save_location / "networkx_graphs"
     pp_dir = save_location/  "pandapower_networks"
-    feat_dir = save_location/ "graph_features"
-
     try:
         pp.runpp(pp_network, max_iteration=100, v_debug=False, run_control=True, initialization="dc", calculate_voltage_angles=True)
     except Exception as e:
         logger.warning(f"Power flow did not converge for {graph_name}: {e}")
     
-    node_feats = extract_node_features(pp_network, nx_graph)
-    edge_feats = extract_edge_features(pp_network, nx_graph)
-
-    # Print feature statistics directly from the feature dictionaries
-    logger.debug(f"\n===== Feature Statistics for {graph_name} =====")
-    print_feature_statistics(node_feats, edge_feats)
-    logger.info("=" * 50)
-
-    clean_graph = build_clean_graph(nx_graph, node_feats, edge_feats)
-
-    logger.info(len(clean_graph.nodes))
-    logger.debug(clean_graph.nodes(data=True))
-    
-    features = {
-    "node_features": {node: clean_graph.nodes[node] for node in clean_graph.nodes()},
-    "edge_features": {(u, v): clean_graph.edges[u, v] for u, v in clean_graph.edges()},
-    "info": info
-    }
-
-    nx_file = os.path.join(nx_dir, f"{graph_name}.pkl")
-    with open(nx_file, "wb") as f:
-        pkl.dump(clean_graph, f)
-
     pp_file = os.path.join(pp_dir, f"{graph_name}.json")
     with open(pp_file, "w") as f:
         json.dump(pp.to_json(pp_network), f)
 
-    feat_file = os.path.join(feat_dir, f"{graph_name}.pkl")
-    with open(feat_file, "wb") as f:
-        pkl.dump(features, f)
-
     logger.info(f"Saved graph {graph_name} to {save_location}")
-    logger.info(f"[Worker {os.getpid()}] Saving graph {graph_name} to {nx_dir}")
+    logger.info(f"[Worker {os.getpid()}] Saving graph {graph_name} to {pp_dir}")
 
