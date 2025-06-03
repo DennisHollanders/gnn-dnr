@@ -4,7 +4,7 @@
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=48
 # SBATCH --gres=gpu:1 
 #SBATCH --mem=16G
 #SBATCH --time=1-00:00:00
@@ -32,7 +32,8 @@ cd $HOME/gnn-dnr || exit 1 # Add error check for cd
 
 echo "Running script using 'poetry run'..."
 
-poetry run python -I data_generation/define_ground_truth.py
+poetry run python -I data_generation/define_ground_truth.py --folder_path "/vast.mnt/home/20174047/gnn-dnr/data/test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1/test/"
+
 echo "Script finished."
 
 # Deactivate if using Option 1 - not needed for Option 2
