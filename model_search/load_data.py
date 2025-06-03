@@ -2,10 +2,11 @@ import os
 import json
 import pickle as pkl
 from enum import Enum
+from unittest import loader
 import torch
 from torch_geometric.utils import from_networkx
 from torch_geometric.data import Data, Batch
-from torch_geometric.loader import DataLoader, NeighborLoader 
+from torch_geometric.loader import DataLoader, NeighborLoader, DynamicBatchSampler
 import networkx as nx
 import numpy as np
 import pandapower as pp
@@ -26,7 +27,7 @@ src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if src_path not in sys.path:
     sys.path.append(src_path)
 
-from electrify_subgraph import extract_node_features, extract_edge_features
+from preprocess_data import * 
 
 CACHE_ROOT_DIR = Path("data/cached_datasets")
 
@@ -36,6 +37,7 @@ class DataloaderType(Enum):
     DEFAULT = "default"
     GRAPHYR = "graphyr"
     PINN = "pinn"
+    CVX = "cvx"
 
 class DNRDataset(Data):
     def __init__(self, **kwargs):
@@ -223,7 +225,7 @@ def load_pp_networks(base_directory):
     return nets
 
 
-def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
+def create_pyg_from_pp(pp_net_raw):
     """
     Accepts either a pandapower Net, a JSON string, or a dict.
     Converts to a Net if needed, then runs PF and extracts features.
@@ -240,12 +242,11 @@ def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
         pp_net = pp_net_raw
 
     # --- run power flow ---
-    pp.runpp(pp_net)
+    # pp.runpp(pp_net)
 
     # ── build a dense, contiguous bus-id → row lookup ─────────────
     bus_ids = pp_net.bus.index.to_numpy(dtype=int)           # original IDs
-    id2row  = {bid: i for i, bid in enumerate(bus_ids)}      # 0 … n-1
-    n_nodes = len(bus_ids)
+    id2row  = {bid: i for i, bid in enumerate(bus_ids)}      # 0 … n-1)
 
     # --- node features ---
     bus_res = pp_net.res_bus.loc[bus_ids]     
@@ -260,30 +261,28 @@ def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
     lines = pp_net.line
     n_lines = len(lines)
 
-    # bus re-indexing stays exactly as before
-    from_b = [id2row[int(b)] for b in lines.from_bus.values]
-    to_b   = [id2row[int(b)] for b in lines.to_bus.values]
+        # Re-index bus connections using pandas' map for efficiency
+    from_b = lines.from_bus.map(id2row).to_numpy(dtype=np.int64)
+    to_b   = lines.to_bus.map(id2row).to_numpy(dtype=np.int64)
     
-    #edge_index = torch.tensor([from_b, to_b], dtype=torch.long)
-    edge_index = torch.as_tensor( np.vstack((from_b, to_b)), dtype=torch.long, device="cpu"
-        )  
-    #edge_index = torch.as_tensor(np.vstack((from_b, to_b)), dtype=torch.long)
-    switch_state = np.ones(n_lines, dtype=int)         # default: closed
+    edge_index = torch.from_numpy(np.vstack((from_b, to_b)))
 
-    for _, sw in pp_net.switch.iterrows():
-        if sw.et == "l":                               # only line-switches
-            line_idx   = int(sw.element)               # idx in  pp_net.line
-            switch_state[line_idx] = int(sw.closed)    # 1 = closed, 0 = open
-    R = lines.r_ohm_per_km.values
-    X = lines.x_ohm_per_km.values
+    switch_state = np.ones(n_lines, dtype=int)
+    line_switches = pp_net.switch[pp_net.switch.et == "l"]
+    # build a map from line-ID → row idx in `lines`
+    line_idx = lines.index.to_numpy(dtype=int)
+    id2pos   = {lid: pos for pos, lid in enumerate(line_idx)}
+    # extract positions for each switch’s element
+    elems    = line_switches.element.to_numpy(dtype=int)
+    positions = np.array([id2pos[e] for e in elems], dtype=int)
+    switch_state[positions] = line_switches.closed.to_numpy(dtype=int)
 
-    # switches = pp_net.switch
-    # sw_map = {(id2row[int(r.bus)], id2row[int(r.element)]): int(r.closed)
-    #           for _, r in switches.iterrows() if r.et == "l"}
-    edge_attr = torch.tensor(np.vstack([R, X, switch_state]).T, dtype=torch.float)
-    #switch_state = [sw_map.get((u, v), 0) for u, v in zip(from_b, to_b)]
+    R = lines.r_ohm_per_km.to_numpy()
+    X = lines.x_ohm_per_km.to_numpy()
     
-    #edge_attr = torch.tensor(np.vstack([R, X, switch_state]).T, dtype=torch.float)
+    edge_attr = torch.from_numpy(np.vstack([R, X, switch_state]).T).float()
+
+
     return Data(
         x=x,
         edge_index=edge_index,
@@ -291,12 +290,15 @@ def create_pyg_from_pp(pp_net_raw, loader_type=DataloaderType.DEFAULT):
         num_nodes=x.size(0)
     )
 
-def create_pyg_dataset_simple(
+def create_pyg_dataset(
     base_directory,
-    loader_type: DataloaderType = DataloaderType.DEFAULT,
+    dataset_type: str ="default",
     feature_phase_prob: float = 0.5,
     seed: int = None
 ):
+    if dataset_type == "cvx":
+        logger.info("including cvx features")
+
     pp_all = load_pp_networks(base_directory)
     if seed is not None:
         random.seed(seed)
@@ -309,13 +311,36 @@ def create_pyg_dataset_simple(
             continue
 
         # 1) pick original vs post_mst for X-features
-        phase = "post_mst" if random.random() < feature_phase_prob else "original"
-        data_x = create_pyg_from_pp(pp_all[phase][gid], loader_type)
+        phase = "post_mst" #if random.random() < feature_phase_prob else "original"
+        data_x = create_pyg_from_pp(pp_all[phase][gid])
 
         # 2) build y-labels from optimized net
-        data_y = create_pyg_from_pp(net_opt, loader_type)
+        data_y = create_pyg_from_pp(net_opt)
         data_x.edge_y = data_y.edge_attr[:, 2]    # switch_state
         data_x.node_y_voltage = data_y.x[:, 2]    # vm_pu
+
+        if dataset_type == "cvx":
+            cvx_feat =cxv_features(pp_all[phase][gid] )
+            # Store CVX features as additional attributes in the Data object
+            data_x.cvx_N = cvx_feat['N']
+            data_x.cvx_E = cvx_feat['E']
+            data_x.cvx_from_idx = cvx_feat['from_idx']
+            data_x.cvx_to_idx = cvx_feat['to_idx']
+            data_x.cvx_r_pu = cvx_feat['r_pu']
+            data_x.cvx_x_pu = cvx_feat['x_pu']
+            data_x.cvx_p_inj = cvx_feat['p_inj']
+            data_x.cvx_q_inj = cvx_feat['q_inj']
+            data_x.cvx_bigM_flow = cvx_feat['bigM_flow']
+            data_x.cvx_bigM_v = torch.tensor(cvx_feat['bigM_v'], dtype=torch.float32)
+            data_x.cvx_sub_idx = cvx_feat['sub_idx']
+            data_x.cvx_y0 = cvx_feat['y0']
+
+        # sanity checks:
+        if data_x.num_nodes != data_y.num_nodes:
+            raise ValueError(f"{gid}: node count mismatch X={data_x.num_nodes} vs Y={data_y.num_nodes}")
+        if data_x.edge_index.size(1) != data_y.edge_index.size(1):
+            raise ValueError(f"{gid}: edge count mismatch X={data_x.edge_index.size(1)} vs Y={data_y.edge_index.size(1)}")
+
 
         data_list.append(data_x)
 
@@ -323,81 +348,11 @@ def create_pyg_dataset_simple(
     return data_list
 
 def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True, **kwargs):
-    class DynamicBatchSampler(torch.utils.data.Sampler):
-        def __init__(self, dataset, max_nodes, max_edges, shuffle):
-            self.dataset = dataset
-            self.max_nodes = max_nodes
-            self.max_edges = max_edges
-            self.shuffle = shuffle
-            self.indices = list(range(len(dataset)))
-        
-            self.graph_sizes = [(d.num_nodes, d.num_edges) for d in dataset]
-            #logger.info("Sampler initialized: %d graphs; node_limit=%d, edge_limit=%d",
-            #            len(self.indices), max_nodes, max_edges)
-
-        def __iter__(self):
-            # Get indices of all graphs
-            indices = self.indices.copy()
-            
-            # Shuffle if required
-            if self.shuffle:
-                torch.manual_seed(int(torch.empty((), dtype=torch.int64).random_().item()))
-                indices = torch.randperm(len(indices)).tolist()
-                #logger.debug("Shuffled indices: %s", indices)
-            
-            # Create batches
-            current_batch = []
-            current_nodes = 0
-            current_edges = 0
-            
-            for idx in indices:
-                nodes, edges = self.graph_sizes[idx]
-                
-                if ((current_nodes + nodes > self.max_nodes or 
-                     current_edges + edges > self.max_edges) and 
-                    len(current_batch) > 0):
-                    # Yield the current batch
-                    #logger.debug("Yielding batch of %d graphs (nodes=%d, edges=%d)",
-                        # len(current_batch),           # <-- was len(batch)
-                        # current_nodes,
-                        # current_edges)
-                    yield current_batch
-                    # Start a new batch with the current graph
-                    current_batch = [idx]
-                    current_nodes = nodes
-                    current_edges = edges
-                else:
-                    # Add this graph to the current batch
-                    current_batch.append(idx)
-                    current_nodes += nodes
-                    current_edges += edges
-            
-            # Yield the last batch if it's not empty
-            if current_batch:
-                # logger.debug(
-                #     "Yielding final batch of %d graphs",
-                #     len(current_batch)        # <-- was len(batch)
-                # )
-                yield current_batch
-                
-        def __len__(self):
-            # This is an estimate since actual number of batches depends on graph sizes
-            if not self.graph_sizes:
-                return 0
-            total_nodes = sum(nodes for nodes, _ in self.graph_sizes)
-            total_edges = sum(edges for _, edges in self.graph_sizes)
-            est = max(1, min(total_nodes // self.max_nodes + 1, total_edges // self.max_edges + 1))
-            #logger.debug("Sampler __len__ estimate: %d", est)
-            return est
-    
-    # Create the batch sampler
-    batch_sampler = DynamicBatchSampler(dataset, max_nodes, max_edges, shuffle)
-    
-    # Create DataLoader with the custom batch sampler
+    est_batches = math.ceil(sum(d.num_nodes for d in dataset) / max_nodes)
+    batch_sampler = DynamicBatchSampler(dataset, max_nodes,mode="node", shuffle=shuffle, num_steps =est_batches)
     return DataLoader(
         dataset, 
         batch_sampler=batch_sampler, 
-        collate_fn= lambda batch: Batch.from_data_list(batch),
         **kwargs
     )
 def create_neighbor_loaders(dataset, num_neighbors=[15, 10], batch_size=1024, **kwargs):
@@ -421,8 +376,8 @@ def _load_or_create_dataset(
     dataset_name: str,
     input_data_path_str: str,
     dataset_cache_file_path: Path, # Accepts the full path to the cache file
-    loader_type: DataloaderType,
-    seed: int
+    dataset_type: str = "default",
+    seed: int = 0
 ):
     """Handles loading a single dataset from cache or creating and caching it."""
     dataset_cache_dir = dataset_cache_file_path.parent # Derive dir from full file path
@@ -443,7 +398,7 @@ def _load_or_create_dataset(
     
     if not loaded_dataset: # If cache miss or loading failed
         logger.info(f"Generating {dataset_name} dataset for: {input_data_path_str}")
-        created_data = create_pyg_dataset_simple(input_data_path_str, loader_type, seed=seed)
+        created_data = create_pyg_dataset(input_data_path_str, dataset_type, seed=seed)
         loaded_dataset = created_data if created_data is not None else []
 
         if not loaded_dataset and input_data_path_str: # Check if still empty after attempting generation
@@ -464,7 +419,7 @@ def _load_or_create_dataset(
 def create_data_loaders(
     base_directory: str,
     secondary_directory: str = None,
-    loader_type: DataloaderType = DataloaderType.DEFAULT,
+    dataset_type: str = "default",	
     batch_size: int = 32,
     max_nodes: int = 1000,
     max_edges: int = 5000,
@@ -488,14 +443,14 @@ def create_data_loaders(
     base_set_cache_key = _get_cache_path_suffix(base_set_name_path_str)
     
     synthetic_cache_dir = CACHE_ROOT_DIR / base_set_cache_key
-    synthetic_cache_filename = f"{Path(base_directory).name}.pt" # e.g., "test.pt"
-    synthetic_cache_file_path = synthetic_cache_dir / synthetic_cache_filename
+    synthetic_cache_filename = f"{Path(base_directory).name}-{dataset_type}.pt"
+    synthetic_cache_file_path = synthetic_cache_dir / synthetic_cache_filename 
 
     synthetic_dataset = _load_or_create_dataset(
         dataset_name="synthetic (from base_dir)",
         input_data_path_str=base_directory,
         dataset_cache_file_path=synthetic_cache_file_path,
-        loader_type=loader_type,
+        dataset_type=dataset_type,
         seed=seed
     )
     if not synthetic_dataset and base_directory:
@@ -510,14 +465,13 @@ def create_data_loaders(
         
         val_real_input_path_str = str(Path(secondary_directory) / "validation")
         val_real_cache_dir = CACHE_ROOT_DIR / secondary_set_cache_key
-        val_real_cache_filename = "validation.pt"
-        val_real_cache_file_path = val_real_cache_dir / val_real_cache_filename
+        val_real_cache_file_path = val_real_cache_dir / f"validation-{dataset_type}.pt"
 
         val_real_set = _load_or_create_dataset(
             dataset_name="real validation",
             input_data_path_str=val_real_input_path_str,
             dataset_cache_file_path=val_real_cache_file_path,
-            loader_type=loader_type,
+            dataset_type=dataset_type,
             seed=seed
         )
     else:
@@ -530,14 +484,13 @@ def create_data_loaders(
         
         test_input_path_str = str(Path(secondary_directory) / "test")
         test_cache_dir = CACHE_ROOT_DIR / secondary_set_cache_key # Same cache dir as val_real_set
-        test_cache_filename = "test.pt" # Specific filename for this dataset
-        test_cache_file_path = test_cache_dir / test_cache_filename
+        test_cache_file_path = test_cache_dir / f"test-{dataset_type}.pt"
 
         test_set = _load_or_create_dataset(
             dataset_name="test set (from secondary_dir/test)",
             input_data_path_str=test_input_path_str,
             dataset_cache_file_path=test_cache_file_path,
-            loader_type=loader_type,
+            dataset_type=dataset_type,
             seed=seed
         )
         if not test_set: # Check if test set loading/generation failed
@@ -596,10 +549,16 @@ def create_data_loaders(
 
     def _create_loader(dataset, is_train_loader): # Renamed for clarity
         if not dataset: return None
+        loader_kwargs = {
+            'num_workers': num_workers,
+            'pin_memory': False,  # No GPU, so no need to pin memory
+            'persistent_workers': True if num_workers > 0 else False
+        }
         if batching_type == "dynamic":
-            return create_dynamic_loader(dataset, max_nodes=max_nodes, max_edges=max_edges, shuffle=is_train_loader, num_workers=num_workers)
+            return create_dynamic_loader(dataset, max_nodes=max_nodes, max_edges=max_edges, shuffle=is_train_loader, **loader_kwargs)
+        
         elif batching_type == "standard":
-            return DataLoader(dataset, batch_size=batch_size, shuffle=is_train_loader, num_workers=num_workers)
+            return DataLoader(dataset, batch_size=batch_size, shuffle=is_train_loader,**loader_kwargs)
         # Add other batching types if needed
         return None
 
@@ -608,7 +567,7 @@ def create_data_loaders(
     val_real_loader = _create_loader(val_real_set, False)
     test_loader = _create_loader(test_set, False)
     
-    if batching_type == "neighbor": # Specific warning if this type is chosen
+    if batching_type == "neighbor": 
          logger.error("NeighborLoader batching_type not fully implemented for list[Data] in this setup. Loaders will be None if this was the intended type for all.")
 
     print(f"\nCreated data loaders with:")
@@ -620,34 +579,12 @@ def create_data_loaders(
     return train_loader, val_synthetic_loader, val_real_loader, test_loader
 
 
-
-def _collect_batch_stats(loader):
-    """Return list[(n_nodes, n_edges)] for *all* batches in loader."""
-    stats = []
-    for batch in loader:
-        if hasattr(batch, "num_graphs"):   # PyG Batch or NeighborSampler output
-            stats.append((batch.num_nodes, batch.num_edges))
-        elif isinstance(batch, list):      # DynamicBatchSampler → list[Data]
-            n = sum(d.num_nodes for d in batch)
-            e = sum(d.num_edges for d in batch)
-            stats.append((n, e))
-        else:                              # Fallback single‐graph batch
-            stats.append((batch.num_nodes, batch.num_edges))
-    return stats
-
-def _plot_hist(vals, title, fname):
-    plt.figure()
-    plt.hist(vals, bins=min(30, int(math.sqrt(len(vals))) + 2))
-    plt.title(title); plt.xlabel("count"); plt.ylabel("#batches")
-    plt.tight_layout(); plt.savefig(fname); plt.close()
-
-
 if __name__ == "__main__":
     # logging.basicConfig(
     # level=logging.INFO,
     # format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     # datefmt="%Y-%m-%d %H:%M:%S",
-    # )
+    # 
     # logger = logging.getLogger(__name__)
     # log_level = os.getenv("PYTHON_LOG_LEVEL", "INFO").upper()
     # logger.setLevel(log_level)
@@ -658,15 +595,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
     parser.add_argument("--base_dir", type=str,
                         #default=r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test",
-                        
-                        default = r"data\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\test",
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\test",
                         help="Base directory containing the train/validation folders")
     parser.add_argument("--secondary_dir", type=str,
                          #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_data_set_test",
                         default=r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32",
                         help="Secondary directory containing the test/validation folders")
-    parser.add_argument("--loader_type", type=str, default="default", 
-                        choices=["default", "graphyr", "pinn",],
+    parser.add_argument("--dataset_type", type=str, default="default", 
+                        choices=["default", "graphyr", "pinn","cvx"],
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="dynamic",
                         choices =["standard", "dynamic", "neighbor"],)
@@ -679,21 +615,13 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Map string argument to enum
-    loader_type_map = {
-        "default": DataloaderType.DEFAULT,
-        "graphyr": DataloaderType.GRAPHYR,
-        "pinn": DataloaderType.PINN,
-    }
-    loader_type = loader_type_map[args.loader_type]
-    
     print("base_dir:", args.base_dir)
     print("secondary_dir:", args.secondary_dir)
     # Create data loaders
     train_loader, val_synthetic_loader,val_real_loader, test_loader = create_data_loaders(
         base_directory=args.base_dir,
         secondary_directory=args.secondary_dir,
-        loader_type=loader_type,
+        dataset_type=args.dataset_type,
         batch_size=args.batch_size,
         max_nodes=args.max_nodes,
         max_edges=args.max_edges,
@@ -719,20 +647,21 @@ if __name__ == "__main__":
         print(f"Batch type: {type(batch)}")
         print("batch:", batch)
         print(f"Batch size: {len(batch)}")
+
+        if hasattr(batch, 'batch'):
+            # PyG Batch: batch.batch maps each node to its graph-id
+            nodes_per_graph = torch.bincount(batch.batch)
+            edge_src_to_graph = batch.batch[batch.edge_index[0]]
+            edges_per_graph = torch.bincount(edge_src_to_graph)
+        else:
+            # e.g. if batch is a list of Data objects
+            data_list = batch if isinstance(batch, list) else batch.to_data_list()
+            nodes_per_graph = torch.tensor([data.num_nodes for data in data_list])
+            edges_per_graph = torch.tensor([data.num_edges for data in data_list])
+
+        print(f"Nodes per graph in this batch: {nodes_per_graph.tolist()}")
+        print(f"Edges per graph in this batch: {edges_per_graph.tolist()}")
         # Print loader-specific features
-        if loader_type in [DataloaderType.GRAPHYR, DataloaderType.PINN]:
-            if hasattr(batch, 'conductance_matrix_index'):
-                print(f"Conductance matrix indices shape: {batch.conductance_matrix_index.shape}")
-            if hasattr(batch, 'adjacency_matrix_index'):
-                print(f"Adjacency matrix indices shape: {batch.adjacency_matrix_index.shape}")
-            if hasattr(batch, 'switch_matrix_index'):
-                print(f"Switch matrix indices shape: {batch.switch_matrix_index.shape}")
-        
-        if loader_type == DataloaderType.PINN:
-            if hasattr(batch, 'laplacian_matrix_index'):
-                print(f"Laplacian matrix indices shape: {batch.laplacian_matrix_index.shape}")
-            if hasattr(batch, 'admittance_matrix_index'):
-                print(f"Admittance matrix indices shape: {batch.admittance_matrix_index.shape}")
         if args.secondary_dir:         
             print("test_batch:", batch_test) 
             print(f"Test Batch size: {len(batch_test)}")
