@@ -1,16 +1,15 @@
 description: "Train MLP"
 
-job_name: "mlp_test"
+job_name: "cvx_test"
 # Data
-
 dataset_names: ["train",
                   "validation",
                   "test"]
-folder_names: [ "data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\\test",
-                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",
-                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",]
+folder_names: [ "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",
+                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test", 
+                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"]
 # Model
-model_module: "MLP"
+model_module: "cvx"
 
 # Training
 input_dim: 4
@@ -19,22 +18,22 @@ latent_dim: 8
 activation: "relu"
 criterion_name: MSELoss
 dropout_rate: 0.0
-batch_size: 16
+batch_size: 1
 learning_rate: 0.0001
 weight_decay: 0.00005
 
-epochs: 2
+epochs: 5
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
 wandb: True
 config: config-mlp.yaml
 evaluate_every_x_epoch: 5
-dataset_type: "default"
+dataset_type: "cvx"
 # Data Loading Configuration
-batching_type: "dynamic"
+batching_type: "standard"
 max_nodes: 32000
 max_edges: 35000
 train_ratio: 0.85
 seed: 42
-num_workers: 1
+num_workers: 4

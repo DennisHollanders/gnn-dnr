@@ -1,4 +1,5 @@
 import argparse
+from ast import arg
 import os
 import yaml
 import torch
@@ -6,18 +7,23 @@ import torch.optim as optim
 import torch.nn as nn
 from pathlib import Path
 from train import train, test
-from torch_geometric.data import DataLoader
-from load_data import create_data_loaders, DataloaderType
 import optuna
 import wandb
 import importlib
 import sys
 import logging 
-from tqdm import tqdm
-from torch.profiler import profile, record_function, ProfilerActivity
+
+
+
+# :TODO WEIGHT INITIALIZATION
+# :TODO OPTUNA HYPERPARAMETER SEARCH
+# :TODO FIX LOGGING TRAIN
+# :TODO Implement Single commodity flow to convex model
+
+
 
 console = logging.StreamHandler(sys.stdout)
-console.setFormatter(logging.Formatter("%(message)s"))   # just the text
+console.setFormatter(logging.Formatter("%(message)s"))   
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +33,7 @@ logging.basicConfig(
 # ── 2. attach it to your logger ──────────────────────────────────────────────
 logger = logging.getLogger("Distribution Network Reconfiguration -- Model Search")
 logger.setLevel(logging.INFO)
-logger.handlers.clear()          # throw away any old handlers that carry the prefix
+logger.handlers.clear()         
 logger.addHandler(console)
 logger.propagate = False 
 
@@ -41,6 +47,7 @@ model_search_path = ROOT_DIR / "model_search"
 if str(model_search_path) not in sys.path:
     sys.path.append(str(model_search_path))
 
+from load_data import create_data_loaders
 from evaluation.evaluation import run_evaluation
 
 # Fallback description if none is provided via command line or YAML.
@@ -51,8 +58,11 @@ def parse_args():
     # New argument to allow overriding the description (e.g., "Train PIGNN")
     parser.add_argument("--description", type=str, help="Description for the training job")
     parser.add_argument("--job_name", type=str, default="default_job", help="Job name")
-    parser.add_argument("--train_data_folder", type=str, help="Path to synthetic data folder")
-    parser.add_argument("--real_val_data_folder", type=str, help="Path to real data folder for second validation loop")
+    parser.add_argument("--dataset_names", type=str, nargs="+", default= ["train","validation","test"], help="Names of datasets to create loaders for")
+    parser.add_argument("--folder_names", type=str, nargs="+", default=[
+                "data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\\test",
+                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",
+                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"], help="Names of folders to look for datasets in")
     parser.add_argument("--model_module", type=str, default="first_model",                        help="Name of file containing the model class")
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[64, 32, 16], help="Hidden dimensions")
     parser.add_argument("--latent_dim", type=int, default=8, help="Latent dimension")
@@ -71,13 +81,16 @@ def parse_args():
     parser.add_argument("--config", type=str, help="Path to YAML config file (overrides arguments)")
     parser.add_argument("--evaluate_every_x_epoch", type=int, default=5, help="Epoch interval for validation")
     
-    parser.add_argument("--loader_type", type=str, default="default", choices=["default", "PINN", "PIGNN", "GNN", "MLP"],)
+    parser.add_argument("--dataset_type", type=str, default="default", choices=["default", "PINN", "PIGNN", "GNN", "MLP"],)
     parser.add_argument("--batching_type", type=str, default="dynamic", choices=["standard", "dynamic"])
     parser.add_argument("--max_nodes", type=int, default=1000)
     parser.add_argument("--max_edges", type=int, default=5000)
     parser.add_argument("--train_ratio", type=float, default=0.85)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--config_path", type=str, help="Path to the config file")
+    parser.add_argument("--override_job_name", type=str, help="Override job name for saving the model")
+    parser.add_argument("--model_path", type=str, help="Path to the saved model")
     return parser.parse_args()
 
 def save_args_to_yaml(args, model_folder):
@@ -92,6 +105,7 @@ def save_args_to_yaml(args, model_folder):
     with open(filename, "w") as f:
         yaml.dump(config, f)
     logger.info(f"Configuration saved to {filename}")
+    return filename
 
 def load_args_from_yaml(filepath):
     """Load arguments from a YAML config file and return an argparse.Namespace object."""
@@ -104,27 +118,20 @@ def main():
     args = parse_args()
 
     print("args before loading from yaml:", args)
-    
-    # If a YAML config is provided, load it to override command-line arguments.
+
     if args.config:
         logger.info(f"Loaded configuration from {args.config}")
         args = load_args_from_yaml(args.config)
         
     print("args after loading from yaml:", args)
-    # Import the model module to get the folder in which it resides.
     model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
     model_folder = os.path.dirname(model_module.__file__)
     print("DEBUG: Value of args.model_module before import:", args.model_module)
     try:
-        # Assuming model modules are in model_search/models/your_model_name/your_model_name.py
-        # The module path should be models.your_model_name.your_model_name
         model_module_path = f"models.{args.model_module}.{args.model_module}"
         print("DEBUG: Constructed module path for import:", model_module_path)
-
-        # Attempt to import the module
         model_module = importlib.import_module(model_module_path)
 
-        # Get the directory where the model module file is located
         model_folder = os.path.dirname(model_module.__file__)
 
         # Get the model class from the imported module
@@ -135,15 +142,15 @@ def main():
         print(f"Error importing model module '{model_module_path}': {e}")
         print("Please ensure your model is in the correct directory structure (e.g., model_search/models/YourModelName/YourModelName.py)")
         print(f"Also check that the module name '{args.model_module}' matches the directory and file name.")
-        sys.exit(1) # Exit if model cannot be imported
+        sys.exit(1) 
     except AttributeError as e:
          print(f"Error finding model class '{args.model_module}' in module '{model_module_path}': {e}")
          print("Please ensure the model class name within the file matches the module name.")
-         sys.exit(1) # Exit if model class is not found
+         sys.exit(1) 
     except Exception as e:
          print(f"An unexpected error occurred during model import or class retrieval: {e}")
          sys.exit(1)
-    # Use provided description if available; otherwise, use the default.
+
     project_description = args.description if args.description else DEFAULT_DESCRIPTION
 
     if args.wandb:
@@ -151,18 +158,18 @@ def main():
         args.job_name = run.name    
 
     # Save the configuration file in the model folder's config_files subdirectory.
-    save_args_to_yaml(args, model_folder)
+    file_name_yaml = save_args_to_yaml(args, model_folder)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    logger.info(args.loader_type)
+    logger.info(args.dataset_type)
     
-    logger.info(args.train_data_folder)
-    logger.info(args.real_val_data_folder)
-    train_loader, val_loader, val_real_loader, test_loader = create_data_loaders(
-        base_directory=args.train_data_folder,
-        secondary_directory=args.real_val_data_folder,
-        loader_type=DataloaderType[args.loader_type.upper()], 
+    logger.info(args.dataset_names)
+    logger.info(args.folder_names)
+    dataloaders = create_data_loaders(
+        dataset_names=args.dataset_names,
+        folder_names=args.folder_names,
+        dataset_type=args.dataset_type, 
         batch_size=args.batch_size,
         max_nodes=args.max_nodes,
         max_edges=args.max_edges,
@@ -171,20 +178,10 @@ def main():
         num_workers=args.num_workers,
         batching_type=args.batching_type,
     )
-    loaders = [train_loader, val_loader, val_real_loader, test_loader]
+    train_loader, validation_loader, test_loader = dataloaders.get("train"),  dataloaders.get("validation"), dataloaders.get("test")
 
+    
     model_class = getattr(model_module, args.model_module)
-
-    # logger.info("\n +++++++++++++++++++")
-    # for idx, loader in enumerate(loaders):
-    #     logger.info(f"\n ---printing {loader}  stats:")
-    #     batch = next(iter(loader))
-    #     logger.info(f"keys: {batch.keys()}")
-    #     logger.info(f"batch size: {batch.batch_size}")
-    #     logger.info(f"edge index: {batch.edge_index.shape}")
-    #     logger.info(f"edge attr: {batch.edge_attr.shape}")
-    #     logger.info(f"node attr: {batch.x.shape}")
-
     node_input_dim = train_loader.dataset[0].x.shape[1]
     edge_input_dim = train_loader.dataset[0].edge_attr.shape[1]
 
@@ -200,6 +197,10 @@ def main():
             criterion = nn.MSELoss()
         elif "L1Loss":
             criterion = nn.L1Loss()
+        elif "BCEWithLogitsLoss":
+            criterion = nn.BCEWithLogitsLoss()
+        elif "CrossEntropyLoss":
+            criterion = nn.CrossEntropyLoss()        
         elif "SmoothL1Loss":
             criterion = nn.SmoothL1Loss()
     
@@ -217,41 +218,21 @@ def main():
     best_loss = float("inf")
     patience = 0
 
-    for loader in train_loader: 
-        print(f"Loader type: {type(loader)}")
-
     logger.info(f"Training {args.model_module} with {len(train_loader.dataset)} samples")
-    logger.info(f"Validation with {len(val_loader.dataset)} samples")
+    logger.info(f"Validation with {len(validation_loader.dataset)} samples")
     try:
         logger.info(f"Test with {len(test_loader.dataset)} samples")
-        logger.info(f"real_val with {len(val_real_loader.dataset)} samples")
+        #logger.info(f"real_val with {len(validation_real_loader.dataset)} samples")
     except AttributeError:
         logger.info("No test dataset provided")
 
     for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
         train_loss, train_dict = train(model, train_loader, optimizer, criterion, device)
-        val_loss, val_dict = test(model, val_loader, criterion, device)
-        if epoch == 1: # Or any specific epoch you want to profile
-            with profile(activities=[ProfilerActivity.CPU], 
-                        record_shapes=True, 
-                        profile_memory=True,
-                        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1), # Profile 3 steps after 1 wait and 1 warmup step
-                        on_trace_ready=torch.profiler.tensorboard_trace_handler('./log_dir/profile'), # Save to tensorboard
-                        with_stack=True
-                        ) as prof:
-                for i_batch, current_batch_data in enumerate(train_loader): # Assuming train_loader is your training data loader
-                    # Your existing training step for one batch
-                    train_loss_batch, train_dict_batch = train(model, [current_batch_data], optimizer, criterion, device) # Pass a list containing the single batch
-                    prof.step() # Important: call after each step
-                    if i_batch >= 5: # e.g. profile 5 steps (1 wait + 1 warmup + 3 active)
-                        break 
-        # Then proceed with normal training for the rest of the epoch / other epochs
-        else:
-            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device)
+        val_loss, val_dict = test(model, validation_loader, criterion, device)
 
         if epoch % 5 == 0:
-            if val_real_loader:
-                val_real_loss, val_real_dict = test(model, val_real_loader, criterion, device)
+            if validation_loader:
+                val_real_loss, val_real_dict = test(model, validation_loader, criterion, device)
                 logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Real Loss: {val_real_loss:.4f}")
                 if args.wandb:
                     wandb.log({"val_real_loss": val_real_loss, **val_real_dict})
@@ -278,9 +259,17 @@ def main():
         if args.wandb:
              wandb.log({"test_loss": test_loss, **test_dict}) # Log test loss and metrics
 
-    run_evaluation(model, train_loader, val_loader, val_real_loader, test_loader, device, args)
+    model_save_path = f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch}-Last.pt"
+    torch.save(model.state_dict(),model_save_path)
+    
+    # add model save_path to args
+    args.model_path = model_save_path
+    args.config_path = file_name_yaml 
+    args.override_job_name = args.model_module + "------" + args.job_name
 
-    torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch}-Last.pt")
-
+    try:
+        run_evaluation(model, train_loader, validation_loader, test_loader, device, args)
+    except Exception as e:
+        logger.error(f"Error during evaluation: {e}")   
 if __name__ == "__main__":
    main()

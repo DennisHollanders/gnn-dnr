@@ -1,12 +1,12 @@
 activation: relu
 batch_size: 8
-batching_type: dynamic
+batching_type: standard
 config: config-mlp.yaml
 criterion_name: MSELoss
-data_folder: data\test_val_real__range-30-230_nTest-1000_nVal-1000_2842025_1\test
 description: Train Graph Autoencoder
 dropout_rate: 0.0
-epochs: 100
+epochs: 10
+evaluate_every_x_epoch: 5
 hidden_dims:
 - 256
 - 128
@@ -18,15 +18,16 @@ hp_search_n_trials: 50
 input_dim: 4
 job_name: mlp_test
 latent_dim: 8
-learning_rate: 0.001
+learning_rate: 0.0001
 loader_type: default
 max_edges: 5000
 max_nodes: 1000
 model_module: MLP
 num_workers: 1
 patience: 10
-real_data_folder: data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32
+real_val_data_folder: data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32
 seed: 42
+train_data_folder: data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\\test
 train_ratio: 0.85
 wandb: false
 weight_decay: 5.0e-05

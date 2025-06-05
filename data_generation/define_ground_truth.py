@@ -28,7 +28,6 @@ if load_data_path not in sys.path:
 
 
 from SOCP_class_dnr import SOCP_class
-from load_data import load_graph_data_old
 from optimization_logging import setup_logging, get_logger
 from pyomo.environ import (value as pyo_val)
 
@@ -52,6 +51,69 @@ def get_n_workers():
     workers =int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
     print(f"Number of workers: {workers}")
     return workers
+
+def load_graph_data_old(base_directory):
+    logger.info("Loading stored data from %s", base_directory)
+
+    # Load features
+    features = {}
+    features_dir = os.path.join(base_directory, "graph_features")
+    if os.path.isdir(features_dir):
+        for fn in os.listdir(features_dir):
+            if not fn.endswith(".pkl"): 
+                continue
+            key = fn[:-4]
+            path = os.path.join(features_dir, fn)
+            logger.debug("  → loading feature %s", key)
+            with open(path, "rb") as f:
+                features[key] = pkl.load(f)
+    else:
+        logger.warning("No graph_features folder at %s", features_dir)
+    logger.info("Loaded %d feature sets", len(features))
+
+    # Load NetworkX
+    nx_graphs = {}
+    nx_dir = os.path.join(base_directory, "networkx_graphs")
+    if os.path.isdir(nx_dir):
+        for fn in os.listdir(nx_dir):
+            if not fn.endswith(".pkl"): 
+                continue
+            key = fn[:-4]
+            path = os.path.join(nx_dir, fn)
+            try:
+                with open(path, "rb") as f:
+                    nx_graphs[key] = pkl.load(f)
+            except Exception as e:
+                logger.error("Failed loading NX graph %s: %s", key, e)
+    else:
+        logger.warning("No networkx_graphs folder at %s", nx_dir)
+    logger.info("Loaded %d NetworkX graphs", len(nx_graphs))
+
+    # Load pandapower
+    pp_networks = {}
+    pp_dir = os.path.join(base_directory, "pandapower_networks")
+    if os.path.isdir(pp_dir):
+        for fn in os.listdir(pp_dir):
+            if not fn.endswith(".json"): 
+                continue
+            key = fn[:-5]
+            path = os.path.join(pp_dir, fn)
+            try:
+                with open(path) as f:
+                    raw = f.read()
+                try:
+                    pp_networks[key] = pp.from_json_string(raw)
+                except Exception:
+                    pp_networks[key] = json.loads(raw)
+                logger.debug("  → loaded pandapower network %s", key)
+            except Exception as e:
+                logger.error("Failed loading pandapower %s: %s", key, e)
+    else:
+        logger.warning("No pandapower_networks folder at %s", pp_dir)
+    logger.info("Loaded %d Pandapower networks", len(pp_networks))
+
+    return nx_graphs, pp_networks, features
+
 def build_nx_graph(net, include_switches=False, include_trafos=False):
     G = nx.Graph()
     G.add_nodes_from(net.bus.index)
@@ -1067,7 +1129,8 @@ def apply_optimization(folder_path, toggles=None, debug=False, serialize=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test\original",
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_03062025_range-130-100_10\original",
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test\original",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test/original",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_22052025_range-130-100_10\original",
                         #default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_14\test",

@@ -80,7 +80,7 @@ def parse_arguments():
                         help='Plot the distributions')
     parser.add_argument('--num_plots', type=int, default=3,
                         help='Number of subgraphs to plot (default: 3)')
-    parser.add_argument("--show_pandapower_report", type=bool, default=False,
+    parser.add_argument("--show_pandapower_report", type=bool, default=True,
                         help="Show the pandapower report for each subgraph")
     
     # Edge selection parameters
@@ -111,16 +111,16 @@ def parse_arguments():
                         help='Logging level (default: INFO)')
                         
     # Test and validation set options
-    parser.add_argument('--generate_train_data', default=False,
+    parser.add_argument('--generate_synthetic_data', default=True,
                         help='Generate training data')
-    parser.add_argument('--generate_test_val', default=True,
+    parser.add_argument('--sample_real_data', default=False,
                         help='Generate test and validation sets')
     
     parser.add_argument('--force_graph_topology', type=str, nargs='*', default=[],
                         help='List of specific graph topologies to force include (e.g., ["pp_case33bw", "simbench_1-MV-rural--0-sw"])')
     parser.add_argument('--dataset_names', type=list, nargs='+', default=["test", "validation"],
                         help='Names of datasets to create (default: ["test", "validation"])')
-    parser.add_argument('--samples_per_dataset', type=list, nargs='+', default=[10, 10],
+    parser.add_argument('--samples_per_dataset', type=list, nargs='+', default=[10000, 10000],
                         help='Number of samples for each dataset (default: [10, 10])')
 
 
@@ -191,7 +191,7 @@ def main():
     }
     
 
-    if args.generate_train_data:
+    if args.generate_synthetic_data:
         logger.info("\nGenerating training data...")
         # load static data 
         cbs_pc6_gdf, buurt_to_postcodes, consumption_df, standard_consumption_df = load_static_data(args.data_dir)
@@ -203,7 +203,7 @@ def main():
         transform_stats = transform_subgraphs(distributions, dataframes, args)
 
     # Generate test and validation sets if requested
-    if args.generate_test_val:
+    if args.sample_real_data:
 
         logger.info("\nGenerating test and validation sets...")
         # Generate test and validation sets

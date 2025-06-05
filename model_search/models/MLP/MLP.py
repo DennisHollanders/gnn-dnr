@@ -59,7 +59,7 @@ class MLP(nn.Module):
         # with the processed edge features.
         combined_dim = self.node_mlp_out_dim * 2 + self.edge_mlp_out_dim
         self.prediction_layer = nn.Linear(combined_dim, 1)
-
+        
         # Batch normalization layers
         self.node_batch_norm = nn.BatchNorm1d(self.node_mlp_out_dim)
         self.edge_batch_norm = nn.BatchNorm1d(self.edge_mlp_out_dim)

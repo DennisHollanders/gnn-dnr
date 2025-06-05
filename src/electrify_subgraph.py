@@ -43,16 +43,22 @@ if SRC_PATH not in sys.path:
 
 
 STANDARD_CABLE_MAPPING = {
-            'standard_cable_1': {"r_ohm_per_km": 0.124, "x_ohm_per_km": 0.08,
-                                 "c_nf_per_km": 280, "max_i_ka": 0.32,
-                                 "q_mm2": 150, "alpha": 0.00403, "type": "cs"},
-            'standard_cable_2': {"r_ohm_per_km": 0.162, "x_ohm_per_km": 0.07,
-                                 "c_nf_per_km": 310, "max_i_ka": 0.28,
-                                 "q_mm2": 240, "alpha": 0.00403, "type": "cs"},
-            'standard_cable_3': {"r_ohm_per_km": 0.193, "x_ohm_per_km": 0.06,
-                                 "c_nf_per_km": 210, "max_i_ka": 0.25,
-                                 "q_mm2": 95, "alpha": 0.00403, "type": "cs"}
+        'standard_cable_1': {
+            "r_ohm_per_km": 0.124, "x_ohm_per_km": 0.080,  
+            "c_nf_per_km": 280, "max_i_ka": 0.32,
+            "q_mm2": 150, "alpha": 0.00403, "type": "cs"
+        },
+        'standard_cable_2': {
+            "r_ohm_per_km": 0.162, "x_ohm_per_km": 0.070,  
+            "c_nf_per_km": 310, "max_i_ka": 0.28,
+            "q_mm2": 240, "alpha": 0.00403, "type": "cs"
+        },
+        'standard_cable_3': {
+            "r_ohm_per_km": 0.193, "x_ohm_per_km": 0.080,  
+            "c_nf_per_km": 210, "max_i_ka": 0.25,
+            "q_mm2": 95, "alpha": 0.00403, "type": "cs"
         }
+    }
 
 def sample_from_distribution_global(dist_name: str, distribution: Dict[str, Any]) -> Any:
     dist_type = distribution["type"]
@@ -786,6 +792,9 @@ def select_top_slack_nodes(subgraph, candidate_nodes, num_slack):
     return selected_slack_nodes
 
 def validate_and_fix_cable_parameters(cable_data: dict) -> dict:
+    """
+    Enhanced validation that aggressively fixes impedance issues
+    """
     fixed_data = cable_data.copy()
     
     r_ohm = fixed_data.get('r_ohm_per_km', 0.1)
@@ -793,30 +802,62 @@ def validate_and_fix_cable_parameters(cable_data: dict) -> dict:
     max_i_ka = fixed_data.get('max_i_ka', 0.3)
     q_mm2 = fixed_data.get('q_mm2', 150)
 
-    rx_ratio = r_ohm / x_ohm if x_ohm > 0 else float('inf')
+    # Define minimum acceptable values (increased from 0.001)
+    MIN_IMPEDANCE = 0.10  # 10 mΩ/km minimum
+    TARGET_MIN_IMPEDANCE = 0.20  # 20 mΩ/km preferred minimum
     
-    if rx_ratio > 8: 
-        logger.debug(f"Suspicious R/X ratio: {rx_ratio:.1f}. X might be in wrong units.")
-        if x_ohm < 0.05: 
-            fixed_data['x_ohm_per_km'] = x_ohm * 10
-            logger.debug(f"Fixed X from {x_ohm:.4f} to {fixed_data['x_ohm_per_km']:.4f} Ω/km")
+    # Fix extremely low resistance values
+    if r_ohm <= MIN_IMPEDANCE:
+        multiplier = 1
+        temp_r = r_ohm
+        while temp_r <= TARGET_MIN_IMPEDANCE and multiplier <= 1000:
+            temp_r *= 10
+            multiplier *= 10
+        fixed_data['r_ohm_per_km'] = temp_r
+        logger.warning(f"Fixed R from {r_ohm:.6f} to {temp_r:.6f} Ω/km (multiplied by {multiplier})")
+    
+    # Fix extremely low reactance values
+    if x_ohm <= MIN_IMPEDANCE:
+        multiplier = 1
+        temp_x = x_ohm
+        while temp_x <= TARGET_MIN_IMPEDANCE and multiplier <= 1000:
+            temp_x *= 10
+            multiplier *= 10
+        fixed_data['x_ohm_per_km'] = temp_x
+        logger.warning(f"Fixed X from {x_ohm:.6f} to {temp_x:.6f} Ω/km (multiplied by {multiplier})")
+    
+    # Check R/X ratio after fixes
+    new_r = fixed_data['r_ohm_per_km']
+    new_x = fixed_data['x_ohm_per_km']
+    rx_ratio = new_r / new_x if new_x > 0 else float('inf')
+    
+    # Typical power cables have R/X ratios between 0.1 and 5
+    if rx_ratio > 8:  # X too low relative to R
+        logger.warning(f"High R/X ratio: {rx_ratio:.2f}. Adjusting X upward.")
+        fixed_data['x_ohm_per_km'] = new_r / 3.0  # Target R/X = 3
+    elif rx_ratio < 0.1:  # R too low relative to X
+        logger.warning(f"Low R/X ratio: {rx_ratio:.2f}. Adjusting R upward.")
+        fixed_data['r_ohm_per_km'] = new_x * 0.3  # Target R/X = 0.3
+    
+    # Validate current rating
     expected_current_range = (q_mm2 * 0.5, q_mm2 * 3.0)
     current_in_amps = max_i_ka * 1000
     
     if current_in_amps < expected_current_range[0]:
         suggested_current = q_mm2 * 1.5 / 1000
-        logger.debug(f"Current rating {max_i_ka:.3f} kA seems low for {q_mm2} mm² cable")
+        logger.warning(f"Current rating {max_i_ka:.3f} kA too low for {q_mm2} mm² cable")
         fixed_data['max_i_ka'] = suggested_current
-        logger.debug(f"Fixed current rating to {suggested_current:.3f} kA")
     
-    fixed_data['r_ohm_per_km'] = max(fixed_data['r_ohm_per_km'], 0.01)
-    fixed_data['x_ohm_per_km'] = max(fixed_data['x_ohm_per_km'], 0.01)
-
+    # Ensure absolute minimums (safety net)
+    fixed_data['r_ohm_per_km'] = max(fixed_data['r_ohm_per_km'], MIN_IMPEDANCE)
+    fixed_data['x_ohm_per_km'] = max(fixed_data['x_ohm_per_km'], MIN_IMPEDANCE)
+    
+    # Set defaults for missing parameters
     fixed_data['c_nf_per_km'] = fixed_data.get('c_nf_per_km', 200)
     fixed_data['alpha'] = fixed_data.get('alpha', 0.004)
+    fixed_data['type'] = fixed_data.get('type', 'cs')
     
     return fixed_data
-
 
 def sanitize_edge_data(edge_data: dict, dist_callable, existing_line_types) -> dict:
     if not edge_data:
@@ -868,8 +909,31 @@ def analyze_network_issues(net, info):
             logger.warning(f"Very high generation/load ratio: {gen_load_ratio:.2f}")
         elif gen_load_ratio < 0.8:
             logger.warning(f"Low generation/load ratio: {gen_load_ratio:.2f}")
-
+def preprocess_edge_impedances(subgraph):
+    """
+    Preprocess all edge impedances before creating PandaPower network
+    """
+    fixed_edges = 0
+    for u, v, edge_data in subgraph.edges(data=True):
+        pandapower_data = edge_data.get("pandapower_type", {})
+        if isinstance(pandapower_data, dict) and pandapower_data:
+            original_r = pandapower_data.get('r_ohm_per_km', 0)
+            original_x = pandapower_data.get('x_ohm_per_km', 0)
+            
+            # Apply fixes
+            fixed_params = validate_and_fix_cable_parameters(pandapower_data)
+            
+            # Update edge data if changes were made
+            if (fixed_params['r_ohm_per_km'] != original_r or 
+                fixed_params['x_ohm_per_km'] != original_x):
+                edge_data["pandapower_type"] = fixed_params
+                fixed_edges += 1
+                logger.debug(f"Fixed impedances for edge {u}-{v}")
+    
+    logger.info(f"Preprocessed {fixed_edges} edges with impedance issues")
+    return subgraph
 def create_pandapower_network(subgraph: nx.Graph, args: dict, dist_callable: dict) -> pp.pandapowerNet:
+    subgraph = preprocess_edge_impedances(subgraph)
     net = pp.create_empty_network()
 
     base_num_slack = dist_callable["n_slack_busses"]()

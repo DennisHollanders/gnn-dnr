@@ -194,39 +194,49 @@ def generate_flexible_datasets(args,dataset_names: List[str],samples_per_dataset
     logger.info(f"Created {len(forced_cases)} forced topology cases from {len(available_forced)} available topologies")
 
     def allocate_dataset(dataset_name: str, target_samples: int, forced_cases_for_dataset: List = None):
-        """Allocate samples for a single dataset"""
+        """Allocate samples for a single dataset with load profile variations"""
         if forced_cases_for_dataset is None:
             forced_cases_for_dataset = []
         
         counts = {k: 0 for k in candidates}
         ds: Dict[str, Any] = {}
-        used_topologies = set()
         
-    
+        # Add forced cases first
         for name_forced, data_forced, topology in forced_cases_for_dataset:
             ds[name_forced] = data_forced
-            used_topologies.add(topology)
+            # Count this usage
+            if topology in counts:
+                counts[topology] += 1
 
-        remaining_candidates = {k: v for k, v in candidates.items() if k not in used_topologies}
+        # Keep generating until we reach target samples
+        candidate_keys = list(candidates.keys())
         
         while len(ds) < target_samples:
-            if not remaining_candidates:
-                logger.warning(f"Ran out of unique topologies for {dataset_name}. Generated {len(ds)}/{target_samples} samples.")
+            if not candidate_keys:
+                logger.warning(f"No candidate networks available for {dataset_name}. Generated {len(ds)}/{target_samples} samples.")
                 break
-                
-            for key, net in remaining_candidates.items():
+            
+            # Cycle through all available topologies
+            for key in candidate_keys:
                 if len(ds) >= target_samples:
                     break
                     
+                net = candidates[key]
                 idx = counts[key]
                 name, data = create_network_case(key, net, dataset_name, idx, args.load_variation_range)
-                if name and name not in ds:
+                
+                if name and name not in ds:  # Ensure unique case names
                     ds[name] = data
                     counts[key] += 1
-                    if key in remaining_candidates:
-                        del remaining_candidates[key]
-                    break
-        
+                else:
+                    # If name collision (unlikely with timepoint naming), try with a suffix
+                    if name:
+                        attempt = 0
+                        while f"{name}_v{attempt}" in ds and attempt < 100:
+                            attempt += 1
+                        if attempt < 100:
+                            ds[f"{name}_v{attempt}"] = data
+                            counts[key] += 1
         return ds
 
     # Generate datasets
@@ -316,6 +326,8 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
         net_case = copy.deepcopy(net)
         used_profile = False
         selected_timepoint = None
+        variation_applied = False
+        
         if network_id.startswith('simbench_'):
             try:
                 # Get all available profiles for the network
@@ -340,48 +352,65 @@ def create_network_case(network_id, net, case_type, case_idx, load_variation_ran
                     selected_timepoint = random.choice(available)
                     network_timepoints[network_id]['used'].add(selected_timepoint)
                     
-                    # Apply the timepoint to the network - this is the correct way
+                    # Apply the timepoint to the network
                     net_case = apply_profile_timepoint(net_case, profiles, selected_timepoint)
                     
                     logger.info(f"Successfully applied SimBench profile timepoint {selected_timepoint} to {network_id}")
                     used_profile = True
                 else:
-                    logger.info("all available timepoints used applying random variation to exsisting timepoints")
-                    selected_timepoint = random.choice(network_timepoints[network_id]["used"])
+                    # All unique timepoints used - select a random used timepoint and apply load variation
+                    logger.debug(f"All unique timepoints used for {network_id}, applying random variation to existing timepoint")
+                    selected_timepoint = random.choice(list(network_timepoints[network_id]["used"]))
                     net_case = apply_profile_timepoint(net_case, profiles, selected_timepoint)
                     net_case = apply_random_load_variations(net_case, load_variation_range)
+                    used_profile = True
+                    variation_applied = True
 
             except Exception as e:
-                logger.info(f"Error accessing SimBench profiles: {e}")
+                logger.debug(f"Error accessing SimBench profiles for {network_id}: {e}")
                 net_case = apply_random_load_variations(net_case, load_variation_range)
+                variation_applied = True
         else:
+            # For non-SimBench networks, always apply random load variations
             net_case = apply_random_load_variations(net_case, load_variation_range)
+            variation_applied = True
 
+        # Create network topology
         G_nx = top.create_nxgraph(net_case, respect_switches=False)
         components = list(nx.connected_components(G_nx))
 
-        # pick the largest
+        # Pick the largest component
         largest = max(components, key=len)
         logger.debug(f"[DEBUG] keeping largest component: {len(largest)} buses of {G_nx.number_of_nodes()}")
         
-        # now mask your net to that
-        subnet = pp.select_subnet(net_case, buses=list(largest), include_switch_buses=True, keep_everything_else =True)
+        # Create subnet
+        subnet = pp.select_subnet(net_case, buses=list(largest), include_switch_buses=True, keep_everything_else=True)
         
         nx_graph_subnet = top.create_nxgraph(subnet, respect_switches=True)
         node_count = len(subnet.bus)
         logger.debug(f"[DEBUG] amount of nodes of created subnet: {node_count}")
-        # Create case name - include timepoint in name if one was used
-        if selected_timepoint is not None and used_profile:
-            case_name = f"{network_id}_{case_type}_{case_idx}_ts{selected_timepoint}_n{node_count}"
-        else:
-            case_name = f"{network_id}_{case_type}_{case_idx}_n{node_count}"
+        
+        # Create case name with more descriptive naming
+        case_name_parts = [network_id, case_type, str(case_idx)]
+        
+        if selected_timepoint is not None:
+            case_name_parts.append(f"ts{selected_timepoint}")
+        
+        if variation_applied:
+            # Add a random identifier for variation cases to ensure uniqueness
+            variation_id = random.randint(1000, 9999)
+            case_name_parts.append(f"var{variation_id}")
+            
+        case_name_parts.append(f"n{node_count}")
+        case_name = "_".join(case_name_parts)
 
         switch_count = len(subnet.switch) if hasattr(subnet, 'switch') else 0
         logger.debug(f"Added {case_type} case {case_name} with {switch_count} switches")
 
         return case_name, {"network": subnet, "nx_graph": nx_graph_subnet}
+        
     except Exception as e:
-        logger.info(f"Failed to create case for {network_id}: {e}")
+        logger.error(f"Failed to create case for {network_id}: {e}")
         return None, None
 
 def reset_timepoints():

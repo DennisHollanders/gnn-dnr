@@ -28,7 +28,7 @@ wandb = "^0.19.2"
 lightning = "^2.5.0.post0"
 gurobipy = "11.0.3"
 lxml = "5.2.2"
-pyomo = "6.7.3"
+pyomo = {extras = ["quadratic"], version = "^6.9.2"}
 seaborn = "^0.13.2"
 python-dotenv = "^1.0.1"
 julia = "^0.6.2"
@@ -53,6 +53,7 @@ cvxpy = "^1.6.4"
 cvxpylayers = "^0.1.9"
 typing-extensions = "^4.13.1"
 ecos = "^2.0.14"
+tensorboard = "^2.19.0"
 
 
 

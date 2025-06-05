@@ -24,20 +24,35 @@ def train(model, train_loader, optimizer, criterion, device):
 
         output = model(data)
 
+       
+
         if isinstance(output, dict):
             # Assuming the model output is a dictionary with 'switch_scores' and the target is data.edge_y
             predicted_scores = output.get("switch_scores") # Get the 'switch_scores' tensor
             target_switches = data.edge_y # Get the target switch states
+            # debug output right here:
+            # print("  predicted_scores.requires_grad =", predicted_scores.requires_grad)
+            # print("  predicted_scores.grad_fn       =", predicted_scores.grad_fn)
+            # print("  target_switches.requires_grad  =", target_switches.requires_grad)
 
+            # # now compute loss
+            # loss = criterion(predicted_scores, target_switches.float())
+            # print("  loss.requires_grad        =", loss.requires_grad)
+            # print("  loss.grad_fn              =", loss.grad_fn)
+            # print(type(predicted_scores), type(target_switches))
+            # print("predicted_scores shape:", predicted_scores.shape)
+            # print("target_switches shape:", target_switches.shape)
+            # print("predicted_scores :", predicted_scores)
+            # print("target_switches :", target_switches)
             if predicted_scores is not None and target_switches is not None:
                  # Squeeze the last dimension of predicted_scores if it's 1 to match target_switches shape
                 if predicted_scores.ndim > target_switches.ndim and predicted_scores.shape[-1] == 1:
-                    
                     predicted_scores = predicted_scores.squeeze(-1)
 
                  # Ensure shapes match before calculating loss
                 if predicted_scores.shape == target_switches.shape:
                      # Criterion expects input and target tensors
+                     print("si")
                      loss = criterion(predicted_scores, target_switches.float()) 
                      accuracy = (predicted_scores.round() == target_switches).float().mean()
                      local_losses = {"accuracy": accuracy} 
@@ -54,7 +69,7 @@ def train(model, train_loader, optimizer, criterion, device):
                      if hasattr(data, 'ptr'): logger.debug("Batch 'ptr' tensor shape:", data.ptr.shape)
                      logger.debug("--------------------------------------")
 
-                     loss = torch.tensor(0.0, requires_grad=True) # Assign a zero loss to continue training
+                     loss = torch.tensor(0.0, requires_grad=True)
                      local_losses = {}
             else:
                  logger.debug("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
@@ -222,7 +237,7 @@ def test(model, loader, criterion, device):
     else:
         avg_loss = running_loss / batch_count
         log_dict = {"test_loss": avg_loss}
-        for key, value in metrics.items():
+        for key, value in running_local_losses.items():
             log_dict[f"test_{key}"] = value / batch_count
 
         # Calculate overall percentage of switches changed.
