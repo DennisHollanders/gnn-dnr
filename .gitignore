@@ -8,6 +8,7 @@
 !/src/optimization_logging.py
 !/src/SOCP_class_dnr.py
 !/src/create_testval.py
+!/src/cvxpy_SOCP.py
 
 /data_generation/*
 /data_generation/old/*
