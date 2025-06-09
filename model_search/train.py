@@ -15,7 +15,7 @@ def train(model, train_loader, optimizer, criterion, device):
     batch_count = 0
     for data in train_loader:
         if data is None:
-            logger.info("Warning: Data is None, skipping this batch.")
+            logger.debug("Warning: Data is None, skipping this batch.")
             continue
 
         data = data.to(device)
@@ -25,8 +25,8 @@ def train(model, train_loader, optimizer, criterion, device):
         final_switch_scores = output.get("switch_scores", None)
 
         if final_switch_scores is not None and isinstance(final_switch_scores, torch.Tensor):
-            logger.info(f"Gradient Check: 'switch_scores' tensor requires_grad: {final_switch_scores.requires_grad}")
-            logger.info(f"Gradient Check: 'switch_scores' tensor grad_fn: {final_switch_scores.grad_fn}")
+            logger.debug(f"Gradient Check: 'switch_scores' tensor requires_grad: {final_switch_scores.requires_grad}")
+            logger.debug(f"Gradient Check: 'switch_scores' tensor grad_fn: {final_switch_scores.grad_fn}")
         else:
             logger.warning("'switch_scores' not found in model output or is not a tensor.")
 
@@ -47,32 +47,32 @@ def train(model, train_loader, optimizer, criterion, device):
 
                 if predicted_scores.ndim > target_switches.ndim and predicted_scores.shape[-1] == 1:
                     predicted_scores = predicted_scores.squeeze(-1)
-                    logger.info(f"Shape of predicted_scores: {predicted_scores.shape}")
-                    logger.info(f"Shape of target_switches: {target_switches.shape}")
+                    logger.debug(f"Shape of predicted_scores: {predicted_scores.shape}")
+                    logger.debug(f"Shape of target_switches: {target_switches.shape}")
 
                 if predicted_scores.shape == target_switches.shape:
                     loss = criterion(predicted_scores, target_switches.float()) 
-                    logger.info(f"Loss calculated: {loss.item()}")
-                    logger.info(f"predicted_scores shape: {predicted_scores}")
-                    logger.info(f"target_switches shape: {target_switches}")
-                    logger.info(f"accuracy: {torch.sum(predicted_scores == target_switches.float()).item() / target_switches.numel()}")
+                    logger.debug(f"Loss calculated: {loss.item()}")
+                    logger.debug(f"predicted_scores shape: {predicted_scores}")
+                    logger.debug(f"target_switches shape: {target_switches}")
+                    logger.debug(f"accuracy: {torch.sum(predicted_scores == target_switches.float()).item() / target_switches.numel()}")
                     metrics = compute_switch_metrics(predicted_scores, target_switches)
-                    logger.info(f"Switch metrics: {metrics}")
+                    logger.debug(f"Switch metrics: {metrics}")
                     local_losses = metrics
                 else:
-                    logger.info(f"Warning: Shape mismatch after squeezing: predicted scores ({predicted_scores.shape}) and target switches ({target_switches.shape}). Skipping loss calculation for this batch.")
-                    logger.info("--- Debugging Shape Mismatch Batch ---")
-                    logger.info(f"Batch keys: {data.keys()}")
-                    logger.info(f"batch x shape: {data.x.shape}")
-                    logger.info(f"Batch edge_index shape: {data.edge_index.shape}")
-                    logger.info(f"Batch edge_attr shape: {data.edge_attr.shape}")
+                    logger.debug(f"Warning: Shape mismatch after squeezing: predicted scores ({predicted_scores.shape}) and target switches ({target_switches.shape}). Skipping loss calculation for this batch.")
+                    logger.debug("--- Debugging Shape Mismatch Batch ---")
+                    logger.debug(f"Batch keys: {data.keys()}")
+                    logger.debug(f"batch x shape: {data.x.shape}")
+                    logger.debug(f"Batch edge_index shape: {data.edge_index.shape}")
+                    logger.debug(f"Batch edge_attr shape: {data.edge_attr.shape}")
 
-                    logger.info("--------------------------------------")
+                    logger.debug("--------------------------------------")
 
                     loss = torch.tensor(0.0, requires_grad=True)
                     local_losses = {}
             else:
-                 logger.info("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
+                 logger.debug("Warning: 'switch_scores' not found in model output or 'data.edge_y' is missing. Skipping loss calculation for this batch.")
                  loss = torch.tensor(0.0, requires_grad=True)
                  local_losses = {}
 
