@@ -4,42 +4,32 @@
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=48
+# SBATCH --gres=gpu:1 
 #SBATCH --mem=16G
 #SBATCH --time=1-00:00:00
-#SBATCH --partition=tue.gpu.q
+#SBATCH --partition=tue.default.q # Or tue.gpu.q if using the --gres=gpu:1 directive
 
-# available partitions: CPU: tue.default.q , GPU: tue.gpu.q
+export DATA_FOLDER="test_data"
 
+# Create required directories
 mkdir -p ./data
 mkdir -p ./logs
 
-# Load modules
-module load Python
-module load CUDA/11.7.0
-module load poetry/1.8.3-GCCcore-13.3.0
+echo "Loading modules..."
 
-# Activate the Poetry environment
-source $HOME/.cache/pypoetry/virtualenvs/dnr-gnn-_o2-hQZ5-py3.12/bin/activate
+!
+module purge # Start with a clean environment
+module load Python/3.11.3
+# module load CUDA/11.7.0 
+module load poetry/1.5.1-GCCcore-12.3.0
+module load Gurobi/11.0.3-GCCcore-12.3.0
+echo "Modules loaded."
 
-python --version 
-cd $HOME/gnn-dnr
-ls
 
-python model_search/main.py --config model_search/config_files/config.yaml
+echo "Navigating to project directory..."
+cd $HOME/gnn-dnr || exit 1 # Add error check for cd
 
-# python model_search/main.py \
-#    --data_folder data/test_data \
-#    --real_data_folder data_combined_real_world \
-#    --input_dim 4 \
-#    --hidden_dims 64 32 16 \
-#    --latent_dim 8 \
-#    --activation prelu \
-#    --dropout_rate 0.0 \
-#    --learning_rate 0.001 \
-#    --weight_decay 1e-5 \
-#    --batch_size 4 \
-#    --epochs 100 \
-#    --patience 10 \
-#    --model_module GraphAutoencoder
+echo "Running script using 'poetry run'..."
+
+poetry run python -I model_search/main.py --config model_search/config_files/config.yaml
