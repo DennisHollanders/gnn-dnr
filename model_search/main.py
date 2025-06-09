@@ -49,9 +49,9 @@ if str(model_search_path) not in sys.path:
 
 from load_data import create_data_loaders
 from evaluation.evaluation import run_evaluation
+from src.cvxpy_SOCP import build_convex_problem
 
-# Fallback description if none is provided via command line or YAML.
-DEFAULT_DESCRIPTION = "Train Graph Model"
+DEFAULT_DESCRIPTION = "Graph Neural Network Model Search for Distribution Network Reconfiguration"
 
 def parse_args():
     parser = argparse.ArgumentParser(description=DEFAULT_DESCRIPTION)
@@ -127,29 +127,11 @@ def main():
     model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
     model_folder = os.path.dirname(model_module.__file__)
     print("DEBUG: Value of args.model_module before import:", args.model_module)
-    try:
-        model_module_path = f"models.{args.model_module}.{args.model_module}"
-        print("DEBUG: Constructed module path for import:", model_module_path)
-        model_module = importlib.import_module(model_module_path)
 
-        model_folder = os.path.dirname(model_module.__file__)
+    # Get the model class from the imported module
+    model_class = getattr(model_module, args.model_module)
+    print(f"Successfully imported model: {args.model_module}")
 
-        # Get the model class from the imported module
-        model_class = getattr(model_module, args.model_module)
-        print(f"Successfully imported model: {args.model_module}")
-
-    except ImportError as e:
-        print(f"Error importing model module '{model_module_path}': {e}")
-        print("Please ensure your model is in the correct directory structure (e.g., model_search/models/YourModelName/YourModelName.py)")
-        print(f"Also check that the module name '{args.model_module}' matches the directory and file name.")
-        sys.exit(1) 
-    except AttributeError as e:
-         print(f"Error finding model class '{args.model_module}' in module '{model_module_path}': {e}")
-         print("Please ensure the model class name within the file matches the module name.")
-         sys.exit(1) 
-    except Exception as e:
-         print(f"An unexpected error occurred during model import or class retrieval: {e}")
-         sys.exit(1)
 
     project_description = args.description if args.description else DEFAULT_DESCRIPTION
 
@@ -163,9 +145,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     logger.info(args.dataset_type)
-    
     logger.info(args.dataset_names)
     logger.info(args.folder_names)
+
     dataloaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
@@ -180,38 +162,28 @@ def main():
     )
     train_loader, validation_loader, test_loader = dataloaders.get("train"),  dataloaders.get("validation"), dataloaders.get("test")
 
-    
+    batch = next(iter(train_loader))
+    logger.info(f"Batch type: {type(batch)}")
+    logger.info(f"Batch: {batch}")
+    logger.info(f"Batch keys: {batch.keys() if isinstance(batch, dict) else 'N/A'}")
+    logger.info(f"Batch x shape: {batch.x.shape if hasattr(batch, 'x') else 'N/A'}")
+    logger.info(f"Batch edge_index shape: {batch.edge_index.shape if hasattr(batch, 'edge_index') else 'N/A'}")
+    logger.info(f"Batch edge_attr shape: {batch.edge_attr.shape if hasattr(batch, 'edge_attr') else 'N/A'}")
+    logger.info(f"Batch edge_y shape: {batch.edge_y.shape if hasattr(batch, 'edge_y') else 'N/A'}")
+    logger.info(f"Batch size: {len(train_loader.dataset)}")
+
     model_class = getattr(model_module, args.model_module)
     node_input_dim = train_loader.dataset[0].x.shape[1]
     edge_input_dim = train_loader.dataset[0].edge_attr.shape[1]
+    args.model_kwargs["node_input_dim"] = node_input_dim
+    args.model_kwargs["edge_input_dim"] = edge_input_dim
 
-    try:
-        criterion_class = getattr(model_module, args.criterion_name)
-        try: 
-            criterion = criterion_class(weight_switch=1.0, weight_physics=10.0)  
-        except:
-            criterion = criterion_class()
-    except (ImportError, AttributeError) as e:
-        logger.debug(f"Error loading {args.criterion_name} from {model_module}: {e}")
-        if args.criterion_name == "MSELoss":
-            criterion = nn.MSELoss()
-        elif "L1Loss":
-            criterion = nn.L1Loss()
-        elif "BCEWithLogitsLoss":
-            criterion = nn.BCEWithLogitsLoss()
-        elif "CrossEntropyLoss":
-            criterion = nn.CrossEntropyLoss()        
-        elif "SmoothL1Loss":
-            criterion = nn.SmoothL1Loss()
+    model_kwargs = args.model_kwargs
+    if args.model_module =="cvx": 
+        from models.cvx.cvx import build_cvx_layer
+        model_kwargs["cvx_layer"] = build_cvx_layer(next(iter(train_loader)), args)
     
-    model = model_class(
-        node_input_dim=node_input_dim,
-        edge_input_dim= edge_input_dim,
-        hidden_dims=args.hidden_dims,
-        latent_dim=args.latent_dim,
-        activation=args.activation,
-        dropout_rate=args.dropout_rate
-    ).to(device)
+    model = model_class(**model_kwargs).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
@@ -225,6 +197,8 @@ def main():
         #logger.info(f"real_val with {len(validation_real_loader.dataset)} samples")
     except AttributeError:
         logger.info("No test dataset provided")
+
+    criterion = nn.MSELoss()
 
     for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
         train_loss, train_dict = train(model, train_loader, optimizer, criterion, device)
@@ -257,17 +231,19 @@ def main():
         test_loss, test_dict = test(model, test_loader, criterion, device) 
         logger.info(f"Test Loss: {test_loss:.4f}")
         if args.wandb:
-             wandb.log({"test_loss": test_loss, **test_dict}) # Log test loss and metrics
+             wandb.log({"test_loss": test_loss, **test_dict}) 
+    logger.info(f"Training completed. Best validation loss: {best_loss:.4f}")
 
     model_save_path = f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch}-Last.pt"
     torch.save(model.state_dict(),model_save_path)
-    
-    # add model save_path to args
-    args.model_path = model_save_path
-    args.config_path = file_name_yaml 
-    args.override_job_name = args.model_module + "------" + args.job_name
-
+    logger.info(f"Model saved to {model_save_path}")
     try:
+        # add model save_path to args
+        args.model_path = model_save_path
+        args.config_path = file_name_yaml 
+        args.override_job_name = args.model_module + "------" + args.job_name
+
+    
         run_evaluation(model, train_loader, validation_loader, test_loader, device, args)
     except Exception as e:
         logger.error(f"Error during evaluation: {e}")   

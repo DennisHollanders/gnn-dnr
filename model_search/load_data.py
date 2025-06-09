@@ -467,12 +467,17 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
-    parser.add_argument("--dataset_names", type=str, nargs="+", default= ["train","validation","test"], help="Names of datasets to create loaders for")
+    parser.add_argument("--dataset_names", type=str, nargs="+", default= ["train",
+                                                                         "validation",
+                                                                          ]
+                                                                          , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
-                r"data\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\test",
-                #r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test",
-                r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test",
-                r"data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test",
+                r"data\split_datasets\train",
+                
+                #r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\synthetic_test",
+                
+                r"data\split_datasets\validation",
+                #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
     parser.add_argument("--dataset_type", type=str, default="cvx", 
                         choices=["default", "graphyr", "pinn","cvx"],
@@ -522,11 +527,9 @@ if __name__ == "__main__":
         if isinstance(train_loader, list):
             # For NeighborLoader
             batch = next(iter(train_loader[0]))
-            batch_test = next(iter(test_loader[0]))
         else:
             # For regular DataLoader
             batch = next(iter(train_loader))
-            batch_test = next(iter(test_loader))
         print(f"Batch type: {type(batch)}")
         print("batch:", batch)
         print(f"Batch size: {len(batch)}")

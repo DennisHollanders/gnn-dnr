@@ -6,23 +6,33 @@ job_name: "mlp_test"
 dataset_names: ["train",
                   "validation",
                   "test"]
-folder_names: [ "data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\\test",
-                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",
-                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",]
+# folder_names: 
+#   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+#   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+#   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+folder_names: 
+  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+
 # Model
 model_module: "MLP"
-
-# Training
-input_dim: 4
-hidden_dims: [1024,512,256,128,64,2]
-latent_dim: 8
-activation: "relu"
-criterion_name: MSELoss
+model_kwargs: 
+  input_dim: 4
+  hidden_dims: [1024,512,256,128,64,2]
+  latent_dim: 8
+  activation: "relu"
+  dropout_rate: 0.0
+  criterion_name: "MSELoss"
+  batch_norm: false
+  residual_connections: false
+  use_bias: true
+  weight_init: "xavier_uniform"
+  bias_init: "zeros"
 dropout_rate: 0.0
 batch_size: 16
 learning_rate: 0.0001
 weight_decay: 0.00005
-
 epochs: 100
 patience: 10
 hp_search: false
@@ -32,7 +42,7 @@ config: config-mlp.yaml
 evaluate_every_x_epoch: 5
 dataset_type: "default"
 # Data Loading Configuration
-batching_type: "dynamic"
+batching_type: "standard"
 max_nodes: 32000
 max_edges: 35000
 train_ratio: 0.85
