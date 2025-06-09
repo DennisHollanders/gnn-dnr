@@ -111,16 +111,16 @@ def parse_arguments():
                         help='Logging level (default: INFO)')
                         
     # Test and validation set options
-    parser.add_argument('--generate_synthetic_data', default=True,
+    parser.add_argument('--generate_synthetic_data', default=False,
                         help='Generate training data')
-    parser.add_argument('--sample_real_data', default=False,
+    parser.add_argument('--sample_real_data', default=True,
                         help='Generate test and validation sets')
     
-    parser.add_argument('--force_graph_topology', type=str, nargs='*', default=[],
+    parser.add_argument('--force_graph_topology', type=str, nargs='*', default=["pp_case33bw"],
                         help='List of specific graph topologies to force include (e.g., ["pp_case33bw", "simbench_1-MV-rural--0-sw"])')
-    parser.add_argument('--dataset_names', type=list, nargs='+', default=["test", "validation"],
+    parser.add_argument('--dataset_names', type=list, nargs='+', default=["test"]  ,
                         help='Names of datasets to create (default: ["test", "validation"])')
-    parser.add_argument('--samples_per_dataset', type=list, nargs='+', default=[10000, 10000],
+    parser.add_argument('--samples_per_dataset', type=list, nargs='+', default=[100]    ,
                         help='Number of samples for each dataset (default: [10, 10])')
 
 

@@ -388,56 +388,64 @@ def create_data_loaders(
 
 
         # 3) Pad every Data object’s CVX fields up to (max_N, max_E)
-        for ds in datasets.values():
-            if ds is None:
-                continue
-            for data in ds:
-                # Original true sizes
-                Ni = data.cvx_N.item() if isinstance(data.cvx_N, torch.Tensor) else data.cvx_N
-                Ei = data.cvx_E.item() if isinstance(data.cvx_E, torch.Tensor) else data.cvx_E
+        for ds_name, ds in datasets.items():
+            if ds is None: continue
+            logger.info(f"Padding dataset: {ds_name}")
+            for data in tqdm(ds, desc=f"Padding {ds_name}"):
+                Ni = data.cvx_N.item()
+                Ei = data.cvx_E.item()
 
-                # Build node‐ and edge‐masks (1D) first:
-                data.cvx_node_mask = torch.cat([
-                    torch.ones(Ni, dtype=torch.bool),
-                    torch.zeros(max_N - Ni, dtype=torch.bool)
-                ]).unsqueeze(0)  # shape (1, N_max) → stays 2D
-                
-                data.cvx_edge_mask = torch.cat([
-                    torch.ones(Ei, dtype=torch.bool),
-                    torch.zeros(max_E - Ei, dtype=torch.bool)
-                ]).unsqueeze(0)  # shape (1, E_max)
+                # --- Create node and edge masks ---
+                node_mask = torch.zeros(max_N, dtype=torch.bool)
+                node_mask[:Ni] = True
+                data.cvx_node_mask = node_mask.unsqueeze(0)
 
-                # Overwrite sizes as 1D tensors (so shape (1,) each):
-                data.cvx_N = torch.tensor(max_N, dtype=torch.long).unsqueeze(0)  # (1,)
-                data.cvx_E = torch.tensor(max_E, dtype=torch.long).unsqueeze(0)  # (1,)
+                edge_mask = torch.zeros(max_E, dtype=torch.bool)
+                edge_mask[:Ei] = True
+                data.cvx_edge_mask = edge_mask.unsqueeze(0)
 
-                # Now pad each CVX feature along its last dimension:
-                data.cvx_from_idx  = pad_1d_tensor(data.cvx_from_idx.long(),   max_E, max_N)
-                data.cvx_to_idx    = pad_1d_tensor(data.cvx_to_idx.long(),     max_E, max_N)
-                data.cvx_r_pu      = pad_1d_tensor(data.cvx_r_pu,              max_E, 0.0)
-                data.cvx_x_pu      = pad_1d_tensor(data.cvx_x_pu,              max_E, 0.0)
-                data.cvx_bigM_flow = pad_1d_tensor(data.cvx_bigM_flow,         max_E, 0.0)
-                data.cvx_y0        = pad_1d_tensor(data.cvx_y0,                max_E, 0.0)
+                # --- Create substation and non-substation masks ---
+                sub_mask = torch.zeros(max_N, dtype=torch.float32)
+                sub_indices = data.cvx_sub_idx.long().squeeze(0)
+                valid_sub_indices = sub_indices[sub_indices < Ni]
+                if len(valid_sub_indices) > 0:
+                    sub_mask[valid_sub_indices] = 1.0
+                data.cvx_sub_mask = sub_mask.unsqueeze(0)
 
-                data.cvx_p_inj     = pad_1d_tensor(data.cvx_p_inj,             max_N, 0.0)
-                data.cvx_q_inj     = pad_1d_tensor(data.cvx_q_inj,             max_N, 0.0)
+                non_sub_mask = node_mask.float() - sub_mask
+                data.cvx_non_sub_mask = non_sub_mask.unsqueeze(0)
 
-                # Finally, pad sub_idx (1D→1D or 2D→2D) so that all values ≥ max_N:
-                orig_sub = data.cvx_sub_idx
-                if orig_sub.ndim == 1:
-                    curS = orig_sub.shape[0]
-                    if curS < max_N:
-                        pad_vals = torch.full((max_N - curS,), max_N, dtype=torch.long)
-                        data.cvx_sub_idx = torch.cat([orig_sub.long(), pad_vals], dim=0).unsqueeze(0)
-                    else:
-                        data.cvx_sub_idx = orig_sub.long()[:max_N].unsqueeze(0)
-                else:  # if it’s already 2D (1, S)
-                    batch_dim, curS = orig_sub.shape
-                    if curS < max_N:
-                        pad_vals = torch.full((batch_dim, max_N - curS), max_N, dtype=torch.long)
-                        data.cvx_sub_idx = torch.cat([orig_sub.long(), pad_vals], dim=1)
-                    else:
-                        data.cvx_sub_idx = orig_sub.long()[:, :max_N]
+                # --- Pad existing features and create pre-calculated ones ---
+                data.cvx_r_pu      = pad_1d_tensor(data.cvx_r_pu, max_E, 0.0)
+                data.cvx_x_pu      = pad_1d_tensor(data.cvx_x_pu, max_E, 0.0)
+                data.cvx_p_inj     = pad_1d_tensor(data.cvx_p_inj, max_N, 0.0)
+                data.cvx_q_inj     = pad_1d_tensor(data.cvx_q_inj, max_N, 0.0)
+                data.cvx_y0        = pad_1d_tensor(data.cvx_y0, max_E, 0.0)
+                data.cvx_bigM_flow = pad_1d_tensor(data.cvx_bigM_flow, max_E, 0.0)
+                from_idx_padded    = pad_1d_tensor(data.cvx_from_idx.long(), max_E, 0)
+                to_idx_padded      = pad_1d_tensor(data.cvx_to_idx.long(), max_E, 0)
+
+                # --- Create and add pre-calculated squared parameters ---
+                data.cvx_bigM_flow_sq = pad_1d_tensor(data.cvx_bigM_flow.pow(2), max_E, 0.0)
+                z_line_sq = data.cvx_r_pu.pow(2) + data.cvx_x_pu.pow(2)
+                data.cvx_z_line_sq = pad_1d_tensor(z_line_sq, max_E, 0.0)
+
+                # --- Create incidence matrix parameters ---
+                A_from = torch.zeros((max_E, max_N), dtype=torch.float32)
+                A_to   = torch.zeros((max_E, max_N), dtype=torch.float32)
+
+                active_edge_indices = torch.arange(Ei)
+                A_from[active_edge_indices, from_idx_padded.squeeze(0)[:Ei]] = 1.0
+                A_to[active_edge_indices, to_idx_padded.squeeze(0)[:Ei]] = 1.0
+                data.cvx_A_from = A_from.unsqueeze(0)
+                data.cvx_A_to = A_to.unsqueeze(0)
+
+                # --- Finally, overwrite old size and index tensors ---
+                data.cvx_N = torch.tensor([Ni], dtype=torch.long)
+                data.cvx_E = torch.tensor([Ei], dtype=torch.long)
+                data.cvx_from_idx = from_idx_padded
+                data.cvx_to_idx = to_idx_padded
+                data.cvx_sub_idx = torch.tensor(sub_indices, dtype=torch.long).unsqueeze(0)
 
     for dataset_name, dataset in datasets.items():
         if dataset:

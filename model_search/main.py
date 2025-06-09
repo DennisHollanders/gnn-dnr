@@ -179,12 +179,29 @@ def main():
     args.model_kwargs["edge_input_dim"] = edge_input_dim
 
     model_kwargs = args.model_kwargs
-    if args.model_module =="cvx": 
-        from models.cvx.cvx import build_cvx_layer
-        model_kwargs["cvx_layer"] = build_cvx_layer(next(iter(train_loader)), args)
+    # if args.model_module =="cvx": 
+    #     from models.cvx.cvx import build_cvx_layer
+    #     model_kwargs["cvx_layer"] = build_cvx_layer(next(iter(train_loader)), args)
     
-    model = model_class(**model_kwargs).to(device)
+    # model = model_class(**model_kwargs).to(device)
     
+    # After create_data_loaders() has run:
+    all_data = []
+    for d in dataloaders.values():
+        if d: all_data.extend(d.dataset)
+
+    max_n_val = max(d.cvx_node_mask.shape[1] for d in all_data)
+    max_e_val = max(d.cvx_edge_mask.shape[1] for d in all_data)
+
+    # 2. Add max_n and max_e to the model's configuration arguments.
+    #    Do NOT build the layer here.
+    model_kwargs['max_n'] = max_n_val
+    model_kwargs['max_e'] = max_e_val
+
+    # 3. Instantiate the model. The model's __init__ will now correctly
+    #    call build_cvx_layer with the integer dimensions.
+    model = model_class(**model_kwargs)
+
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     best_loss = float("inf")
