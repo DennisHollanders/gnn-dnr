@@ -6,10 +6,9 @@ dataset_names: ["train",
                   "validation",
                   "test"]
 folder_names: 
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-
+  - "data\\split_datasets\\train"
+  - "data\\split_datasets\\validation"
+  - "data\\split_datasets\\test"
 # Model
 model_module: "cvx"
 model_kwargs:

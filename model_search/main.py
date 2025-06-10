@@ -185,21 +185,16 @@ def main():
     
     # model = model_class(**model_kwargs).to(device)
     
-    # After create_data_loaders() has run:
-    all_data = []
-    for d in dataloaders.values():
-        if d: all_data.extend(d.dataset)
+    if args.model_module == "cvx":
+        all_data = []
+        for d in dataloaders.values():
+            if d: all_data.extend(d.dataset)
 
-    max_n_val = max(d.cvx_node_mask.shape[1] for d in all_data)
-    max_e_val = max(d.cvx_edge_mask.shape[1] for d in all_data)
+        max_n_val = max(d.cvx_node_mask.shape[1] for d in all_data)
+        max_e_val = max(d.cvx_edge_mask.shape[1] for d in all_data)
+        model_kwargs['max_n'] = max_n_val
+        model_kwargs['max_e'] = max_e_val
 
-    # 2. Add max_n and max_e to the model's configuration arguments.
-    #    Do NOT build the layer here.
-    model_kwargs['max_n'] = max_n_val
-    model_kwargs['max_e'] = max_e_val
-
-    # 3. Instantiate the model. The model's __init__ will now correctly
-    #    call build_cvx_layer with the integer dimensions.
     model = model_class(**model_kwargs)
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -255,7 +250,6 @@ def main():
     torch.save(model.state_dict(),model_save_path)
     logger.info(f"Model saved to {model_save_path}")
     try:
-        # add model save_path to args
         args.model_path = model_save_path
         args.config_path = file_name_yaml 
         args.override_job_name = args.model_module + "------" + args.job_name

@@ -21,7 +21,7 @@ def build_cvx_layer(max_n: int, max_e: int):
     r_pu         = cp.Parameter(max_e)
     x_pu         = cp.Parameter(max_e)
     bigM_flow    = cp.Parameter(max_e, nonneg=True)
-    bigM_v  = cp.Parameter(nonneg=True)
+    bigM_v       = cp.Parameter(nonneg=True)
 
     A_from       = cp.Parameter((max_e, max_n))
     A_to         = cp.Parameter((max_e, max_n))
@@ -86,10 +86,8 @@ def build_cvx_layer(max_n: int, max_e: int):
 
     cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
 
-    bad = find_bad_cons(cons)
-    print("First non-DPP constraint:", bad)
 
-    loss = cp.sum(cp.multiply(r_pu, I_sq))
+    loss  = cp.sum(cp.multiply(r_pu, I_sq))
     loss += 0.001*cp.sum_squares(y_line - y_warm)
     loss += 0.001*cp.sum_squares(v_sq   - v_warm)
     loss += 0.0001*cp.norm1(y_line - y0)
@@ -132,11 +130,26 @@ class cvx(nn.Module):
         x = self.relu(self.node_enc(x))
         for g in self.gnns:
             x = self.relu(g(x, ei))
+        
+        # GNN predictions (unpadded)
         emb = torch.cat([x[ei[0]], x[ei[1]]], dim=1)
-        yw  = self.sw_pred(emb).squeeze(-1)
-        vr  = self.v_pred(x).squeeze(-1)
-        vw  = (self.vl + (self.vu - self.vl)*vr).pow(2)
-
+        yw_unpadded = self.sw_pred(emb).squeeze(-1)  # Shape: [actual_edges]
+        vr = self.v_pred(x).squeeze(-1)              # Shape: [actual_nodes]
+        vw_unpadded = (self.vl + (self.vu - self.vl)*vr).pow(2)
+        
+        # Get actual sizes from the current graph
+        actual_edges = ei.shape[1]
+        actual_nodes = x.shape[0]
+        
+        # Pad yw to max_e
+        yw = torch.zeros(self.max_e, dtype=yw_unpadded.dtype, device=yw_unpadded.device)
+        yw[:actual_edges] = yw_unpadded
+        
+        # Pad vw to max_n  
+        vw = torch.ones(self.max_n, dtype=vw_unpadded.dtype, device=vw_unpadded.device)  # Use 1.0 as default for voltage
+        vw[:actual_nodes] = vw_unpadded
+        
+        # Now call CVX layer with properly padded inputs
         y_opt, v_sq_opt = self.cvx_layer(
             yw, vw,
             data.cvx_p_inj, data.cvx_q_inj, data.cvx_y0,
@@ -147,22 +160,15 @@ class cvx(nn.Module):
             data.cvx_bigM_flow_sq, data.cvx_z_line_sq,
             solver_args={'verbose': True, 'solve_method': 'SCS'}
         )
-        result_dict=  {
-            "switch_scores": y_opt,
-            "voltage_scores": v_sq_opt,
-            "switch_predictions": yw,
-            "voltage_predictions": vw,
+        
+        # Extract only the relevant parts of the solution (unpad for loss computation)
+        y_opt_unpadded = y_opt[:actual_edges]
+        v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
+        
+        result_dict = {
+            "switch_scores": y_opt_unpadded,
+            "voltage_scores": v_sq_opt_unpadded, 
+            "switch_predictions": yw_unpadded,
+            "voltage_predictions": vw_unpadded,
         }
         return result_dict
-
-
-def find_bad_cons(cons_list):
-    if not cp.Problem(cp.Minimize(0), cons_list).is_dcp(dpp=True):
-        if len(cons_list) == 1:
-            return cons_list[0]
-        mid = len(cons_list)//2
-        left_bad  = find_bad_cons(cons_list[:mid])
-        if left_bad is not None:
-            return left_bad
-        return find_bad_cons(cons_list[mid:])
-    return None
