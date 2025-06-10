@@ -13,7 +13,7 @@ folder_names:
   - "data\\split_datasets\\validation"
   - "data\\split_datasets\\test"
 
-dataset_type: "default"
+dataset_type: "cvx"
 batching_type: "standard"
 max_nodes: 32000
 max_edges: 35000
@@ -33,7 +33,8 @@ criterion_name: "MSELoss"  # Will be tracked in parallel coordinates
 # ============================================================================
 # GIN-SPECIFIC SEARCH SPACE
 # ============================================================================
-search_space:
+# We only use stage_1, stage_2 is dummy to satisfy the two-stage HPO code
+stage_1_search_space:
   # Training hyperparameters
   learning_rate:
     search_type: float
@@ -164,3 +165,11 @@ metrics_to_log:
   - "use_batch_norm"
   - "use_residual"
   - "pooling"
+
+# ============================================================================
+# DUMMY STAGE 2 (NOT USED - Just to satisfy two-stage code)
+# ============================================================================
+stage_2_search_space:
+  learning_rate:
+    search_type: categorical
+    choices: [0.001]  # Dummy value
