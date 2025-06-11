@@ -7,9 +7,9 @@ dataset_names: ["train",
                   "validation",
                   "test"]
 folder_names: 
-  - "data\\split_datasets\\train"
-  - "data\\split_datasets\\validation"
-  - "data\\split_datasets\\test"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
 dataset_type: "default"
 batching_type: "dynamic"
 
@@ -112,7 +112,7 @@ search_space:
   # 11. Activation function
   activation:
     search_type: "categorical"
-    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "swish"]
+    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "sigmoid"]
     
   # 12. Use batch normalization
   use_batch_norm:
@@ -132,7 +132,7 @@ search_space:
   # 15. Switch head type
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "linear", "attention_pooling", "set_transformer"]
+    choices: ["mlp", "attention","graph_attention"]
     
   # 16. Switch head layers
   switch_head_layers:
@@ -143,29 +143,30 @@ search_space:
   # 17. Criterion/Loss function
   criterion_name:
     search_type: "categorical"
-    choices: ["MSELoss", "CrossEntropyLoss", "BCELoss", "L1Loss", "HuberLoss", "BCEWithLogitsLoss", "CustomPhysicsLoss"]
+    choices: ["MSELoss", "CrossEntropyLoss",  "WeightedBCELoss","FocalLoss" ]
     
   # 18. Normalization type
   normalization_type:
     search_type: "categorical"
-    choices: ["standard", "minmax", "robust", "adaptive", "none"]
+    choices: ["none","simple", "injection_scale","adaptive", "per_node"]
+    
     
   # 19. Loss scaling strategy
   loss_scaling_strategy:
     search_type: "categorical"
-    choices: ["fixed_ratio", "adaptive_ratio", "loss_magnitude", "gradient_norm", "uncertainty_weighted", "dynamic_balancing"]
+    choices: ["fixed", "adaptive_ratio", "adaptive_magnitude", "uncertainty_weighted"]
     
   # 20. Use gated message passing
   use_gated_mp:
     search_type: "categorical"
     choices: [true, false]
     
-  # 21. Use PhyR (Physics-enhanced Reasoning)
+  # 21. Use PhyR 
   use_phyr:
     search_type: "categorical"
     choices: [true, false]
     
-  # 22. PhyR k ratio (only if use_phyr=true)
+  # 22. PhyR k ratio 
   phyr_k_ratio:
     search_type: "float"
     min: 0.1
@@ -195,4 +196,4 @@ search_space:
   # 26. Graph pooling method
   pooling:
     search_type: "categorical"
-    choices: ["mean", "max", "add", "attention", "set2set"]
+    choices: ["mean", "max", "add"]

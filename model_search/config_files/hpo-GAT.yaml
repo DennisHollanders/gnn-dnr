@@ -1,6 +1,3 @@
-# GAT HPO Configuration  
-# Estimated trials needed: 27 dimensions × 10 = 270 trials
-# Constraints automatically handled: gnn_hidden_dim % gat_heads == 0
 
 # Basic model configuration
 model_module: "AdvancedMLP"
@@ -8,9 +5,10 @@ dataset_names: ["train",
                   "validation",
                   "test"]
 folder_names: 
-  - "data\\split_datasets\\train"
-  - "data\\split_datasets\\validation"
-  - "data\\split_datasets\\test"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+  
 dataset_type: "default"
 batching_type: "dynamic"
 
@@ -26,7 +24,7 @@ fixed_params:
   max_nodes: 1000
   max_edges: 5000
   train_ratio: 0.85
-  num_workers: 4
+  num_workers: 0
   seed: 42
   
   # Training settings
@@ -113,7 +111,7 @@ search_space:
   # 12. Activation function
   activation:
     search_type: "categorical"
-    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "swish"]
+    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "sigmoid"]
     
   # 13. Use batch normalization
   use_batch_norm:
@@ -133,7 +131,7 @@ search_space:
   # 16. Switch head type
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "linear", "attention_pooling", "set_transformer"]
+    choices: ["mlp", "attention","graph_attention"]
     
   # 17. Switch head layers
   switch_head_layers:
@@ -149,17 +147,17 @@ search_space:
   # 19. Criterion/Loss function
   criterion_name:
     search_type: "categorical"
-    choices: ["MSELoss", "CrossEntropyLoss", "BCELoss", "L1Loss", "HuberLoss", "BCEWithLogitsLoss", "CustomPhysicsLoss"]
+    choices: ["MSELoss", "CrossEntropyLoss",  "WeightedBCELoss","FocalLoss" ]
     
   # 20. Normalization type
   normalization_type:
-    search_type: "categorical"
-    choices: ["standard", "minmax", "robust", "adaptive", "none"]
+      search_type: "categorical"
+      choices: ["none","simple", "injection_scale","adaptive", "per_node"]
     
   # 21. Loss scaling strategy
   loss_scaling_strategy:
     search_type: "categorical"
-    choices: ["fixed_ratio", "adaptive_ratio", "loss_magnitude", "gradient_norm", "uncertainty_weighted", "dynamic_balancing"]
+    choices: ["fixed", "adaptive_ratio", "adaptive_magnitude", "uncertainty_weighted"]
     
   # 22. Use gated message passing
   use_gated_mp:

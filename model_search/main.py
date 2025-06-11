@@ -6,7 +6,6 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from pathlib import Path
-from train import train, test
 import optuna
 import wandb
 import importlib
@@ -14,9 +13,6 @@ import sys
 import logging 
 
 
-
-# :TODO WEIGHT INITIALIZATION
-# :TODO OPTUNA HYPERPARAMETER SEARCH
 # :TODO FIX LOGGING TRAIN
 # :TODO Implement Single commodity flow to convex model
 
@@ -49,6 +45,7 @@ if str(model_search_path) not in sys.path:
 
 from load_data import create_data_loaders
 from evaluation.evaluation import run_evaluation
+from train import train, test
 
 src_path = ROOT_DIR / "src"
 if str(src_path) not in sys.path:
@@ -224,6 +221,8 @@ def main():
             criterion = FocalLoss(alpha=1.0, gamma=2.0)
         elif args.criterion_name == "MSELoss":
             criterion = nn.MSELoss()
+        elif args.criterion_name == "CrossEntropyLoss":
+            criterion = nn.CrossEntropyLoss()
         else:
             criterion = getattr(nn, args.criterion_name)()
 
