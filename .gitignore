@@ -9,6 +9,7 @@
 !/src/SOCP_class_dnr.py
 !/src/create_testval.py
 !/src/cvxpy_SOCP.py
+!/src/loss_functions.py
 
 /data_generation/*
 /data_generation/old/*
@@ -36,6 +37,9 @@
 /data_used/*
 #!/data_used/cbs_pc6_2023.gpkg
 #!/data_used/output/*
+
+/model_search/models/AdvancedMLP/*
+!/model_search/models/AdvancedMLP/AdvancedMLP.py
 
 
 /socp_lingkang/*

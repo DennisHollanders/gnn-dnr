@@ -11,12 +11,14 @@ folder_names:
   - "data\\split_datasets\\test"
 # Model
 model_module: "cvx"
+
+criterion_name: "WeightedBCELoss"
+
 model_kwargs:
-  hidden_dims: [1024,512,256,128,64,2]
+  hidden_dims: [1024,512,256,128,64,]
   latent_dim: 8
   activation: "relu"
   dropout_rate: 0.0
-  criterion_name: "MSELoss"
   batch_norm: false
   residual_connections: false
   use_bias: true
@@ -46,7 +48,7 @@ model_kwargs:
   pooling:  "add"  # "mean", "max", "add", "attention"'
 
 batch_size: 1
-learning_rate: 0.0001
+learning_rate: 0.001
 weight_decay: 0.00005
 
 epochs: 100
@@ -54,7 +56,7 @@ patience: 10
 hp_search: false
 hp_search_n_trials: 50
 wandb: True
-config: config-mlp.yaml
+config: config-cvx.yaml
 evaluate_every_x_epoch: 5
 dataset_type: "cvx"
 # Data Loading Configuration
@@ -62,5 +64,5 @@ batching_type: "standard"
 max_nodes: 32000
 max_edges: 35000
 train_ratio: 0.85
-seed: 42
-num_workers: 4
+seed: 0
+num_workers: 0

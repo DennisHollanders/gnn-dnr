@@ -1,5 +1,5 @@
 import argparse
-from ast import arg
+from ast import Lambda, arg
 import os
 import yaml
 import torch
@@ -49,7 +49,12 @@ if str(model_search_path) not in sys.path:
 
 from load_data import create_data_loaders
 from evaluation.evaluation import run_evaluation
-from src.cvxpy_SOCP import build_convex_problem
+
+src_path = ROOT_DIR / "src"
+if str(src_path) not in sys.path:
+    sys.path.append(str(src_path))
+
+from loss_functions import WeightedBCELoss, FocalLoss
 
 DEFAULT_DESCRIPTION = "Graph Neural Network Model Search for Distribution Network Reconfiguration"
 
@@ -179,11 +184,6 @@ def main():
     args.model_kwargs["edge_input_dim"] = edge_input_dim
 
     model_kwargs = args.model_kwargs
-    # if args.model_module =="cvx": 
-    #     from models.cvx.cvx import build_cvx_layer
-    #     model_kwargs["cvx_layer"] = build_cvx_layer(next(iter(train_loader)), args)
-    
-    # model = model_class(**model_kwargs).to(device)
     
     if args.model_module == "cvx":
         all_data = []
@@ -210,37 +210,49 @@ def main():
     except AttributeError:
         logger.info("No test dataset provided")
 
-    criterion = nn.MSELoss()
+    if hasattr(args, 'output_type') and args.output_type == "multiclass":
+        if args.criterion_name == "CrossEntropyLoss":
+            criterion = nn.CrossEntropyLoss()
+        else:
+            logger.warning(f"Using {args.criterion_name} with multiclass - may need adaptation")
+            criterion = getattr(nn, args.criterion_name)()
+    else:
+        # Existing binary criterion logic
+        if args.criterion_name == "WeightedBCELoss":
+            criterion = WeightedBCELoss(pos_weight=2.0)
+        elif args.criterion_name == "FocalLoss":
+            criterion = FocalLoss(alpha=1.0, gamma=2.0)
+        elif args.criterion_name == "MSELoss":
+            criterion = nn.MSELoss()
+        else:
+            criterion = getattr(nn, args.criterion_name)()
+
+    lambda_dict = { 'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
+                    'lambda_mask': getattr(args, 'lambda_mask', 0.01),
+                    "lambda_connectivity": getattr(args, 'lambda_connectivity', 0.05),
+                    "lambda_radiality": getattr(args, 'lambda_radiality', 0.05),
+                    "loss_scaling_strategy": getattr(args, 'loss_scaling_strategy', 'adaptive_ratio') }
 
     for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
-        train_loss, train_dict = train(model, train_loader, optimizer, criterion, device)
-        val_loss, val_dict = test(model, validation_loader, criterion, device)
-
-        if epoch % 5 == 0:
-            if validation_loader:
-                val_real_loss, val_real_dict = test(model, validation_loader, criterion, device)
-                logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Real Loss: {val_real_loss:.4f}")
-                if args.wandb:
-                    wandb.log({"val_real_loss": val_real_loss, **val_real_dict})
-            else:
-                logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
-                
-            if args.wandb:
-                wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
-            if val_loss < best_loss:
-                best_loss = val_loss
-                patience = 0
-                torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Best.pt")
-            else:
-                patience += 1
-                if patience == args.patience:
-                    logger.info(f"Early stopping at epoch {epoch+1}")
-                    break
+        train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict)
+        val_loss, val_dict      = test(model, validation_loader, criterion, device,**lambda_dict)
+        logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+        if args.wandb:
+            wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
+        #logger.info(f"                                              valloss: {val_loss:.4f} -  patience: {patience} - best_loss: {best_loss:.4f}")
+        if val_loss < best_loss:
+            best_loss = val_loss
+            patience = 0
+            torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Best.pt")
         else:
-            logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+            patience += 1
+            if patience == args.patience:
+                logger.info(f"Early stopping at epoch {epoch+1}")
+                break
+
     # Check if test_loader is a valid DataLoader object before using it
     if test_loader:
-        test_loss, test_dict = test(model, test_loader, criterion, device) 
+        test_loss, test_dict = test(model, test_loader, criterion, device, **lambda_dict) 
         logger.info(f"Test Loss: {test_loss:.4f}")
         if args.wandb:
              wandb.log({"test_loss": test_loss, **test_dict}) 
@@ -249,14 +261,14 @@ def main():
     model_save_path = f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch}-Last.pt"
     torch.save(model.state_dict(),model_save_path)
     logger.info(f"Model saved to {model_save_path}")
-    try:
-        args.model_path = model_save_path
-        args.config_path = file_name_yaml 
-        args.override_job_name = args.model_module + "------" + args.job_name
+    # try:
+    #     args.model_path = model_save_path
+    #     args.config_path = file_name_yaml 
+    #     args.override_job_name = args.model_module + "------" + args.job_name
 
-    
-        run_evaluation(model, train_loader, validation_loader, test_loader, device, args)
-    except Exception as e:
-        logger.error(f"Error during evaluation: {e}")   
+    #     run_evaluation(model, train_loader, validation_loader, test_loader, device, args)
+    # except Exception as e:
+    #     logger.error(f"Error during evaluation: {e}")   
 if __name__ == "__main__":
+   
    main()

@@ -1,5 +1,4 @@
 import argparse
-import os
 import yaml
 import torch
 import torch.optim as optim
@@ -11,211 +10,464 @@ import importlib
 import sys
 import logging
 import tempfile
-import json
-from typing import Dict, Any, Optional, List, Union, Tuple
-import numpy as np
+import os
 from datetime import datetime
 import pickle
 import plotly.graph_objects as go
 import pandas as pd
+import numpy as np
+import csv
 
 # Setup logging
-console = logging.StreamHandler(sys.stdout)
-console.setFormatter(logging.Formatter("%(message)s"))   
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
-logger = logging.getLogger("Two-Stage HPO")
-logger.setLevel(logging.INFO)
-logger.handlers.clear()         
-logger.addHandler(console)
-logger.propagate = False 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger("HPO")
 
 # Add paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-
-model_search_path = ROOT_DIR / "model_search"
-if str(model_search_path) not in sys.path:
-    sys.path.append(str(model_search_path))
+sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "model_search")])
 
 from load_data import create_data_loaders
 from train import train, test
 
 
-class TwoStageHPOTuner:
-    """Two-Stage HPO with configurable search space from YAML and W&B tracking"""
+class SimpleHPO:
+    """Simplified HPO with feasibility checks, CSV tracking, and W&B experiment grouping"""
     
-    def __init__(self, base_config_path: str, study_name: str, stage: int = 1):
-        self.base_config_path = base_config_path
+    def __init__(self, config_path: str, study_name: str):
+        self.config_path = config_path
         self.study_name = study_name
-        self.stage = stage
-        self.base_config = self._load_base_config()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Get stage-specific search space
-        search_space_key = f'stage_{stage}_search_space'
-        if search_space_key not in self.base_config:
-            raise ValueError(f"No search space defined for stage {stage}. "
-                           f"Please define '{search_space_key}' in config.")
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
         
-        self.search_space = self.base_config[search_space_key]
+        self.search_space = self.config.pop('search_space', {})
+        self.fixed_params = self.config.pop('fixed_params', {})
         
-        # Create results directory
-        self.model_name = self.base_config.get('model_module', 'Unknown')
-        self.results_base_dir = Path(f"model_search/models/{self.model_name}/hpo_{self.study_name}")
-        self.results_dir = self.results_base_dir / f"stage_{stage}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Results directory
+        model_name = self.config.get('model_module', 'Unknown')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.results_dir = Path(f"model_search/models/{model_name}/hpo_{study_name}_{timestamp}")
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
-        # W&B run will be initialized later
+        # Initialize CSV tracking
+        self.csv_file = self.results_dir / "hpo_results.csv"
+        self.csv_headers = None
+        self.csv_writer = None
+        self._init_csv_tracking()
+        
         self.wandb_run = None
-        
-    def _load_base_config(self) -> Dict[str, Any]:
-        """Load base configuration from YAML file"""
-        with open(self.base_config_path, 'r') as f:
-            return yaml.safe_load(f)
+        self.experiment_id = f"{study_name}_{timestamp}"
     
-    def _load_stage1_results(self) -> Optional[Dict[str, Any]]:
-        """Load results from Stage 1 if available"""
-        stage1_dirs = list(self.results_base_dir.glob("stage_1_*"))
-        if not stage1_dirs:
-            return None
+    def _init_csv_tracking(self):
+        """Initialize CSV file for tracking all trial results"""
+        # Create CSV with headers for hyperparameters + metrics
+        self.csv_file.touch()
         
-        # Get most recent Stage 1 results
-        latest_stage1 = sorted(stage1_dirs)[-1]
-        recommendations_file = latest_stage1 / "stage2_recommendations.json"
+    def _log_trial_to_csv(self, trial_num: int, config: dict, metrics: dict):
+        """Log trial results to CSV"""
+        # Combine all data
+        row_data = {
+            'trial_number': trial_num,
+            'timestamp': datetime.now().isoformat(),
+            **config,  # All hyperparameters
+            **metrics  # All metrics
+        }
         
-        if recommendations_file.exists():
-            with open(recommendations_file, 'r') as f:
-                return json.load(f)
+        # Write to CSV
+        df = pd.DataFrame([row_data])
         
-        return None
+        # If file is empty, write headers
+        if self.csv_file.stat().st_size == 0:
+            df.to_csv(self.csv_file, index=False)
+        else:
+            df.to_csv(self.csv_file, mode='a', header=False, index=False)
     
-    def suggest_hyperparameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """Suggest hyperparameters based on stage configuration"""
-        config = self.base_config.copy()
+    def suggest_params(self, trial: optuna.Trial) -> dict:
+        """Suggest parameters with feasibility checks"""
+        config = self.config.copy()
+        config.update(self.fixed_params)
         
-        # Remove search space keys from config
-        for key in list(config.keys()):
-            if key.endswith('_search_space'):
-                del config[key]
+        # Suggest all parameters first
+        for param, spec in self.search_space.items():
+            if spec['search_type'] == 'float':
+                config[param] = trial.suggest_float(param, spec['min'], spec['max'], 
+                                                  log=spec.get('log', False))
+            elif spec['search_type'] == 'int':
+                config[param] = trial.suggest_int(param, spec['min'], spec['max'], 
+                                                step=spec.get('step', 1))
+            elif spec['search_type'] == 'categorical':
+                config[param] = trial.suggest_categorical(param, spec['choices'])
+            elif spec['search_type'] == 'dynamic_list':
+                config[param] = self._suggest_dynamic_list(trial, param, spec)
         
-        # Process each parameter in search space
-        for param_name, param_spec in self.search_space.items():
-            if isinstance(param_spec, dict) and 'search_type' in param_spec:
-                search_type = param_spec['search_type']
-                
-                if search_type == 'float':
-                    config[param_name] = trial.suggest_float(
-                        param_name,
-                        param_spec['min'],
-                        param_spec['max'],
-                        log=param_spec.get('log', False)
-                    )
-                elif search_type == 'int':
-                    config[param_name] = trial.suggest_int(
-                        param_name,
-                        param_spec['min'],
-                        param_spec['max'],
-                        step=param_spec.get('step', 1)
-                    )
-                elif search_type == 'categorical':
-                    config[param_name] = trial.suggest_categorical(
-                        param_name,
-                        param_spec['choices']
-                    )
-                elif search_type == 'dynamic':
-                    config[param_name] = self._suggest_dynamic_param(
-                        trial, param_name, param_spec
-                    )
-        
-        # Handle model-specific parameters
-        config = self._suggest_model_specific_params(trial, config)
+        # Apply feasibility constraints
+        config = self._apply_constraints(trial, config)
         
         return config
     
-    def _suggest_dynamic_param(self, trial: optuna.Trial, param_name: str, 
-                               param_spec: Dict[str, Any]) -> Any:
-        """Handle dynamic parameters like variable-length lists"""
-        if param_name in ['node_hidden_dims', 'edge_hidden_dims']:
-            n_layers = trial.suggest_int(
-                f'n_{param_name}_layers',
-                param_spec.get('n_layers_min', 1),
-                param_spec.get('n_layers_max', 3)
-            )
-            
-            dims = []
-            for i in range(n_layers):
-                dim = trial.suggest_int(
-                    f'{param_name}_{i}',
-                    param_spec.get('dim_min', 32),
-                    param_spec.get('dim_max', 256),
-                    step=param_spec.get('dim_step', 32)
-                )
-                dims.append(dim)
-            
-            return dims
+    def _suggest_dynamic_list(self, trial: optuna.Trial, param: str, spec: dict) -> list:
+        """Handle dynamic list parameters like hidden_dims"""
+        n_layers = trial.suggest_int(f'n_{param}_layers', 
+                                   spec.get('n_layers_min', 1), 
+                                   spec.get('n_layers_max', 3))
         
-        return None
+        dims = []
+        for i in range(n_layers):
+            dim = trial.suggest_int(f'{param}_{i}', 
+                                  spec.get('dim_min', 32), 
+                                  spec.get('dim_max', 256), 
+                                  step=spec.get('dim_step', 32))
+            dims.append(dim)
+        
+        return dims
     
-    def _suggest_model_specific_params(self, trial: optuna.Trial, 
-                                      config: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle model-specific parameter dependencies"""
-        model_type = config.get('model_module', 'AdvancedMLP')
+    def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
+        """Apply comprehensive feasibility constraints"""
         
-        if model_type == 'AdvancedMLP':
-            # Handle GNN-specific parameters
-            if config.get('gnn_type') and config['gnn_type'] != 'None':
-                # Ensure GNN parameters are suggested if GNN is used
-                if 'gnn_layers' not in config:
-                    config['gnn_layers'] = trial.suggest_int('gnn_layers', 1, 3)
-                if 'gnn_hidden_dim' not in config:
-                    config['gnn_hidden_dim'] = trial.suggest_int(
-                        'gnn_hidden_dim', 32, 128, step=32
-                    )
-                
-                if config['gnn_type'] == 'GAT':
-                    if 'gat_heads' not in config:
-                        config['gat_heads'] = trial.suggest_int('gat_heads', 2, 6)
-                    if 'gat_dropout' not in config:
-                        config['gat_dropout'] = trial.suggest_float('gat_dropout', 0.0, 0.2)
-                elif config['gnn_type'] == 'GIN':
-                    if 'gin_eps' not in config:
-                        config['gin_eps'] = trial.suggest_float('gin_eps', 0.0, 0.1)
+        # Constraint 1: gnn_hidden_dim % gat_heads == 0 (for GAT)
+        if config.get('gnn_type') == 'GAT':
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 64)
+            gat_heads = config.get('gat_heads', 4)
             
-            # Ensure at least one MLP is used
-            if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
-                config['use_node_mlp'] = True
-                if 'node_hidden_dims' not in config:
-                    config['node_hidden_dims'] = [128]
+            # Make gnn_hidden_dim divisible by gat_heads
+            remainder = gnn_hidden_dim % gat_heads
+            if remainder != 0:
+                config['gnn_hidden_dim'] = gnn_hidden_dim + (gat_heads - remainder)
+                logger.debug(f"Adjusted gnn_hidden_dim to {config['gnn_hidden_dim']} for GAT heads")
+        
+        # Constraint 2: hidden_dim % gat_heads == 0 (if hidden_dim exists)
+        if config.get('gnn_type') == 'GAT' and 'hidden_dim' in config:
+            hidden_dim = config['hidden_dim']
+            gat_heads = config.get('gat_heads', 4)
+            
+            remainder = hidden_dim % gat_heads
+            if remainder != 0:
+                config['hidden_dim'] = hidden_dim + (gat_heads - remainder)
+        
+        # Constraint 3: switch_attention_heads divisibility 
+        if 'switch_attention_heads' in config and 'hidden_dim' in config:
+            hidden_dim = config['hidden_dim']
+            switch_heads = config['switch_attention_heads']
+            
+            remainder = hidden_dim % switch_heads
+            if remainder != 0:
+                config['hidden_dim'] = hidden_dim + (switch_heads - remainder)
+        
+        # Constraint 4: Conditional parameters for GAT
+        if config.get('gnn_type') != 'GAT':
+            # Remove GAT-specific parameters if not using GAT
+            config.pop('gat_heads', None)
+            config.pop('gat_dropout', None)
+            config.pop('gat_v2', None)
+            config.pop('gat_edge_dim', None)
+        
+        # Constraint 5: Conditional parameters for GIN
+        if config.get('gnn_type') != 'GIN':
+            # Remove GIN-specific parameters if not using GIN
+            config.pop('gin_eps', None)
+            config.pop('gin_train_eps', None)
+            config.pop('gin_mlp_layers', None)
+        
+        # Constraint 6: Switch attention heads only for attention-based switch heads
+        switch_head_type = config.get('switch_head_type', 'mlp')
+        if 'attention' not in switch_head_type.lower():
+            config.pop('switch_attention_heads', None)
+        
+        # Constraint 7: Node MLP dims only if using node MLP
+        if not config.get('use_node_mlp', True):
+            config.pop('node_hidden_dims', None)
+            
+        # Constraint 8: Edge MLP dims only if using edge MLP  
+        if not config.get('use_edge_mlp', True):
+            config.pop('edge_hidden_dims', None)
+        
+        # Constraint 9: Ensure at least one MLP is used
+        if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
+            config['use_node_mlp'] = True
+            if 'node_hidden_dims' not in config:
+                config['node_hidden_dims'] = [128]
+        
+        # Constraint 10: Gated MP requires GNN
+        if config.get('use_gated_mp') and not config.get('gnn_type'):
+            config['use_gated_mp'] = False
+            logger.debug("Disabled gated MP because no GNN type specified")
+        
+        # Constraint 11: PhyR parameters only if using PhyR
+        if not config.get('use_phyr', False):
+            config.pop('phyr_k_ratio', None)
+        
+        # Constraint 12: Match criterion to output type
+        output_type = config.get('output_type', 'binary')
+        if output_type == 'multiclass' and 'criterion_name' not in self.fixed_params:
+            config['criterion_name'] = 'CrossEntropyLoss'
+        elif output_type == 'binary' and 'criterion_name' not in self.fixed_params:
+            config['criterion_name'] = 'BCEWithLogitsLoss'
+        elif output_type == 'regression' and 'criterion_name' not in self.fixed_params:
+            config['criterion_name'] = 'MSELoss'
+        
+        # Constraint 13: Set num_classes based on output_type
+        if output_type == 'multiclass':
+            config['num_classes'] = 2  # Fixed to 2 classes as requested
+        elif output_type == 'binary':
+            config['num_classes'] = 2
+        else:  # regression
+            config.pop('num_classes', None)
+        
+        # Constraint 14: Memory limit (batch_size × max_nodes)
+        batch_size = config.get('batch_size', 32)
+        max_nodes = config.get('max_nodes', 1000)
+        memory_limit = 100000  # Adjust based on your GPU memory
+        
+        if batch_size * max_nodes > memory_limit:
+            # Reduce batch size to fit memory
+            config['batch_size'] = max(1, memory_limit // max_nodes)
+            logger.debug(f"Reduced batch_size to {config['batch_size']} for memory constraint")
         
         return config
+    
+    def _validate_config(self, config: dict) -> bool:
+        """Validate configuration before trial execution"""
+        
+        # Check divisibility constraints
+        if config.get('gnn_type') == 'GAT':
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 64)
+            gat_heads = config.get('gat_heads', 4)
+            
+            if gnn_hidden_dim % gat_heads != 0:
+                logger.warning(f"Invalid GAT config: {gnn_hidden_dim} not divisible by {gat_heads}")
+                return False
+        
+        # Check that at least one MLP is enabled
+        if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
+            logger.warning("Invalid config: Neither node nor edge MLP enabled")
+            return False
+        
+        # Check logical dependencies
+        if config.get('use_gated_mp') and not config.get('gnn_type'):
+            logger.warning("Invalid config: Gated MP requires GNN")
+            return False
+        
+        # Check PhyR dependency
+        if config.get('use_phyr') and 'phyr_k_ratio' not in config:
+            logger.warning("Invalid config: PhyR enabled but no k_ratio specified")
+            return False
+        
+        # Check conditional parameters
+        if config.get('gnn_type') != 'GAT' and any(k in config for k in ['gat_heads', 'gat_dropout']):
+            logger.warning("Invalid config: GAT parameters with non-GAT backbone")
+            return False
+            
+        if config.get('gnn_type') != 'GIN' and 'gin_eps' in config:
+            logger.warning("Invalid config: GIN parameters with non-GIN backbone")
+            return False
+        
+        return True
     
     def objective(self, trial: optuna.Trial) -> float:
-        """Objective function optimizing F1 score with W&B logging"""
+        """Simplified objective function with comprehensive constraint validation"""
+        
+        # Initialize individual trial W&B run
+        trial_run = None
+        if self.wandb_run:
+            trial_run = wandb.init(
+                project=self.config.get('wandb_project', 'HPO'),
+                group=self.experiment_id,  # Group all trials together
+                name=f"trial_{trial.number:03d}",
+                job_type="hpo_trial",
+                tags=[self.study_name, "hpo_trial"],
+                config=None,  # Will set later
+                reinit=True
+            )
+        
         try:
-            config = self.suggest_hyperparameters(trial)
+            config = self.suggest_params(trial)
             
-            # Log trial start to W&B
-            if self.wandb_run:
-                wandb.log({
-                    f"stage_{self.stage}/trial": trial.number,
-                    f"stage_{self.stage}/trial_params": config
-                })
+            # Validate configuration
+            if not self._validate_config(config):
+                logger.warning(f"Trial {trial.number}: Invalid configuration, pruning")
+                if trial_run:
+                    wandb.log({"status": "invalid_config"})
+                    wandb.finish()
+                raise optuna.TrialPruned()
             
-            # Create temporary config file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                yaml.dump(config, f)
-                temp_config_path = f.name
+            # Set W&B config for this trial
+            if trial_run:
+                wandb.config.update(config)
             
-            # Load model dynamically
-            model_module_path = f"models.{config['model_module']}.{config['model_module']}"
-            model_module = importlib.import_module(model_module_path)
+            # Create model and data
+            model, train_loader, val_loader, criterion = self._setup_training(config)
+            if model is None:
+                if trial_run:
+                    wandb.log({"status": "failed_setup"})
+                    wandb.finish()
+                return 1.0
+            
+            # Log configuration validity and model size
+            model_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Trial {trial.number}: Config valid, Model params: {model_params:,}")
+            
+            # Training loop with detailed logging
+            optimizer = optim.Adam(model.parameters(), 
+                                 lr=config['learning_rate'], 
+                                 weight_decay=config['weight_decay'])
+            
+            best_f1 = 0.0
+            best_train_loss = float('inf')
+            best_val_loss = float('inf')
+            final_train_loss = float('inf')
+            final_val_loss = float('inf')
+            final_precision = 0.0
+            final_recall = 0.0
+            final_accuracy = 0.0
+            
+            patience = 0
+            max_epochs = min(config.get('epochs', 100), 50)
+            max_patience = config.get('patience', 8)
+            
+            for epoch in range(max_epochs):
+                train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device)
+                val_loss, val_dict = test(model, val_loader, criterion, self.device)
+                
+                # Extract metrics
+                current_f1 = val_dict.get('test_f1', 0.0)
+                current_precision = val_dict.get('test_precision', 0.0)
+                current_recall = val_dict.get('test_recall', 0.0)
+                current_accuracy = val_dict.get('test_accuracy', 0.0)
+                
+                # Fallback F1 calculation if not available
+                if current_f1 == 0.0 and current_precision + current_recall > 0:
+                    current_f1 = 2 * current_precision * current_recall / (current_precision + current_recall + 1e-8)
+                
+                # Track best and final metrics
+                if current_f1 > best_f1:
+                    best_f1 = current_f1
+                    best_train_loss = train_loss
+                    best_val_loss = val_loss
+                    patience = 0
+                else:
+                    patience += 1
+                
+                # Always update final metrics
+                final_train_loss = train_loss
+                final_val_loss = val_loss
+                final_precision = current_precision
+                final_recall = current_recall
+                final_accuracy = current_accuracy
+                
+                # Log to W&B every epoch
+                if trial_run:
+                    wandb.log({
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "f1_score": current_f1,
+                        "precision": current_precision,
+                        "recall": current_recall,
+                        "accuracy": current_accuracy,
+                        "best_f1": best_f1,
+                        "patience": patience
+                    })
+                
+                # Pruning and early stopping
+                trial.report(1 - current_f1, epoch)
+                if trial.should_prune() or patience >= max_patience:
+                    break
+            
+            # Comprehensive metrics for CSV and Optuna
+            metrics = {
+                'best_f1_score': best_f1,
+                'best_train_loss': best_train_loss,
+                'best_val_loss': best_val_loss,
+                'final_train_loss': final_train_loss,
+                'final_val_loss': final_val_loss,
+                'final_precision': final_precision,
+                'final_recall': final_recall,
+                'final_accuracy': final_accuracy,
+                'final_epoch': epoch,
+                'converged': patience < max_patience,
+                'model_parameters': model_params,
+                'status': 'completed',
+                'config_valid': True
+            }
+            
+            # Store in Optuna trial
+            for key, value in metrics.items():
+                trial.set_user_attr(key, value)
+            
+            # Log final metrics to W&B
+            if trial_run:
+                wandb.log(metrics)
+                wandb.log({"trial_score": 1 - best_f1})  # The objective value
+                wandb.finish()
+            
+            # Log to CSV
+            self._log_trial_to_csv(trial.number, config, metrics)
+            
+            logger.info(f"Trial {trial.number}: F1={best_f1:.4f}, Val_Loss={best_val_loss:.4f}, Epoch={epoch}, Params={model_params:,}")
+            
+            return 1 - best_f1  # Minimize
+            
+        except optuna.TrialPruned:
+            # Handle pruned trials properly
+            pruned_metrics = {
+                'best_f1_score': 0.0,
+                'best_train_loss': float('inf'),
+                'best_val_loss': float('inf'),
+                'final_train_loss': float('inf'),
+                'final_val_loss': float('inf'),
+                'final_precision': 0.0,
+                'final_recall': 0.0,
+                'final_accuracy': 0.0,
+                'final_epoch': 0,
+                'converged': False,
+                'model_parameters': 0,
+                'status': 'pruned',
+                'config_valid': True
+            }
+            
+            if trial_run:
+                wandb.log(pruned_metrics)
+                wandb.finish()
+            
+            self._log_trial_to_csv(trial.number, self.suggest_params(trial), pruned_metrics)
+            logger.info(f"Trial {trial.number}: Pruned")
+            raise
+            
+        except Exception as e:
+            logger.error(f"Trial {trial.number} failed: {e}")
+            
+            # Log failure
+            failure_metrics = {
+                'best_f1_score': 0.0,
+                'best_train_loss': float('inf'),
+                'best_val_loss': float('inf'),
+                'final_train_loss': float('inf'),
+                'final_val_loss': float('inf'),
+                'final_precision': 0.0,
+                'final_recall': 0.0,
+                'final_accuracy': 0.0,
+                'final_epoch': 0,
+                'converged': False,
+                'model_parameters': 0,
+                'status': 'failed',
+                'config_valid': False,
+                'error_message': str(e)
+            }
+            
+            if trial_run:
+                wandb.log(failure_metrics)
+                wandb.finish()
+            
+            self._log_trial_to_csv(trial.number, self.suggest_params(trial), failure_metrics)
+            
+            return 1.0
+    
+    def _setup_training(self, config: dict):
+        """Setup model, data, and criterion"""
+        try:
+            # Load model
+            model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
             model_class = getattr(model_module, config['model_module'])
             
             # Create data loaders
@@ -233,565 +485,265 @@ class TwoStageHPOTuner:
             )
             
             train_loader = dataloaders.get("train")
-            validation_loader = dataloaders.get("validation")
+            val_loader = dataloaders.get("validation")
             
-            if not train_loader or not validation_loader:
-                return 1.0
+            if not train_loader or not val_loader:
+                return None, None, None, None
             
-            # Get input dimensions
-            sample_data = train_loader.dataset[0]
-            node_input_dim = sample_data.x.shape[1]
-            edge_input_dim = sample_data.edge_attr.shape[1]
+            # Get dimensions and create model
+            sample = train_loader.dataset[0]
+            model_kwargs = {
+                'node_input_dim': sample.x.shape[1],
+                'edge_input_dim': sample.edge_attr.shape[1],
+            }
             
-            # Create model
-            model_kwargs = self._prepare_model_kwargs(config, node_input_dim, edge_input_dim)
+            # Add relevant parameters
+            for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
+                       'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
+                       'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
+                       'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
+                       'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
+                       'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
+                       'loss_scaling_strategy']:
+                if key in config:
+                    model_kwargs[key] = config[key]
+            
             model = model_class(**model_kwargs).to(self.device)
             
             # Create criterion
-            criterion = self._create_criterion(config, model_module)
+            criterion_name = config.get('criterion_name', 'MSELoss')
+            if hasattr(model_module, criterion_name):
+                criterion = getattr(model_module, criterion_name)()
+            else:
+                criterion = getattr(nn, criterion_name)()
             
-            # Create optimizer
-            optimizer = optim.Adam(
-                model.parameters(), 
-                lr=config['learning_rate'], 
-                weight_decay=config['weight_decay']
-            )
+            return model, train_loader, val_loader, criterion
             
-            # Training loop with W&B logging
-            best_f1_score = 0.0
-            patience_counter = 0
-            max_patience = config.get('patience', 8)
-            max_epochs = min(config.get('epochs', 100), 30)  
-            
-            for epoch in range(max_epochs):
-                train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device)
-                val_loss, val_dict = test(model, validation_loader, criterion, self.device)
-                
-                current_f1 = val_dict.get('test_f1', 0.0)
-                if current_f1 == 0.0:
-                    precision = val_dict.get('test_precision', 0.0)
-                    recall = val_dict.get('test_recall', 0.0)
-                    if precision + recall > 0:
-                        current_f1 = 2 * precision * recall / (precision + recall)
-                
-                # Log to W&B
-                if self.wandb_run and epoch % 5 == 0:
-                    wandb.log({
-                        f"stage_{self.stage}/trial_{trial.number}/epoch": epoch,
-                        f"stage_{self.stage}/trial_{trial.number}/train_loss": train_loss,
-                        f"stage_{self.stage}/trial_{trial.number}/val_loss": val_loss,
-                        f"stage_{self.stage}/trial_{trial.number}/f1_score": current_f1,
-                        f"stage_{self.stage}/trial_{trial.number}/precision": val_dict.get('test_precision', 0),
-                        f"stage_{self.stage}/trial_{trial.number}/recall": val_dict.get('test_recall', 0),
-                    })
-                
-                trial.report(1 - current_f1, epoch)
-                
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-                
-                if current_f1 > best_f1_score:
-                    best_f1_score = current_f1
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= max_patience:
-                        break
-                
-                if epoch % 5 == 0:
-                    logger.debug(f"Trial {trial.number}, Epoch {epoch}: F1={current_f1:.4f}")
-            
-            # Log final trial results to W&B
-            if self.wandb_run:
-                wandb.log({
-                    f"stage_{self.stage}/trial_{trial.number}/best_f1": best_f1_score,
-                    f"stage_{self.stage}/trial_{trial.number}/final_epoch": epoch,
-                })
-            
-            return 1 - best_f1_score  
-            
-        except optuna.TrialPruned:
-            raise
         except Exception as e:
-            logger.error(f"Error in trial {trial.number}: {str(e)}")
-            return 1.0
-        finally:
-            if 'temp_config_path' in locals() and os.path.exists(temp_config_path):
-                os.unlink(temp_config_path)
+            logger.error(f"Setup failed: {e}")
+            return None, None, None, None
     
-    def _prepare_model_kwargs(self, config: Dict[str, Any], node_input_dim: int, 
-                             edge_input_dim: int) -> Dict[str, Any]:
-        """Prepare model constructor arguments"""
-        model_kwargs = {
-            'node_input_dim': node_input_dim,
-            'edge_input_dim': edge_input_dim,
-        }
+    def create_parallel_plot(self, study: optuna.Study) -> go.Figure:
+        """Create parallel coordinates plot from CSV data"""
+        # Read from CSV for most comprehensive data
+        if not self.csv_file.exists():
+            return None
+            
+        df = pd.read_csv(self.csv_file)
+        df = df[df['status'] == 'completed'].sort_values('best_f1_score', ascending=False)
         
-        # Add all relevant parameters from config
-        relevant_params = [
-            'activation', 'dropout_rate', 'hidden_dims', 'latent_dim',
-            'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 'gat_heads', 
-            'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
-            'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm',
-            'use_residual', 'pooling'
-        ]
-        
-        for param in relevant_params:
-            if param in config:
-                model_kwargs[param] = config[param]
-        
-        return model_kwargs
-    
-    def _create_criterion(self, config: Dict[str, Any], model_module) -> nn.Module:
-        """Create loss criterion"""
-        criterion_name = config.get('criterion_name', 'MSELoss')
-        
-        try:
-            criterion_class = getattr(model_module, criterion_name)
-            try:
-                criterion = criterion_class(weight_switch=1.0, weight_physics=10.0)
-            except:
-                criterion = criterion_class()
-            return criterion
-        except (ImportError, AttributeError):
-            return nn.MSELoss()
-    
-    def create_parallel_coordinates_plot(self, study: optuna.Study, 
-                                       title: str = "HPO Results") -> go.Figure:
-        """Create interactive parallel coordinates plot"""
-        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-        
-        if len(completed_trials) < 5:
-            logger.warning("Too few completed trials for visualization")
+        if len(df) < 5:
             return None
         
-        # Create DataFrame
-        data = []
-        for trial in completed_trials:
-            row = trial.params.copy()
-            row['F1_Score'] = 1 - trial.value
-            row['Trial_Number'] = trial.number
-            data.append(row)
+        # Create dimensions - start with key metrics
+        dimensions = [
+            dict(label="F1 Score", values=df['best_f1_score'], 
+                 range=[df['best_f1_score'].min(), df['best_f1_score'].max()]),
+            dict(label="Best Val Loss", values=df['best_val_loss'],
+                 range=[df['best_val_loss'].min(), df['best_val_loss'].max()]),
+            dict(label="Final Epoch", values=df['final_epoch'],
+                 range=[df['final_epoch'].min(), df['final_epoch'].max()]),
+        ]
         
-        df = pd.DataFrame(data)
-        df = df.sort_values('F1_Score', ascending=False)
+        # Add hyperparameters (exclude metadata columns)
+        exclude_cols = {'trial_number', 'timestamp', 'best_f1_score', 'best_train_loss', 
+                       'best_val_loss', 'final_train_loss', 'final_val_loss', 'final_precision',
+                       'final_recall', 'final_accuracy', 'final_epoch', 'converged', 
+                       'model_parameters', 'status', 'error_message'}
         
-        # Select top parameters for visualization
-        param_cols = [col for col in df.columns if col not in ['F1_Score', 'Trial_Number']]
+        param_cols = [col for col in df.columns if col not in exclude_cols]
         
-        # Get parameter importance and select top 8
-        try:
-            importance = optuna.importance.get_param_importances(study)
-            top_params = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:8]
-            param_cols = [param for param, _ in top_params if param in param_cols]
-        except:
-            param_cols = param_cols[:8]
-        
-        # Prepare dimensions
-        dimensions = [dict(
-            label="F1 Score",
-            values=df['F1_Score'],
-            range=[df['F1_Score'].min(), df['F1_Score'].max()]
-        )]
-        
-        for param in param_cols:
-            if df[param].dtype in ['object', 'string', 'bool']:
-                # Categorical parameter
-                unique_vals = df[param].unique()
-                val_to_num = {val: i for i, val in enumerate(unique_vals)}
-                numeric_vals = df[param].map(val_to_num)
-                
-                dimensions.append(dict(
-                    label=param,
-                    values=numeric_vals,
-                    tickvals=list(range(len(unique_vals))),
-                    ticktext=[str(val) for val in unique_vals],
-                    range=[0, len(unique_vals)-1]
-                ))
+        for col in param_cols:
+            if df[col].dtype in ['object', 'bool']:
+                # Categorical
+                unique_vals = df[col].unique()
+                if len(unique_vals) > 1:  # Only include if there's variation
+                    val_map = {v: i for i, v in enumerate(unique_vals)}
+                    dimensions.append(dict(
+                        label=col,
+                        values=df[col].map(val_map),
+                        tickvals=list(range(len(unique_vals))),
+                        ticktext=[str(v) for v in unique_vals]
+                    ))
             else:
-                # Numerical parameter
-                dimensions.append(dict(
-                    label=param,
-                    values=df[param],
-                    range=[df[param].min(), df[param].max()]
-                ))
+                # Numerical
+                if df[col].nunique() > 1:  # Only include if there's variation
+                    dimensions.append(dict(
+                        label=col,
+                        values=df[col],
+                        range=[df[col].min(), df[col].max()]
+                    ))
         
         # Create plot
         fig = go.Figure(data=go.Parcoords(
-            line=dict(
-                color=df['F1_Score'],
-                colorscale='Viridis',
-                showscale=True,
-                colorbar=dict(title="F1 Score", x=1.02)
-            ),
+            line=dict(color=df['best_f1_score'], colorscale='Viridis', showscale=True,
+                     colorbar=dict(title="F1 Score")),
             dimensions=dimensions
         ))
         
         fig.update_layout(
-            title=dict(text=title, x=0.5),
-            font=dict(size=11),
-            height=500,
-            margin=dict(l=50, r=120, t=50, b=50)
+            title=f"HPO Results: {self.study_name} ({len(df)} completed trials)",
+            height=600,
+            font=dict(size=10)
         )
         
         return fig
     
-    def run_optimization(self, n_trials: int = 100, wandb_config: Dict[str, Any] = None) -> optuna.Study:
-        """Run HPO optimization with W&B tracking"""
-        # Initialize W&B if config provided
-        if wandb_config:
-            wandb_settings = self.base_config.get('wandb_settings', {})
-            project = wandb_settings.get('project', 'HPO')
-            group = wandb_settings.get('group', self.study_name)
-            tags = wandb_settings.get('tags', []) + [f'stage_{self.stage}']
-            
+    def run(self, n_trials: int = 100, use_wandb: bool = False) -> optuna.Study:
+        """Run optimization with experiment-level W&B tracking"""
+        
+        # Initialize experiment-level W&B run
+        if use_wandb:
             self.wandb_run = wandb.init(
-                project=project,
-                group=group,
-                name=f"{self.study_name}_stage_{self.stage}",
-                job_type=f"hpo_stage_{self.stage}",
-                tags=tags,
+                project=self.config.get('wandb_project', 'HPO'),
+                group=None,  # This is the parent experiment
+                name=self.experiment_id,
+                job_type="hpo_experiment", 
+                tags=[self.study_name, "hpo_experiment"],
                 config={
-                    **self.base_config,
-                    'stage': self.stage,
+                    **self.config, 
+                    'search_space': self.search_space,
+                    'fixed_params': self.fixed_params,
                     'n_trials': n_trials,
-                    'search_space': self.search_space
+                    'experiment_id': self.experiment_id
                 }
             )
         
-        logger.info("="*60)
-        logger.info(f"TWO-STAGE HYPERPARAMETER OPTIMIZATION - STAGE {self.stage}")
-        logger.info(f"Model: {self.model_name}")
-        logger.info(f"Results will be saved to: {self.results_dir}")
-        logger.info(f"Search space parameters: {list(self.search_space.keys())}")
-        logger.info("="*60)
-        
-        # Load Stage 1 results if this is Stage 2
-        if self.stage == 2:
-            stage1_results = self._load_stage1_results()
-            if stage1_results:
-                logger.info("Loading Stage 1 recommendations...")
-                logger.info(f"Best Stage 1 F1 Score: {stage1_results.get('best_f1_score', 'N/A')}")
-            else:
-                logger.warning("No Stage 1 results found. Running Stage 2 with full search space.")
+        logger.info(f"Starting HPO Experiment: {self.experiment_id}")
+        logger.info(f"Study: {self.study_name} with {n_trials} trials")
+        logger.info(f"Results directory: {self.results_dir}")
+        logger.info(f"CSV tracking: {self.csv_file}")
         
         # Create study
         study = optuna.create_study(
             direction="minimize",
-            study_name=f"{self.study_name}_stage_{self.stage}",
-            pruner=optuna.pruners.MedianPruner(
-                n_startup_trials=8,
-                n_warmup_steps=10,
-                interval_steps=3
-            ),
-            sampler=optuna.samplers.TPESampler(
-                seed=42,
-                n_startup_trials=15,
-                multivariate=True,
-                warn_independent_sampling=False
-            )
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=10),
+            sampler=optuna.samplers.TPESampler(seed=42, n_startup_trials=15)
         )
         
-        logger.info(f"Starting optimization with {n_trials} trials")
-        
-        # Add callback for W&B logging
-        def trial_callback(study, trial):
-            if self.wandb_run and trial.state == optuna.trial.TrialState.COMPLETE:
+        # Add callback for experiment-level logging
+        def experiment_callback(study, trial):
+            if trial.state == optuna.trial.TrialState.COMPLETE and self.wandb_run:
+                completed_trials = len([t for t in study.trials 
+                                      if t.state == optuna.trial.TrialState.COMPLETE])
+                best_f1 = 1 - study.best_value if study.best_value < 1 else 0
+                
+                # Log experiment-level metrics
                 wandb.log({
-                    f"stage_{self.stage}/completed_trials": len([t for t in study.trials 
-                                                                if t.state == optuna.trial.TrialState.COMPLETE]),
-                    f"stage_{self.stage}/best_f1_so_far": 1 - study.best_value,
+                    "experiment/completed_trials": completed_trials,
+                    "experiment/best_f1_so_far": best_f1,
+                    "experiment/trial_number": trial.number,
+                    "experiment/current_trial_f1": trial.user_attrs.get('best_f1_score', 0),
                 })
         
-        study.optimize(self.objective, n_trials=n_trials, callbacks=[trial_callback])
+        # Run optimization
+        study.optimize(self.objective, n_trials=n_trials, callbacks=[experiment_callback])
         
-        # Analyze and save results
-        self._analyze_and_save_results(study)
+        # Final experiment summary
+        completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        if self.wandb_run and completed:
+            # Log final experiment summary
+            all_f1s = [t.user_attrs.get('best_f1_score', 0) for t in completed]
+            wandb.log({
+                "experiment/final_best_f1": max(all_f1s),
+                "experiment/mean_f1": np.mean(all_f1s),
+                "experiment/std_f1": np.std(all_f1s),
+                "experiment/total_completed": len(completed),
+                "experiment/success_rate": len(completed) / len(study.trials)
+            })
         
-        # Close W&B run
+        # Save results
+        self._save_results(study)
+        
         if self.wandb_run:
             wandb.finish()
         
         return study
     
-    def _extract_stage2_recommendations(self, trials: List[optuna.Trial]) -> Dict[str, Any]:
-        """Extract parameter recommendations for Stage 2 from top trials"""
-        # Get top 20% trials
-        sorted_trials = sorted(trials, key=lambda t: t.value)
-        top_trials = sorted_trials[:max(1, len(sorted_trials) // 5)]
+    def _save_results(self, study: optuna.Study):
+        """Save results and create visualizations"""
+        completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         
-        recommendations = {
-            'best_f1_score': 1 - sorted_trials[0].value,
-            'best_trial_number': sorted_trials[0].number,
-            'parameter_ranges': {}
-        }
-        
-        # Collect parameter values from top trials
-        param_values = {}
-        for trial in top_trials:
-            for param, value in trial.params.items():
-                if param not in param_values:
-                    param_values[param] = []
-                param_values[param].append(value)
-        
-        # Create narrowed ranges
-        for param, values in param_values.items():
-            if all(isinstance(v, (int, float)) for v in values):
-                min_val = min(values)
-                max_val = max(values)
-                mean_val = np.mean(values)
-                std_val = np.std(values)
-                
-                # For numerical parameters, suggest narrowed range
-                if isinstance(min_val, float):
-                    # For log-scale parameters (learning rate, weight decay)
-                    if param in ['learning_rate', 'weight_decay']:
-                        # Use geometric mean and expand by factor of 3
-                        geo_mean = np.exp(np.mean(np.log(values)))
-                        new_min = geo_mean / 3
-                        new_max = geo_mean * 3
-                    else:
-                        # For linear parameters, use mean ± 1.5 std
-                        new_min = max(0, mean_val - 1.5 * std_val)
-                        new_max = mean_val + 1.5 * std_val
-                    
-                    recommendations['parameter_ranges'][param] = {
-                        'min': new_min,
-                        'max': new_max,
-                        'best': values[0],
-                        'mean': mean_val,
-                        'std': std_val
-                    }
-                else:
-                    # Integer parameters
-                    range_size = max_val - min_val
-                    new_min = max(1, min_val - range_size // 2)
-                    new_max = max_val + range_size // 2
-                    
-                    recommendations['parameter_ranges'][param] = {
-                        'min': int(new_min),
-                        'max': int(new_max),
-                        'best': int(values[0])
-                    }
-            else:
-                # Categorical parameters - keep most frequent values
-                from collections import Counter
-                value_counts = Counter(values)
-                top_values = [v for v, _ in value_counts.most_common(3)]
-                
-                recommendations['parameter_ranges'][param] = {
-                    'choices': top_values,
-                    'best': values[0],
-                    'frequency': dict(value_counts)
-                }
-        
-        return recommendations
-    
-    def _analyze_and_save_results(self, study: optuna.Study):
-        """Analyze results and save to files"""
-        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-        
-        if not completed_trials:
+        if not completed:
             logger.error("No completed trials!")
             return
         
-        # Calculate statistics
-        f1_scores = [1 - t.value for t in completed_trials]
-        best_f1 = max(f1_scores)
-        mean_f1 = np.mean(f1_scores)
-        std_f1 = np.std(f1_scores)
+        # Best results from CSV (most comprehensive)
+        if self.csv_file.exists():
+            df = pd.read_csv(self.csv_file)
+            completed_df = df[df['status'] == 'completed']
+            if len(completed_df) > 0:
+                best_row = completed_df.loc[completed_df['best_f1_score'].idxmax()]
+                best_f1 = best_row['best_f1_score']
+                best_trial_num = best_row['trial_number']
+            else:
+                best_f1 = 1 - study.best_value
+                best_trial_num = study.best_trial.number
+        else:
+            best_f1 = 1 - study.best_value  
+            best_trial_num = study.best_trial.number
         
-        # Create results summary
-        summary_lines = [
-            "="*60,
-            f"HYPERPARAMETER OPTIMIZATION RESULTS - STAGE {self.stage}",
-            "="*60,
-            f"Model: {self.model_name}",
-            f"Study: {self.study_name}",
-            f"Stage: {self.stage}",
-            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Total Trials: {len(study.trials)}",
-            f"Completed Trials: {len(completed_trials)}",
-            f"Pruned Trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}",
-            "",
-            "PERFORMANCE SUMMARY:",
-            "-" * 30,
-            f"Best F1 Score: {best_f1:.4f}",
-            f"Mean F1 Score: {mean_f1:.4f} ± {std_f1:.4f}",
-            f"Best Trial: #{study.best_trial.number}",
-            "",
-            "BEST HYPERPARAMETERS:",
-            "-" * 30,
-        ]
-        
-        # Add best parameters
-        for param, value in sorted(study.best_params.items()):
-            summary_lines.append(f"  {param}: {value}")
-        
-        # Add parameter importance
-        try:
-            importance = optuna.importance.get_param_importances(study)
-            summary_lines.extend([
-                "",
-                "PARAMETER IMPORTANCE:",
-                "-" * 30,
-            ])
-            for param, imp in sorted(importance.items(), key=lambda x: x[1], reverse=True)[:10]:
-                summary_lines.append(f"  {param}: {imp:.3f}")
-        except:
-            summary_lines.append("\nParameter importance analysis not available")
-        
-        # Add stage-specific recommendations
-        if self.stage == 1:
-            # Extract recommendations for Stage 2
-            recommendations = self._extract_stage2_recommendations(completed_trials)
-            
-            summary_lines.extend([
-                "",
-                "STAGE 2 RECOMMENDATIONS:",
-                "-" * 30,
-                f"Based on top {len(completed_trials) // 5} trials from Stage 1:",
-                "",
-            ])
-            
-            for param, info in recommendations['parameter_ranges'].items():
-                if 'choices' in info:
-                    summary_lines.append(f"  {param}: Keep values {info['choices']} (best: {info['best']})")
-                else:
-                    if 'mean' in info:
-                        summary_lines.append(
-                            f"  {param}: [{info['min']:.2e}, {info['max']:.2e}] "
-                            f"(best: {info['best']:.2e}, mean: {info['mean']:.2e})"
-                        )
-                    else:
-                        summary_lines.append(
-                            f"  {param}: [{info['min']}, {info['max']}] (best: {info['best']})"
-                        )
-            
-            # Save recommendations for Stage 2
-            recommendations_file = self.results_dir / "stage2_recommendations.json"
-            with open(recommendations_file, 'w') as f:
-                # Convert numpy types to Python types for JSON serialization
-                def convert_to_serializable(obj):
-                    if isinstance(obj, np.integer):
-                        return int(obj)
-                    elif isinstance(obj, np.floating):
-                        return float(obj)
-                    elif isinstance(obj, np.ndarray):
-                        return obj.tolist()
-                    elif isinstance(obj, dict):
-                        return {k: convert_to_serializable(v) for k, v in obj.items()}
-                    elif isinstance(obj, list):
-                        return [convert_to_serializable(v) for v in obj]
-                    return obj
-                
-                json.dump(convert_to_serializable(recommendations), f, indent=2)
-            
-            summary_lines.extend([
-                "",
-                "To run Stage 2 with these recommendations:",
-                f"1. Edit the config file to uncomment and modify stage_2_search_space",
-                f"2. Run: python hpo.py --config {self.base_config_path} --stage 2 --trials 100",
-                "",
-                f"Stage 2 recommendations saved to: {recommendations_file}",
-            ])
-        
-        elif self.stage == 2:
-            # Compare with Stage 1 results if available
-            stage1_results = self._load_stage1_results()
-            if stage1_results:
-                stage1_best_f1 = stage1_results.get('best_f1_score', 0)
-                improvement = ((best_f1 - stage1_best_f1) / stage1_best_f1) * 100
-                
-                summary_lines.extend([
-                    "",
-                    "COMPARISON WITH STAGE 1:",
-                    "-" * 30,
-                    f"Stage 1 Best F1: {stage1_best_f1:.4f}",
-                    f"Stage 2 Best F1: {best_f1:.4f}",
-                    f"Improvement: {improvement:.2f}%",
-                ])
-        
-        summary_lines.extend([
-            "",
-            "="*60,
-        ])
-        
-        # Save text summary
-        summary_file = self.results_dir / "hpo_results.txt"
-        with open(summary_file, 'w') as f:
-            f.write('\n'.join(summary_lines))
-        
-        # Save best configuration
-        best_config = self.base_config.copy()
-        # Remove search spaces
-        for key in list(best_config.keys()):
-            if key.endswith('_search_space'):
-                del best_config[key]
-        
+        # Save best config
+        best_config = self.config.copy()
+        best_config.update(self.fixed_params)
         best_config.update(study.best_params)
         best_config['_hpo_metadata'] = {
             'best_f1_score': best_f1,
-            'best_trial': study.best_trial.number,
+            'best_trial': best_trial_num,
             'total_trials': len(study.trials),
-            'study_name': self.study_name,
-            'stage': self.stage,
-            'timestamp': datetime.now().isoformat()
+            'completed_trials': len(completed),
+            'experiment_id': self.experiment_id,
+            'csv_file': str(self.csv_file.name)
         }
         
-        config_file = self.results_dir / f"best_config_stage_{self.stage}.yaml"
+        config_file = self.results_dir / "best_config.yaml"
         with open(config_file, 'w') as f:
-            yaml.dump(best_config, f, default_flow_style=False)
+            yaml.dump(best_config, f)
         
-        # Create and save interactive plot
-        fig = self.create_parallel_coordinates_plot(
-            study, f"HPO Results: {self.model_name} - Stage {self.stage}"
-        )
+        # Save parallel coordinates plot  
+        fig = self.create_parallel_plot(study)
         if fig:
-            plot_file = self.results_dir / f"parallel_coordinates_stage_{self.stage}.html"
+            plot_file = self.results_dir / "parallel_coordinates.html"
             fig.write_html(plot_file)
             logger.info(f"Interactive plot saved: {plot_file}")
         
-        # Save study for later analysis
-        study_file = self.results_dir / f"optuna_study_stage_{self.stage}.pkl"
-        with open(study_file, 'wb') as f:
+        # Save study
+        with open(self.results_dir / "study.pkl", 'wb') as f:
             pickle.dump(study, f)
         
-        # Log results
-        logger.info("\n" + '\n'.join(summary_lines))
-        logger.info(f"\nFiles saved in: {self.results_dir}")
-        logger.info(f"  📄 Results summary: {summary_file}")
-        logger.info(f"  ⚙️  Best config: {config_file}")
+        # Print summary
+        logger.info(f"\nHPO Experiment Complete!")
+        logger.info(f"Experiment ID: {self.experiment_id}")
+        logger.info(f"Best F1 Score: {best_f1:.4f} (Trial #{best_trial_num})")
+        logger.info(f"Completed Trials: {len(completed)}/{len(study.trials)}")
+        logger.info(f"Results saved to: {self.results_dir}")
+        logger.info(f"CSV data: {self.csv_file}")
+        logger.info(f"Best config: {config_file}")
         if fig:
-            logger.info(f"  📊 Interactive plot: {plot_file}")
-        logger.info(f"  💾 Study data: {study_file}")
+            logger.info(f"Interactive plot: {plot_file}")
         
-        logger.info(f"\n🚀 To train with best config:")
-        logger.info(f"   python main.py --config {config_file} --wandb")
+        # Show top 5 results
+        if self.csv_file.exists():
+            df = pd.read_csv(self.csv_file)
+            completed_df = df[df['status'] == 'completed']
+            if len(completed_df) > 0:
+                top_5 = completed_df.nlargest(5, 'best_f1_score')[['trial_number', 'best_f1_score', 'best_val_loss', 'final_epoch']]
+                logger.info(f"\nTop 5 Trials:")
+                logger.info(top_5.to_string(index=False))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Two-Stage HPO with W&B Tracking")
-    parser.add_argument("--config", type=str, required=True, help="Path to base config YAML")
-    parser.add_argument("--study_name", type=str, default="two_stage_hpo", help="Study name")
-    parser.add_argument("--stage", type=int, choices=[1, 2], default=1, 
-                       help="HPO stage (1: broad exploration, 2: narrow refinement)")
-    parser.add_argument("--trials", type=int, default=150, help="Number of trials")
-    parser.add_argument("--wandb", action="store_true", help="Enable W&B tracking")
+    parser = argparse.ArgumentParser(description="Simplified HPO")
+    parser.add_argument("--config", type=str, required=True, help="Config YAML path")
+    parser.add_argument("--study_name", type=str, default="hpo", help="Study name")
+    parser.add_argument("--trials", type=int, default=100, help="Number of trials")
+    parser.add_argument("--wandb", action="store_true", help="Use W&B")
     
     args = parser.parse_args()
     
-    # Run optimization
-    tuner = TwoStageHPOTuner(args.config, args.study_name, args.stage)
-    
-    # Set up W&B config if enabled
-    wandb_config = {'enabled': True} if args.wandb else None
-    
-    study = tuner.run_optimization(args.trials, wandb_config)
-    
-    logger.info("\n" + "="*60)
-    logger.info("HPO COMPLETED!")
-    logger.info("="*60)
+    config_path = Path("model_search/config_files") / args.config
+    hpo = SimpleHPO(config_path, args.study_name)
+    hpo.run(args.trials, args.wandb)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,62 @@
-# Two-Stage HPO Configuration for Distribution Network Reconfiguration
-# Usage:
-#   Stage 1: python hpo.py --config hpo-mlp-two-stage.yaml --stage 1 --trials 150
-#   Stage 2: python hpo.py --config hpo-mlp-two-stage.yaml --stage 2 --trials 100
+search_space:
+  # Training hyperparameters
+  learning_rate:
+    search_type: float
+    min: 0.00001
+    max: 0.001
+    log: true
+  
+  weight_decay:
+    search_type: float
+    min: 0.000001
+    max: 0.0001
+    log: true
+  
+  batch_size:
+    search_type: categorical
+    choices: [8, 16, 32, 64]
+  
+  dropout_rate:
+    search_type: float
+    min: 0.0
+    max: 0.4
+  
+  activation:
+    search_type: categorical
+    choices: ["relu", "leaky_relu", "elu", "gelu"]
+  
+  # GNN Architecture parameters
+  gnn_layers:
+    search_type: int
+    min: 1
+    max: 4
+  
+  gnn_hidden_dim:
+    search_type: int
+    min: 32
+    max: 256
+    step: 32
+  
+  # GAT-specific parameters
+  gat_heads:
+    search_type: int
+    min: 1
+    max: 8
+  
+  gat_dropout:
+    search_type: float
+    min: 0.0
+    max: 0.3
+  
+  # MLP Components
+  use_node_mlp:# Simplified HPO Configuration for GAT Architecture
+# Usage: python hpo.py --config hpo-gat-simple.yaml --trials 100 --wandb
 
-description: "Two-Stage HPO for Distribution Network Reconfiguration"
-job_name: "two_stage_hpo_mlp"
+description: "GAT Architecture HPO for Distribution Network Reconfiguration"
+job_name: "hpo_gat_dnr_simple"
 
 # ============================================================================
-# DATA CONFIGURATION (Fixed for both stages)
+# DATA CONFIGURATION
 # ============================================================================
 dataset_names: ["train", "validation", "test"]
 folder_names: 
@@ -24,7 +73,7 @@ seed: 42
 num_workers: 1
 
 # ============================================================================
-# MODEL CONFIGURATION (Fixed for both stages)
+# MODEL CONFIGURATION
 # ============================================================================
 model_module: "AdvancedMLP"
 epochs: 80
@@ -33,72 +82,74 @@ evaluate_every_x_epoch: 5
 criterion_name: "MSELoss"
 
 # ============================================================================
-# STAGE 1: BROAD EXPLORATION
+# FIXED PARAMETERS (Not optimized)
 # ============================================================================
-# Wide search ranges to explore the entire hyperparameter space
-# Goal: Identify promising architectures and rough parameter ranges
+fixed_params:
+  # Fix GNN type to GAT only
+  gnn_type: "GAT"
+  
+  # Fix some architectural choices
+  use_batch_norm: true
+  use_residual: false
+  
+  # Fix some training parameters if desired
+  # batch_size: 32
+  # epochs: 80
 
-stage_1_search_space:
-  # Training hyperparameters - WIDE RANGES
+# ============================================================================
+# SEARCH SPACE (Parameters to optimize)
+# ============================================================================
+search_space:
+  # Training hyperparameters
   learning_rate:
     search_type: float
-    min: 0.00001     # Very low
-    max: 0.001      # Relatively high
+    min: 0.00001
+    max: 0.001
     log: true
   
   weight_decay:
     search_type: float
-    min: 0.000001     
-    max: 0.0001       
+    min: 0.000001
+    max: 0.0001
     log: true
   
   batch_size:
     search_type: categorical
-    choices: [4, 8, 16, 32, 64]  # Full range
+    choices: [8, 16, 32, 64]
   
   dropout_rate:
     search_type: float
-    min: 0.0      
-    max: 0.5       
+    min: 0.0
+    max: 0.4
   
   activation:
     search_type: categorical
-    choices: ["relu", "leaky_relu", "elu", "prelu", "gelu"]  # All options
+    choices: ["relu", "leaky_relu", "elu", "gelu"]
   
-  # GNN Architecture - EXPLORE ALL OPTIONS
-  gnn_type:
-    search_type: categorical
-    choices: ["None", "GCN", "GAT", "GIN"]  # Test all architectures
-  
+  # GNN Architecture parameters
   gnn_layers:
     search_type: int
     min: 1
-    max: 4        
+    max: 4
   
   gnn_hidden_dim:
     search_type: int
-    min: 32       
+    min: 32
     max: 256
     step: 32
   
-  # GAT-specific (only used when gnn_type=GAT)
+  # GAT-specific parameters
   gat_heads:
     search_type: int
-    min: 2
-    max: 6        
+    min: 1
+    max: 8
   
   gat_dropout:
     search_type: float
     min: 0.0
-    max: 0.2
+    max: 0.3
   
-  # GIN-specific (only used when gnn_type=GIN)
-  gin_eps:
-    search_type: float
-    min: 0.0
-    max: 0.1
-  
-  # MLP Components - TEST BOTH
+  # MLP Components
   use_node_mlp:
     search_type: categorical
     choices: [true, false]
@@ -107,13 +158,13 @@ stage_1_search_space:
     search_type: categorical
     choices: [true, false]
   
-  # Dynamic hidden dimensions - WIDE EXPLORATION
+  # Dynamic hidden dimensions for MLPs
   node_hidden_dims:
     search_type: dynamic
-    n_layers_min: 1    
-    n_layers_max: 3     
-    dim_min: 32          
-    dim_max: 256         
+    n_layers_min: 1
+    n_layers_max: 3
+    dim_min: 32
+    dim_max: 256
     dim_step: 32
   
   edge_hidden_dims:
@@ -124,143 +175,27 @@ stage_1_search_space:
     dim_max: 256
     dim_step: 32
   
-  # Advanced features - TEST ALL
-  use_batch_norm:
-    search_type: categorical
-    choices: [true, false]
-  
-  use_residual:
-    search_type: categorical
-    choices: [true, false]
-  
+  # Pooling strategy
   pooling:
     search_type: categorical
-    choices: ["mean", "max", "add"]  # All pooling methods
+    choices: ["mean", "max", "add", "attention"]
 
 # ============================================================================
-# STAGE 2: NARROW REFINEMENT
+# W&B SETTINGS
 # ============================================================================
-# Narrowed ranges based on Stage 1 results
-# Goal: Fine-tune the best architectures for optimal performance
-# 
-# INSTRUCTIONS FOR STAGE 2:
-# 1. After Stage 1 completes, analyze results to identify:
-#    - Best performing GNN type (or None)
-#    - Optimal range for learning rate (narrow by 10x)
-#    - Best activation functions (keep top 2-3)
-#    - Whether node/edge MLPs are beneficial
-#    - Optimal depth ranges
-# 
-# 2. Uncomment and modify the stage_2_search_space below based on Stage 1 results
-# 3. Run Stage 2 with the narrowed search space
-
-# stage_2_search_space:
-#   # EXAMPLE: If Stage 1 found GAT with learning_rate ~1e-3 works best
-#   
-#   # Training hyperparameters - NARROWED RANGES
-#   learning_rate:
-#     search_type: float
-#     min: 5e-4      # Narrowed around 1e-3
-#     max: 5e-3      # ±10x from best value
-#     log: true
-#   
-#   weight_decay:
-#     search_type: float
-#     min: 5e-5      # Narrowed around best
-#     max: 5e-4      
-#     log: true
-#   
-#   batch_size:
-#     search_type: categorical
-#     choices: [16, 32]  # Only best sizes from Stage 1
-#   
-#   dropout_rate:
-#     search_type: float
-#     min: 0.1       # If Stage 1 showed 0.1-0.2 works best
-#     max: 0.3       
-#   
-#   activation:
-#     search_type: categorical
-#     choices: ["relu", "gelu"]  # Only top performers
-#   
-#   # GNN Architecture - FIXED OR NARROW
-#   gnn_type:
-#     search_type: categorical
-#     choices: ["GAT"]  # Fix to best architecture
-#   
-#   gnn_layers:
-#     search_type: int
-#     min: 2         # If 2-layer worked best
-#     max: 2         # Can fix or narrow range
-#   
-#   gnn_hidden_dim:
-#     search_type: int
-#     min: 64        # Narrowed range
-#     max: 96        
-#     step: 32
-#   
-#   # GAT-specific - REFINED
-#   gat_heads:
-#     search_type: int
-#     min: 3         # If 3-4 heads worked best
-#     max: 5         
-#   
-#   gat_dropout:
-#     search_type: float
-#     min: 0.05
-#     max: 0.15      # Narrowed range
-#   
-#   # MLP Components - FIXED based on Stage 1
-#   use_node_mlp:
-#     search_type: categorical
-#     choices: [true]  # Fix if clearly better
-#   
-#   use_edge_mlp:
-#     search_type: categorical
-#     choices: [true]  # Fix if clearly better
-#   
-#   # Dynamic hidden dimensions - NARROWED
-#   node_hidden_dims:
-#     search_type: dynamic
-#     n_layers_min: 2      # If 2-layer worked best
-#     n_layers_max: 2      
-#     dim_min: 64          # Narrowed ranges
-#     dim_max: 128         
-#     dim_step: 32
-#   
-#   edge_hidden_dims:
-#     search_type: dynamic
-#     n_layers_min: 2
-#     n_layers_max: 2
-#     dim_min: 64
-#     dim_max: 128
-#     dim_step: 32
-#   
-#   # Advanced features - FIXED OR NARROW
-#   use_batch_norm:
-#     search_type: categorical
-#     choices: [true]  # Fix if clearly beneficial
-#   
-#   use_residual:
-#     search_type: categorical
-#     choices: [false]  # Fix if not beneficial
-#   
-#   pooling:
-#     search_type: categorical
-#     choices: ["mean"]  # Fix to best method
-
-# ============================================================================
-# HPO PROCESS SETTINGS
-# ============================================================================
-hp_search: true
-wandb: true
-
-# W&B settings for experiment tracking
 wandb_settings:
-  project: "DNR-HPO"
-  group: "two_stage_hpo_advanced_mlp"  # Groups all stages together
-  tags: ["hpo", "advanced_mlp", "two_stage"]
-  
-# Stage-specific settings (will be set by command line)
-# stage_1_trials: 150
-# stage_2_trials: 100
+  project: "DNR-HPO-Simplified"
+  group: "gat_architecture_search"
+  tags: ["hpo", "advanced_mlp", "gat", "simplified"]
+
+# ============================================================================
+# METRICS TO TRACK
+# ============================================================================
+metrics_to_log:
+  - "loss"
+  - "val_loss"
+  - "f1_score"
+  - "val_f1_score"
+  - "precision"
+  - "recall"
+  - "accuracy"

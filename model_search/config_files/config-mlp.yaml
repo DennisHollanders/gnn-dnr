@@ -1,50 +1,86 @@
-description: "Train MLP"
+description: "Train AdvancedMLP with Physics-Informed Features"
+job_name: "advanced_mlp_full_test"
 
-job_name: "mlp_test"
-# Data
-
-dataset_names: ["train",
-                  "validation",
-                  "test"]
-# folder_names: 
-#   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-#   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-#   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-folder_names: 
+# Data Configuration
+dataset_names: ["train", "validation", "test"]
+folder_names:
   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
   - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
 
-# Model
-model_module: "MLP"
-model_kwargs: 
-  input_dim: 4
-  hidden_dims: [1024,512,256,128,64,2]
-  latent_dim: 8
+# Model Configuration
+model_module: "AdvancedMLP"  
+model_kwargs:
+  gnn_type: "GAT"  
+  gnn_layers: 2
+  gnn_hidden_dim: 32
+  gat_heads: 4
+  gat_dropout: 0.1
+  gin_eps: 0.1
+  
+  # MLP Configuration
+  use_node_mlp: true
+  use_edge_mlp: true
+  node_hidden_dims: [128, 64, 16]
+  edge_hidden_dims: [64, 16, 33]
+
+  # last two dims + 11 should be divisible by 4
+  
+  # General Configuration
   activation: "relu"
-  dropout_rate: 0.0
-  criterion_name: "MSELoss"
-  batch_norm: false
-  residual_connections: false
-  use_bias: true
-  weight_init: "xavier_uniform"
-  bias_init: "zeros"
-dropout_rate: 0.0
-batch_size: 16
-learning_rate: 0.0001
-weight_decay: 0.00005
-epochs: 100
-patience: 10
+  dropout_rate: 0.15
+  use_batch_norm: true
+  use_residual: true
+  use_skip_connections: true
+  pooling: "mean"
+  
+  # Switch Head Configuration - Fix attention dimensions
+  switch_head_type: "attention"  # Test attention head
+  switch_head_layers: 2
+  switch_attention_heads: 2  
+
+  loss_scaling_strategy: "adaptive_ratio"  # or "fixed", "adaptive_magnitude", "uncertainty_weighting"
+  normalization_type: "adaptive"
+  
+  # Physics-Informed Features 
+  use_gated_mp: True
+  use_phyr: False
+  phyr_k_ratio: 0.3
+
+# Training Configuration
+dropout_rate: 0.15  
+batch_size: 8 
+learning_rate: 0.01 
+weight_decay: 0.00001  
+epochs: 10  
+patience: 5
+
+# Physics Loss Weights - Add these for training loop
+lambda_phy_loss: 0.1          # existing parameter
+lambda_connectivity: 0.05      # new: connectivity constraint weight
+lambda_radiality: 0.05         # new: radiality constraint weight
+lambda_mask: 0.01             # existing parameter
+output_type: "mutliclass"  # multiclass or binary         
+num_classes: 2                 
+
+
+# Hyperparameter Search
 hp_search: false
-hp_search_n_trials: 50
-wandb: True
+hp_search_n_trials: 20
+wandb: true
 config: config-mlp.yaml
-evaluate_every_x_epoch: 5
-dataset_type: "default"
+
+# Evaluation
+evaluate_every_x_epoch: 3
+
 # Data Loading Configuration
-batching_type: "standard"
-max_nodes: 32000
-max_edges: 35000
+dataset_type: "default"
+batching_type: "dynamic"  # Better for variable graph sizes
+max_nodes: 1000
+max_edges: 2000
 train_ratio: 0.85
 seed: 42
-num_workers: 1
+num_workers: 0  # Set to 0 for debugging
+
+# Criterion - Use proper loss for binary classification
+criterion_name: "FocalLoss"  

@@ -1,175 +1,198 @@
-# GIN-specific HPO Configuration for Distribution Network Reconfiguration
-# Usage: python hpo.py --config hpo-gin.yaml --trials 100
+# GIN HPO Configuration
+# Estimated trials needed: 26 dimensions × 10 = 260 trials
 
-description: "GIN Architecture HPO for Distribution Network Reconfiguration"
-job_name: "hpo_gin_dnr"
-
-# ============================================================================
-# DATA CONFIGURATION
-# ============================================================================
-dataset_names: ["train", "validation", "test"]
+# Basic model configuration
+model_module: "AdvancedMLP"
+dataset_names: ["train",
+                  "validation",
+                  "test"]
 folder_names: 
   - "data\\split_datasets\\train"
   - "data\\split_datasets\\validation"
   - "data\\split_datasets\\test"
+dataset_type: "default"
+batching_type: "dynamic"
 
-dataset_type: "cvx"
-batching_type: "standard"
-max_nodes: 32000
-max_edges: 35000
-train_ratio: 0.85
-seed: 42
-num_workers: 1
-
-# ============================================================================
-# MODEL CONFIGURATION
-# ============================================================================
-model_module: "AdvancedMLP"
-epochs: 80
-patience: 8
-evaluate_every_x_epoch: 5
-criterion_name: "MSELoss"  # Will be tracked in parallel coordinates
-
-# ============================================================================
-# GIN-SPECIFIC SEARCH SPACE
-# ============================================================================
-# We only use stage_1, stage_2 is dummy to satisfy the two-stage HPO code
-stage_1_search_space:
-  # Training hyperparameters
+# Fixed parameters 
+fixed_params:
+  # Core GNN settings
+  gnn_type: "GIN"  
+  use_node_mlp: true
+  use_edge_mlp: true
+  
+  # Data settings
+  batch_size: 32
+  max_nodes: 1000
+  max_edges: 5000
+  train_ratio: 0.85
+  num_workers: 0
+  seed: 42
+  
+  # Training settings
+  epochs: 200
+  patience: 15
+  
+  # Output settings 
+  output_type: "binary"  # or "multiclass" - both use 2 classes
+  num_classes: 2  
+  
+  # W&B settings
+  wandb_project: "GIN_HPO"
+  
+# Search space - 26 dimensions
+search_space:
+  # 1. Learning rate 
   learning_rate:
-    search_type: float
+    search_type: "float"
     min: 0.00001
+    max: 0.01
+    log: true
+    
+  # 2. Weight decay 
+  weight_decay:
+    search_type: "float"
+    min: 0.000001
     max: 0.001
     log: true
-  
-  weight_decay:
-    search_type: float
-    min: 0.000001
-    max: 0.0001
-    log: true
-  
-  batch_size:
-    search_type: categorical
-    choices: [8, 16, 32, 64]
-  
+    
+  # 3. Dropout rate
   dropout_rate:
-    search_type: float
+    search_type: "float"
     min: 0.0
-    max: 0.4
-  
-  activation:
-    search_type: categorical
-    choices: ["relu", "leaky_relu", "elu", "gelu"]
-  
-  # GNN Architecture - FIXED TO GIN
-  gnn_type:
-    search_type: categorical
-    choices: ["GIN"]  # Fixed to GIN
-  
+    max: 0.7
+    
+  # 4. GNN layers
   gnn_layers:
-    search_type: int
+    search_type: "int"
     min: 1
-    max: 5  # GIN often works well with deeper architectures
-  
+    max: 6
+    
+  # 5. GNN hidden dimension
   gnn_hidden_dim:
-    search_type: int
+    search_type: "int"
     min: 32
-    max: 256
+    max: 512
     step: 32
-  
-  # GAT-specific (not used for GIN, but needed for model initialization)
-  gat_heads:
-    search_type: categorical
-    choices: [4]  # Default value
-  
-  gat_dropout:
-    search_type: categorical
-    choices: [0.0]  # Default value
-  
-  # GIN-specific parameters
+    
+  # 6. GIN epsilon 
   gin_eps:
-    search_type: float
+    search_type: "float"
     min: 0.0
-    max: 0.2  # Learning the epsilon parameter
-  
-  # MLP Components
-  use_node_mlp:
-    search_type: categorical
+    max: 0.1
+    
+  # 7. GIN train epsilon 
+  gin_train_eps:
+    search_type: "categorical"
     choices: [true, false]
-  
-  use_edge_mlp:
-    search_type: categorical
-    choices: [true, false]
-  
-  # Dynamic hidden dimensions for MLPs
+    
+  # 8. GIN MLP layers 
+  gin_mlp_layers:
+    search_type: "int"
+    min: 1
+    max: 3
+    
+  # 9. Node MLP hidden dimensions 
   node_hidden_dims:
-    search_type: dynamic
+    search_type: "dynamic_list"
     n_layers_min: 1
-    n_layers_max: 3
+    n_layers_max: 4
     dim_min: 32
-    dim_max: 256
+    dim_max: 512
     dim_step: 32
-  
+    
+  # 10. Edge MLP hidden dimensions 
   edge_hidden_dims:
-    search_type: dynamic
+    search_type: "dynamic_list"
     n_layers_min: 1
-    n_layers_max: 3
+    n_layers_max: 4
     dim_min: 32
-    dim_max: 256
+    dim_max: 512
     dim_step: 32
-  
-  # Advanced features
+    
+  # 11. Activation function
+  activation:
+    search_type: "categorical"
+    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "swish"]
+    
+  # 12. Use batch normalization
   use_batch_norm:
-    search_type: categorical
+    search_type: "categorical"
     choices: [true, false]
-  
+    
+  # 13. Use residual connections
   use_residual:
-    search_type: categorical
+    search_type: "categorical"
     choices: [true, false]
-  
+    
+  # 14. Use skip connections
+  use_skip_connections:
+    search_type: "categorical"
+    choices: [true, false]
+    
+  # 15. Switch head type
+  switch_head_type:
+    search_type: "categorical"
+    choices: ["mlp", "linear", "attention_pooling", "set_transformer"]
+    
+  # 16. Switch head layers
+  switch_head_layers:
+    search_type: "int"
+    min: 1
+    max: 4
+    
+  # 17. Criterion/Loss function
+  criterion_name:
+    search_type: "categorical"
+    choices: ["MSELoss", "CrossEntropyLoss", "BCELoss", "L1Loss", "HuberLoss", "BCEWithLogitsLoss", "CustomPhysicsLoss"]
+    
+  # 18. Normalization type
+  normalization_type:
+    search_type: "categorical"
+    choices: ["standard", "minmax", "robust", "adaptive", "none"]
+    
+  # 19. Loss scaling strategy
+  loss_scaling_strategy:
+    search_type: "categorical"
+    choices: ["fixed_ratio", "adaptive_ratio", "loss_magnitude", "gradient_norm", "uncertainty_weighted", "dynamic_balancing"]
+    
+  # 20. Use gated message passing
+  use_gated_mp:
+    search_type: "categorical"
+    choices: [true, false]
+    
+  # 21. Use PhyR (Physics-enhanced Reasoning)
+  use_phyr:
+    search_type: "categorical"
+    choices: [true, false]
+    
+  # 22. PhyR k ratio (only if use_phyr=true)
+  phyr_k_ratio:
+    search_type: "float"
+    min: 0.1
+    max: 0.5
+    
+  # 23. Physics loss weight
+  lambda_phy_loss:
+    search_type: "float"
+    min: 0.01
+    max: 1.0
+    log: true
+    
+  # 24. Connectivity loss weight
+  lambda_connectivity:
+    search_type: "float"
+    min: 0.001
+    max: 0.5
+    log: true
+    
+  # 25. Radiality loss weight
+  lambda_radiality:
+    search_type: "float"
+    min: 0.001
+    max: 0.5
+    log: true
+    
+  # 26. Graph pooling method
   pooling:
-    search_type: categorical
-    choices: ["mean", "max", "add", "attention"]
-
-# ============================================================================
-# HPO PROCESS SETTINGS
-# ============================================================================
-hp_search: true
-wandb: true
-
-# W&B settings for experiment tracking
-wandb_settings:
-  project: "DNR-HPO"
-  group: "gin_architecture_search"
-  tags: ["hpo", "advanced_mlp", "gin"]
-  
-# Metrics to track (ensure these appear in parallel coordinates)
-metrics_to_log:
-  - "loss"  # MSE or BCE loss
-  - "val_loss"
-  - "f1_score"
-  - "val_f1_score"
-  - "precision"
-  - "recall"
-  - "accuracy"
-  - "learning_rate"
-  - "weight_decay"
-  - "batch_size"
-  - "dropout_rate"
-  - "activation"
-  - "gnn_layers"
-  - "gnn_hidden_dim"
-  - "gin_eps"
-  - "use_node_mlp"
-  - "use_edge_mlp"
-  - "use_batch_norm"
-  - "use_residual"
-  - "pooling"
-
-# ============================================================================
-# DUMMY STAGE 2 (NOT USED - Just to satisfy two-stage code)
-# ============================================================================
-stage_2_search_space:
-  learning_rate:
-    search_type: categorical
-    choices: [0.001]  # Dummy value
+    search_type: "categorical"
+    choices: ["mean", "max", "add", "attention", "set2set"]
