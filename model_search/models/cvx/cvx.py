@@ -227,12 +227,12 @@ class cvx(nn.Module):
                 solver_args={'verbose': False, 'solve_method': 'ECOS'}
             )
             
-            print(f"Debug: CVX output shapes - nodes: {v_sq_opt}, edges: {y_opt}")
+            print(f"Debug: CVX output shapes - nodes: {torch.mean(v_sq_opt)}, edges: {(y_opt)}")
             # Extract only the relevant parts (first actual_edges/actual_nodes)
             y_opt_unpadded = y_opt[:actual_edges]
             v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
 
-            print(f"Debug: CVX unpadded shapes - nodes: {v_sq_opt_unpadded}, edges: {y_opt_unpadded}")
+            print(f"Debug: CVX unpadded shapes - nodes: {torch.mean(v_sq_opt_unpadded)}, edges: {torch.mean(y_opt_unpadded)}")
             
             return {
                 "switch_scores": y_opt_unpadded,

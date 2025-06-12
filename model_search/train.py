@@ -7,7 +7,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 def radiality_loss(switch_probs, num_nodes):
     expected_active_edges = switch_probs.sum()
     target_edges = num_nodes - 1
@@ -68,6 +67,10 @@ def process_batch(model, data, criterion, device, is_training=True,
     
     # Forward pass
     output = model(data)
+   
+    if hasattr(data, 'batch') and data.batch.max() >= len(data.ptr) - 1:
+        logger.warning("Invalid batch structure detected, skipping batch")
+        return torch.tensor(0.0, device=device), {}, {"valid_batch": False}
     
     # Initialize loss and metrics
     total_loss = torch.tensor(0.0, device=device)
@@ -132,29 +135,30 @@ def process_batch(model, data, criterion, device, is_training=True,
 
         if any(key in output for key in ["flows", "node_v", "switch_predictions"]):
             try:
-                physics_loss = enhanced_physics_loss(
-                    output, data, device, 
-                    lambda_phy=1.0,  
-                    lambda_connectivity=1.0,
-                    lambda_radiality=1.0,
-                    normalization_type=normalization_type
-                )
-                loss_components["physics_loss"] = physics_loss
-                
-                # Apply loss scaling strategy
-                scaled_physics_loss = apply_loss_scaling(
-                    switch_loss, physics_loss, 
-                    lambda_phy_loss, lambda_connectivity, lambda_radiality,
-                    loss_scaling_strategy
-                )
-                
-                total_loss = switch_loss + scaled_physics_loss
-                loss_components["scaled_physics_loss"] = scaled_physics_loss
-                
-                logger.debug(f"Switch loss: {switch_loss.item():.6f}")
-                logger.debug(f"Raw physics loss: {physics_loss.item():.6f}")
-                logger.debug(f"Scaled physics loss: {scaled_physics_loss.item():.6f}")
-                logger.debug(f"Total loss: {total_loss.item():.6f}")
+                with torch.set_grad_enabled(is_training):
+                    physics_loss = enhanced_physics_loss(
+                        output, data, device, 
+                        lambda_phy=1.0,  
+                        lambda_connectivity=1.0,
+                        lambda_radiality=1.0,
+                        normalization_type=normalization_type
+                    )
+                    loss_components["physics_loss"] = physics_loss
+                    
+                    # Apply loss scaling strategy
+                    scaled_physics_loss = apply_loss_scaling(
+                        switch_loss, physics_loss, 
+                        lambda_phy_loss, lambda_connectivity, lambda_radiality,
+                        loss_scaling_strategy
+                    )
+                    
+                    total_loss = switch_loss + scaled_physics_loss
+                    loss_components["scaled_physics_loss"] = scaled_physics_loss
+                    
+                    logger.debug(f"Switch loss: {switch_loss.item():.6f}")
+                    logger.debug(f"Raw physics loss: {physics_loss.item():.6f}")
+                    logger.debug(f"Scaled physics loss: {scaled_physics_loss.item():.6f}")
+                    logger.debug(f"Total loss: {total_loss.item():.6f}")
                 
             except Exception as e:
                 logger.warning(f"Enhanced physics loss computation failed: {e}")
@@ -193,6 +197,7 @@ def apply_loss_scaling(switch_loss, physics_loss, lambda_phy, lambda_conn, lambd
     elif strategy == "adaptive_ratio":
         target_ratio = lambda_phy  
         if switch_loss.item() > 1e-8:  
+            # Use .detach() to prevent gradient flow issues
             adaptive_weight = target_ratio * switch_loss.detach() / (physics_loss.detach() + 1e-8)
             return adaptive_weight * physics_loss
         else:
@@ -200,6 +205,7 @@ def apply_loss_scaling(switch_loss, physics_loss, lambda_phy, lambda_conn, lambd
     
     elif strategy == "adaptive_magnitude":
         if physics_loss.item() > 1e-8 and switch_loss.item() > 1e-8:
+            # Use .detach() to prevent gradient flow issues
             magnitude_ratio = switch_loss.detach() / physics_loss.detach()
             smooth_ratio = torch.clamp(magnitude_ratio, 0.1, 10.0)
             return lambda_phy * smooth_ratio * physics_loss
@@ -236,13 +242,18 @@ def get_loss_statistics(switch_loss, physics_loss):
 
 def _fix_prediction_shape(predicted_scores, target_switches):
     """Fix shape mismatches between predictions and targets."""
+    # Add contiguous() calls to fix stride issues
     if predicted_scores.dim() == 2 and predicted_scores.size(0) == 1:
-        predicted_scores = predicted_scores.squeeze(0)
+        predicted_scores = predicted_scores.squeeze(0).contiguous()
         logger.debug(f"Squeezed batch dimension: new shape {predicted_scores.shape}")
     
     if predicted_scores.ndim > target_switches.ndim and predicted_scores.shape[-1] == 1:
-        predicted_scores = predicted_scores.squeeze(-1)
+        predicted_scores = predicted_scores.squeeze(-1).contiguous()
         logger.debug(f"Squeezed trailing dimension: new shape {predicted_scores.shape}")
+    
+    # Ensure both tensors are contiguous
+    predicted_scores = predicted_scores.contiguous()
+    target_switches = target_switches.contiguous()
     
     return predicted_scores
 
@@ -436,24 +447,24 @@ def physics_loss(output, data, device, normalization_type="adaptive"):
         kcl_loss_Q = (kcl_Q.pow(2) / Q_scale.pow(2)).mean()
         
     elif normalization_type == "adaptive":
-        # Use running statistics for adaptive normalization
         if not hasattr(physics_loss, 'P_running_var'):
             physics_loss.P_running_var = None
             physics_loss.Q_running_var = None
             physics_loss.momentum = 0.1
         
-        # Update running variance estimates
         current_P_var = kcl_P.var() + 1e-8
         current_Q_var = kcl_Q.var() + 1e-8
         
         if physics_loss.P_running_var is None:
-            physics_loss.P_running_var = current_P_var
-            physics_loss.Q_running_var = current_Q_var
+            # Store as detached values, not tensors with gradients
+            physics_loss.P_running_var = current_P_var.detach()
+            physics_loss.Q_running_var = current_Q_var.detach()
         else:
+            # Update with detached values
             physics_loss.P_running_var = (1 - physics_loss.momentum) * physics_loss.P_running_var + \
-                                       physics_loss.momentum * current_P_var
+                                    physics_loss.momentum * current_P_var.detach()
             physics_loss.Q_running_var = (1 - physics_loss.momentum) * physics_loss.Q_running_var + \
-                                       physics_loss.momentum * current_Q_var
+                                    physics_loss.momentum * current_Q_var.detach()
         
         kcl_loss_P = (kcl_P.pow(2) / physics_loss.P_running_var).mean()
         kcl_loss_Q = (kcl_Q.pow(2) / physics_loss.Q_running_var).mean()
@@ -491,17 +502,14 @@ def physics_loss(output, data, device, normalization_type="adaptive"):
             volt_scale = torch.clamp(volt_hat.abs().mean(), min=1e-6)
             vdrop_loss = (vdrop.pow(2) / volt_scale.pow(2)).mean()
         elif normalization_type == "adaptive":
-            # Use adaptive normalization for voltage drops too
-            if not hasattr(physics_loss, 'V_running_var'):
-                physics_loss.V_running_var = None
-            
-            current_V_var = vdrop.var() + 1e-8
-            if physics_loss.V_running_var is None:
-                physics_loss.V_running_var = current_V_var
+            # ensure voltage‐running var never tracks gradients
+            if not hasattr(physics_loss, 'V_running_var') or physics_loss.V_running_var is None:
+                physics_loss.V_running_var = (vdrop.var() + 1e-8).detach()
             else:
-                physics_loss.V_running_var = (1 - physics_loss.momentum) * physics_loss.V_running_var + \
-                                           physics_loss.momentum * current_V_var
-            
+                new_var = (vdrop.var() + 1e-8).detach()
+                physics_loss.V_running_var = (1 - physics_loss.momentum) * physics_loss.V_running_var \
+                                            + physics_loss.momentum * new_var
+                
             vdrop_loss = (vdrop.pow(2) / physics_loss.V_running_var).mean()
         else:
             vdrop_loss = vdrop.pow(2).mean()

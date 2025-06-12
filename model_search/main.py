@@ -230,7 +230,8 @@ def main():
                     'lambda_mask': getattr(args, 'lambda_mask', 0.01),
                     "lambda_connectivity": getattr(args, 'lambda_connectivity', 0.05),
                     "lambda_radiality": getattr(args, 'lambda_radiality', 0.05),
-                    "loss_scaling_strategy": getattr(args, 'loss_scaling_strategy', 'adaptive_ratio') }
+                    "loss_scaling_strategy": getattr(args, 'loss_scaling_strategy', 'adaptive_ratio'),
+                     "normalization_type": getattr(args, 'normalization_type', 'none'),}
 
     for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
         train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict)

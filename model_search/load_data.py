@@ -476,19 +476,17 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
     parser.add_argument("--dataset_names", type=str, nargs="+", default= ["train",
-                                                                         "validation",
+                                                                         "validation","test"
                                                                           ]
                                                                           , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
                 r"data\split_datasets\train",
-                
-                #r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\synthetic_test",
-                
                 r"data\split_datasets\validation",
+                r"data\split_datasets\test",
                 #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
-    parser.add_argument("--dataset_type", type=str, default="cvx", 
-                        choices=["default", "graphyr", "pinn","cvx"],
+    parser.add_argument("--dataset_type", type=str, default="default", 
+                        choices=["default", "graphyr", "pinn","default"],
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="dynamic",
                         choices =["standard", "dynamic", "neighbor"],)

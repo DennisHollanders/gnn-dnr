@@ -239,7 +239,7 @@ class GraphAttentionSwitchHead(nn.Module):
         attended, _ = self.attention(sequence, sequence, sequence)
         
         # Flatten and predict
-        return self.output(attended.view(attended.size(0), -1))
+        return self.output(attended.reshape(attended.size(0), -1))
 
 class NodeVoltageGCN(nn.Module):
     def __init__(self, dim):

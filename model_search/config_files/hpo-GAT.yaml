@@ -5,9 +5,9 @@ dataset_names: ["train",
                   "validation",
                   "test"]
 folder_names: 
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+  - "data\\split_datasets\\train"
+  - "data\\split_datasets\\validation"
+  - "data\\split_datasets\\test"
   
 dataset_type: "default"
 batching_type: "dynamic"
@@ -65,12 +65,12 @@ search_space:
   # 5. GAT attention heads 
   gat_heads:
     search_type: "categorical"
-    choices: [2, 4, 8, 16]  
+    choices: [1, 2, 4, 8]  
     
   # 6. GNN hidden dimension 
   gnn_hidden_dim:
     search_type: "categorical"
-    choices: [64, 96, 128, 160, 192, 224, 256, 288, 320, 384, 448, 512]  
+    choices: [64, 96, 128, 160, 192, 224, 256, 288, 320, 384, 448, 512]
     
   # 7. GAT dropout 
   gat_dropout:

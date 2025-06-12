@@ -1,67 +1,82 @@
-description: "Train MLP"
+description: "Debug Config 2 - Graph Attention Switch Head Case"
+job_name: "debug_graph_attention_switch_head"
 
-job_name: "mlp_test"
-# Data
+# Data Configuration
+dataset_names: ["train", "validation", "test"]
+folder_names:
+  - "data\\split_datasets\\train"
+  - "data\\split_datasets\\validation"
+  - "data\\split_datasets\\test"
 
-dataset_names: ["train",
-                  "validation",
-                  "test"]
-folder_names: 
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
-model_module: "AdvancedMLP"
+# Model Configuration
+model_module: "AdvancedMLP"  
 model_kwargs:
-  hidden_dims: [1024,512,256,128,64,2]
-  latent_dim: 8
-  activation: "relu"
-  dropout_rate: 0.0
-  criterion_name: "MSELoss"
-  batch_norm: false
-  residual_connections: false
-  use_bias: true
-  weight_init: "xavier_uniform"
-  bias_init: "zeros"
-  cvx_layer: None
-  edge_input_dim: 0
-  node_input_dim: 0 
+  # GAT Configuration (from failed params)
+  gnn_type: "GAT"  
+  gnn_layers: 6
+  gnn_hidden_dim: 192  # Should be divisible by gat_heads (192 % 4 = 0 ✓)
+  gat_heads: 4
+  gat_dropout: 0.3157398797200728
+  gat_v2: true
+  gat_edge_dim: 16
   
-  # GNN Configuratio
-  gnn_type: "GAT"  # "GCN", "GAT", "GIN", or None
-  gnn_layers: 2
-  gnn_hidden_dim: 64
-  gat_heads:  4
-  gat_dropout: 0.1
-  gin_eps:  0.0
-  # MLP Configuration
-  use_node_mlp: True
-  use_edge_mlp: True
-  node_hidden_dims:  [64, 32]
-  edge_hidden_dims:  [64, 32]
-  # General Configuration
-  activation:  "relu"
-  dropout_rate: 0.1
-  use_batch_norm:  True
-  use_residual:  False
-  pooling:  "add"  # "mean", "max", "add", "attention"'
+  # MLP Configuration (from failed params - converted from dynamic list)
+  use_node_mlp: true
+  use_edge_mlp: true
+  node_hidden_dims: [192, 32, 128, 64]  # 4 layers as specified
+  edge_hidden_dims: [288, 128, 256]  # 3 layers as specified
+  
+  # General Configuration (from failed params)
+  activation: "tanh"
+  dropout_rate: 0.5154461036366417
+  use_batch_norm: true
+  use_residual: false
+  use_skip_connections: false
+  pooling: "mean"
+  
+  # Switch Head Configuration (ATTENTION type - this is where the error likely occurs)
+  switch_head_type: "graph_attention"
+  switch_head_layers: 2
+  switch_attention_heads: 1  # PROBLEM: 192 % 1 = 0 (should work, but might cause shape issues)
+  
+  # Physics Configuration (from failed params)
+  use_gated_mp: true
+  use_phyr: true
+  phyr_k_ratio: 0.46988246916295767
+  
+  # Loss and normalization
+  loss_scaling_strategy: "adaptive_magnitude"
+  normalization_type: "adaptive"
 
-batch_size: 16
-learning_rate: 0.0001
-weight_decay: 0.00005
+# Training Configuration (from failed params)
+learning_rate: 0.00039501184838746327
+weight_decay: 1.7382941938393353e-05
+batch_size: 32
+epochs: 10  # Reduced for debugging
+patience: 5
 
-epochs: 10
-patience: 10
-hp_search: false
-hp_search_n_trials: 50
-wandb: True
-config: config-mlp2.yaml
-evaluate_every_x_epoch: 5
+# Physics Loss Weights (from failed params)
+lambda_phy_loss: 0.8595382613595642
+lambda_connectivity: 0.004081803712424774
+lambda_radiality: 0.023794696723754897
+lambda_mask: 0.01
+
+# Output configuration
+output_type: "regression"  # Since using MSELoss
+num_classes: 2  # May not be used for regression
+
+# Data Loading Configuration
 dataset_type: "default"
-
-batching_type: "standard"
-max_nodes: 32000
-max_edges: 35000
+batching_type: "dynamic"
+max_nodes: 1000
+max_edges: 5000
 train_ratio: 0.85
 seed: 42
-num_workers: 1
+num_workers: 0  # For debugging
 
+# Criterion (from failed params)
+criterion_name: "MSELoss"
+
+# Evaluation
+evaluate_every_x_epoch: 2
+wandb: false  # Disable for debugging

@@ -98,56 +98,47 @@ class SimpleHPO:
             df.to_csv(self.csv_file, mode='a', header=False, index=False, quoting=1)
     
     def suggest_params(self, trial: optuna.Trial) -> dict:
-        """Suggest parameters with feasibility checks using YAML config"""
+        """Suggest parameters with FIXED feasibility checks using YAML config"""
         config = self.config.copy()
         config.update(self.fixed_params)
         
-        # Phase 1: Suggest core parameters that affect constraints first
-        # GNN type (if not fixed)
-        if 'gnn_type' not in config and 'gnn_type' in self.search_space:
-            spec = self.search_space['gnn_type']
-            config['gnn_type'] = trial.suggest_categorical('gnn_type', spec['choices'])
+        # Phase 1: Suggest GAT heads FIRST (this affects all dimension constraints)
+        if 'gat_heads' not in config and 'gat_heads' in self.search_space:
+            spec = self.search_space['gat_heads']
+            if spec['search_type'] == 'categorical':
+                config['gat_heads'] = trial.suggest_categorical('gat_heads', spec['choices'])
+            elif spec['search_type'] == 'int':
+                config['gat_heads'] = trial.suggest_int('gat_heads', spec['min'], spec['max'])
         
-        # GAT heads (if GAT and not fixed)
-        if config.get('gnn_type') == 'GAT' and 'gat_heads' not in config:
-            if 'gat_heads' in self.search_space:
-                spec = self.search_space['gat_heads']
-                if spec['search_type'] == 'categorical':
-                    config['gat_heads'] = trial.suggest_categorical('gat_heads', spec['choices'])
-                elif spec['search_type'] == 'int':
-                    config['gat_heads'] = trial.suggest_int('gat_heads', spec['min'], spec['max'])
+        # Phase 2: Suggest GNN hidden dim with GAT constraint awareness
+        if 'gnn_hidden_dim' not in config and 'gnn_hidden_dim' in self.search_space:
+            spec = self.search_space['gnn_hidden_dim']
+            gat_heads = config.get('gat_heads', 1)  # Default to 1 if not GAT
+            
+            if spec['search_type'] == 'categorical':
+                # Filter choices to be divisible by GAT heads
+                valid_choices = [dim for dim in spec['choices'] if dim % gat_heads == 0]
+                if not valid_choices:
+                    # Fallback: find nearest multiples
+                    valid_choices = [((dim // gat_heads) + 1) * gat_heads for dim in spec['choices']]
+                    valid_choices = list(set(valid_choices))  # Remove duplicates
+                config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', valid_choices)
+            elif spec['search_type'] == 'int':
+                # Suggest in multiples of gat_heads
+                min_val = ((spec['min'] // gat_heads) + (1 if spec['min'] % gat_heads != 0 else 0)) * gat_heads
+                max_val = (spec['max'] // gat_heads) * gat_heads
+                if min_val > max_val:
+                    min_val = max_val = gat_heads
+                config['gnn_hidden_dim'] = trial.suggest_int('gnn_hidden_dim_multiple', 
+                                                            min_val // gat_heads, 
+                                                            max_val // gat_heads) * gat_heads
         
-        # Switch head type (affects attention head constraints)
+        # Phase 3: Suggest switch head type
         if 'switch_head_type' not in config and 'switch_head_type' in self.search_space:
             spec = self.search_space['switch_head_type']
             config['switch_head_type'] = trial.suggest_categorical('switch_head_type', spec['choices'])
         
-        # Phase 2: Suggest GNN hidden dim with constraint awareness
-        if 'gnn_hidden_dim' not in config and 'gnn_hidden_dim' in self.search_space:
-            spec = self.search_space['gnn_hidden_dim']
-            if config.get('gnn_type') == 'GAT' and 'gat_heads' in config:
-                # Filter choices to be divisible by GAT heads
-                gat_heads = config['gat_heads']
-                if spec['search_type'] == 'categorical':
-                    valid_choices = [dim for dim in spec['choices'] if dim % gat_heads == 0]
-                    if valid_choices:
-                        config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', valid_choices)
-                    else:
-                        # Fallback: use nearest multiple
-                        min_dim = min(spec['choices'])
-                        config['gnn_hidden_dim'] = ((min_dim // gat_heads) + 1) * gat_heads
-                else:
-                    # For int ranges, suggest and then adjust
-                    raw_dim = trial.suggest_int('gnn_hidden_dim', spec['min'], spec['max'])
-                    config['gnn_hidden_dim'] = ((raw_dim // gat_heads) + 1) * gat_heads
-            else:
-                # Normal suggestion without constraints
-                if spec['search_type'] == 'categorical':
-                    config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', spec['choices'])
-                elif spec['search_type'] == 'int':
-                    config['gnn_hidden_dim'] = trial.suggest_int('gnn_hidden_dim', spec['min'], spec['max'])
-        
-        # Phase 3: Suggest attention heads with constraint awareness
+        # Phase 4: Suggest attention heads with constraint awareness
         if ('attention' in config.get('switch_head_type', '').lower() and 
             'switch_attention_heads' not in config and 
             'switch_attention_heads' in self.search_space):
@@ -157,26 +148,29 @@ class SimpleHPO:
             
             if spec['search_type'] == 'categorical':
                 valid_choices = [heads for heads in spec['choices'] if gnn_hidden_dim % heads == 0]
-                if valid_choices:
-                    config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads', valid_choices)
-                else:
-                    # Fallback to smallest choice
-                    config['switch_attention_heads'] = min(spec['choices'])
+                if not valid_choices:
+                    # Find factors of gnn_hidden_dim within the choice range
+                    valid_choices = []
+                    for heads in spec['choices']:
+                        if gnn_hidden_dim >= heads and gnn_hidden_dim % heads == 0:
+                            valid_choices.append(heads)
+                    if not valid_choices:
+                        valid_choices = [1]  # Safe fallback
+                config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads', valid_choices)
             elif spec['search_type'] == 'int':
-                # Find valid range
+                # Find valid divisors within range
                 valid_heads = []
                 for heads in range(spec['min'], spec['max'] + 1):
                     if gnn_hidden_dim % heads == 0:
                         valid_heads.append(heads)
-                if valid_heads:
-                    config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads_valid', valid_heads)
-                else:
-                    config['switch_attention_heads'] = spec['min']
+                if not valid_heads:
+                    valid_heads = [1]  # Safe fallback
+                config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads_valid', valid_heads)
         
-        # Phase 4: Process all other parameters from search_space
+        # Phase 5: Process all other parameters
         for param, spec in self.search_space.items():
             if param in config:
-                continue  # Already handled above or in fixed_params
+                continue  # Already handled above
                 
             if spec['search_type'] == 'float':
                 config[param] = trial.suggest_float(
@@ -193,7 +187,7 @@ class SimpleHPO:
             elif spec['search_type'] == 'dynamic_list':
                 config[param] = self._suggest_dynamic_list(trial, param, spec)
         
-        # Phase 5: Apply remaining constraints and cleanup
+        # Phase 6: Final constraint validation and fixes
         config = self._apply_constraints(trial, config)
         
         return config
@@ -233,6 +227,7 @@ class SimpleHPO:
             switch_heads = p.get('switch_attention_heads')
             if gnn_hidden_dim is not None and switch_heads is not None:
                 cons.append(float(gnn_hidden_dim % switch_heads))
+                #cons.append(float(p['hidden_dim'] % p['switch_attention_heads']))
         
         # Constraint 3: At least one MLP must be enabled
         use_node_mlp = p.get('use_node_mlp', True)
@@ -811,18 +806,26 @@ class SimpleHPO:
         
         # Add callback for experiment-level logging
         def experiment_callback(study, trial):
-            if trial.state == optuna.trial.TrialState.COMPLETE and self.wandb_run:
-                completed_trials = len([t for t in study.trials 
-                                      if t.state == optuna.trial.TrialState.COMPLETE])
-                best_f1 = 1 - study.best_value if study.best_value < 1 else 0
+            # Only log if we have an active W&B run and trial completed successfully
+            if (trial.state == optuna.trial.TrialState.COMPLETE and 
+                self.wandb_run is not None and 
+                not self.wandb_run._backend and  
+                wandb.run is not None):
                 
-                # Log experiment-level metrics
-                wandb.log({
-                    "experiment/completed_trials": completed_trials,
-                    "experiment/best_f1_so_far": best_f1,
-                    "experiment/trial_number": trial.number,
-                    "experiment/current_trial_f1": trial.user_attrs.get('best_f1_score', 0),
-                })
+                try:
+                    completed_trials = len([t for t in study.trials 
+                                        if t.state == optuna.trial.TrialState.COMPLETE])
+                    best_f1 = study.best_value if study.best_value < 1 else 0
+                    
+                    # Log experiment-level metrics
+                    wandb.log({
+                        "experiment/completed_trials": completed_trials,
+                        "experiment/best_f1_so_far": best_f1,
+                        "experiment/trial_number": trial.number,
+                        "experiment/current_trial_f1": trial.user_attrs.get('best_f1_score', 0),
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to log to W&B in callback: {e}")
         
         # Run optimization
         study.optimize(self.objective, n_trials=n_trials, callbacks=[experiment_callback])
@@ -830,23 +833,30 @@ class SimpleHPO:
         # Final experiment summary
         completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         if self.wandb_run and completed:
-            # Log final experiment summary
-            all_f1s = [t.user_attrs.get('best_f1_score', 0) for t in completed]
-            wandb.log({
-                "experiment/final_best_f1": max(all_f1s),
-                "experiment/mean_f1": np.mean(all_f1s),
-                "experiment/std_f1": np.std(all_f1s),
-                "experiment/total_completed": len(completed),
-                "experiment/success_rate": len(completed) / len(study.trials)
-            })
+            try:
+                # Log final experiment summary
+                all_f1s = [t.user_attrs.get('best_f1_score', 0) for t in completed]
+                wandb.log({
+                    "experiment/final_best_f1": max(all_f1s),
+                    "experiment/mean_f1": np.mean(all_f1s),
+                    "experiment/std_f1": np.std(all_f1s),
+                    "experiment/total_completed": len(completed),
+                    "experiment/success_rate": len(completed) / len(study.trials)
+                })
+            except Exception as e:
+                logger.warning(f"Failed to log final summary to W&B: {e}")
+    
         
         # Save results
         self._save_results(study)
     
         
-        if self.wandb_run:
-            wandb.finish()
-        
+        if self.wandb_run and wandb.run is not None:
+            try:
+                wandb.finish()
+            except Exception as e:
+                logger.warning(f"Failed to finish W&B run: {e}")
+    
         return study
     
     def _save_results(self, study: optuna.Study):
