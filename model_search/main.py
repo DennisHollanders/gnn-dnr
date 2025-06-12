@@ -46,6 +46,7 @@ if str(model_search_path) not in sys.path:
 from load_data import create_data_loaders
 from evaluation.evaluation import run_evaluation
 from train import train, test
+from models.cvx.cvx import build_cvx_layer
 
 src_path = ROOT_DIR / "src"
 if str(src_path) not in sys.path:
@@ -191,6 +192,7 @@ def main():
         max_e_val = max(d.cvx_edge_mask.shape[1] for d in all_data)
         model_kwargs['max_n'] = max_n_val
         model_kwargs['max_e'] = max_e_val
+        model_kwargs['cvx_layer'] = build_cvx_layer(max_n_val, max_e_val)
 
     model = model_class(**model_kwargs)
 

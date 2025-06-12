@@ -150,7 +150,7 @@ class cvx(nn.Module):
         super().__init__()
         self.max_n = K['max_n']
         self.max_e = K['max_e']
-        self.cvx_layer = build_cvx_layer(self.max_n, self.max_e)
+        self.cvx_layer = K["cvx_layer"] 
         
         dims = K['hidden_dims']
         L = K['latent_dim']
@@ -227,15 +227,15 @@ class cvx(nn.Module):
                 solver_args={'verbose': False, 'solve_method': 'ECOS'}
             )
             
-            print(f"Debug: CVX output shapes - nodes: {torch.mean(v_sq_opt)}, edges: {(y_opt)}")
+            #print(f"Debug: CVX output shapes - nodes: {torch.mean(v_sq_opt)}, edges: {(y_opt)}")
             # Extract only the relevant parts (first actual_edges/actual_nodes)
             y_opt_unpadded = y_opt[:actual_edges]
             v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
 
-            print(f"Debug: CVX unpadded shapes - nodes: {torch.mean(v_sq_opt_unpadded)}, edges: {torch.mean(y_opt_unpadded)}")
+            #print(f"Debug: CVX unpadded shapes - nodes: {torch.mean(v_sq_opt_unpadded)}, edges: {torch.mean(y_opt_unpadded)}")
             
             return {
-                "switch_scores": y_opt_unpadded,
+                "switch_logits": y_opt_unpadded,      # ← Changed key name
                 "voltage_scores": v_sq_opt_unpadded,
                 "switch_predictions": yw_unpadded,
                 "voltage_predictions": vw_unpadded,

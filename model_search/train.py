@@ -127,8 +127,12 @@ def process_batch(model, data, criterion, device, is_training=True,
             else:
                 logger.debug(f"Shape mismatch: predicted ({predicted_scores.shape}) vs target ({target_switches.shape})")
                 _log_batch_debug_info(data)
+
                 return total_loss, metrics, batch_stats
         
+        print(f"Predicted scores shape: {predicted_scores.shape}")
+        print(f"Target switches shape: {target_switches.shape}")
+        print(f"Switch loss: {switch_loss.item()}")
 
         loss_components["switch_loss"] = switch_loss
         total_loss = switch_loss
