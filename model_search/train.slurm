@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gnn-train
+#SBATCH --job-name=CVXC-GNN
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --nodes=1
@@ -32,4 +32,4 @@ cd $HOME/gnn-dnr || exit 1 # Add error check for cd
 
 echo "Running script using 'poetry run'..."
 
-poetry run python -I model_search/main.py --config config.yaml
+poetry run python -I model_search/main.py --config config-cvxcluster.yaml
