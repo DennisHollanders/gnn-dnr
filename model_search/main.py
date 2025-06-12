@@ -236,6 +236,11 @@ def main():
         train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict)
         val_loss, val_dict      = test(model, validation_loader, criterion, device,**lambda_dict)
         logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+        if args.model_module == "cvx":
+            logger.info(f"F1 score train: {train_dict.get('f1_score', 'N/A')}, Val: {val_dict.get('f1_score', 'N/A')}")
+            logger.info(f"Precision train: {train_dict.get('precision', 'N/A')}, Val: {val_dict.get('precision', 'N/A')}")
+            logger.info(f"Recall train: {train_dict.get('recall', 'N/A')}, Val: {val_dict.get('recall', 'N/A')}")
+            logger.info(f"Accuracy train: {train_dict.get('accuracy', 'N/A')}, Val: {val_dict.get('accuracy', 'N/A')}")
         if args.wandb:
             wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
         #logger.info(f"                                              valloss: {val_loss:.4f} -  patience: {patience} - best_loss: {best_loss:.4f}")
