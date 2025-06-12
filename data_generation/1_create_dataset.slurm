@@ -31,12 +31,12 @@ cd $HOME/gnn-dnr || exit 1 # Add error check for cd
 echo "Running script using 'poetry run'..."
 
 # run over all subgraphs
-# poetry run python -I data_generation/create_dataset.py --generate_train_data true --num_subgraphs 2500 --target_busses 130  --bus_range 100 --logging True
+# poetry run python -I data_generation/create_dataset.py --generate_synthetic_data true --num_subgraphs 2500 --target_busses 130  --bus_range 100 --logging True
 # run over all and generate test val with specific range
 
-#poetry run python -I data_generation/create_dataset.py --generate_train_data true iterate_all --n_samples_per_graph 5 --logging True
+#poetry run python -I data_generation/create_dataset.py --generate_synthetic_data true iterate_all --n_samples_per_graph 5 --logging True
 
-poetry run python -I data_generation/create_dataset.py --generate_test_val true --logging true  --bus_range_test_val 30 230 --samples_per_dataset [1000,1000]
+poetry run python -I data_generation/create_dataset.py --sample_real_data true --logging true  --bus_range_test_val 30 230 --samples_per_dataset [1000,1000]
 # --dataset_names ["test","validation","train"] --samples_per_dataset [1000,1000,10000]
 
 echo "Script finished."

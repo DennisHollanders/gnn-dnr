@@ -118,10 +118,10 @@ def parse_arguments():
     
     parser.add_argument('--force_graph_topology', type=str, nargs='*', default=["pp_case33bw"],
                         help='List of specific graph topologies to force include (e.g., ["pp_case33bw", "simbench_1-MV-rural--0-sw"])')
-    parser.add_argument('--dataset_names', type=list, nargs='+', default=["test"]  ,
-                        help='Names of datasets to create (default: ["test", "validation"])')
-    parser.add_argument('--samples_per_dataset', type=list, nargs='+', default=[100]    ,
-                        help='Number of samples for each dataset (default: [10, 10])')
+    parser.add_argument('--dataset_names', type=str, nargs='+', default=["test", "validation"],
+                        help='Names of datasets to create (e.g. --dataset_names test validation)')
+    parser.add_argument('--samples_per_dataset', type=int, nargs='+', default=[1000,1000],
+                        help='Number of samples for each dataset (e.g. --samples_per_dataset 100 100)')
 
 
     parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.7, 1.3],
