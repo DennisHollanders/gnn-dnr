@@ -200,7 +200,7 @@ class cvx(nn.Module):
         actual_edges = ei.shape[1]
         actual_nodes = x.shape[0]
         
-        print(f"Debug: GNN output shapes - nodes: {actual_nodes}, edges: {actual_edges}")
+        #print(f"Debug: GNN output shapes - nodes: {actual_nodes}, edges: {actual_edges}")
         
         # Create warm start by padding GNN predictions to CVX size
         yw = torch.zeros(self.max_e, device=yw_unpadded.device, dtype=yw_unpadded.dtype)
@@ -227,9 +227,12 @@ class cvx(nn.Module):
                 solver_args={'verbose': False, 'solve_method': 'ECOS'}
             )
             
+            print(f"Debug: CVX output shapes - nodes: {v_sq_opt}, edges: {y_opt}")
             # Extract only the relevant parts (first actual_edges/actual_nodes)
             y_opt_unpadded = y_opt[:actual_edges]
             v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
+
+            print(f"Debug: CVX unpadded shapes - nodes: {v_sq_opt_unpadded}, edges: {y_opt_unpadded}")
             
             return {
                 "switch_scores": y_opt_unpadded,
