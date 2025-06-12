@@ -31,11 +31,17 @@ from train import train, test
 
 
 class SimpleHPO:
-    def __init__(self,  config_path: str, study_name: str):
+    """Simplified HPO with feasibility checks, CSV tracking, and W&B experiment grouping"""
+    
+    def __init__(self, config_path: str, study_name: str, startup_trials: int = 10,
+                  pruner_startup: int = 5, pruner_warmup: int = 10):
+        self.n_startup_trials = startup_trials
+        self.pruner_startup = pruner_startup
+        self.pruner_warmup = pruner_warmup
+        self.seed = 0 
         self.config_path = config_path
         self.study_name = study_name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
@@ -58,21 +64,26 @@ class SimpleHPO:
         self.experiment_id = f"{study_name}_{timestamp}"
     
     def _init_csv_tracking(self):
+        """Initialize CSV file for tracking all trial results"""
+        # Create CSV with headers for hyperparameters + metrics
         self.csv_file.touch()
         
     def _log_trial_to_csv(self, trial_num: int, config: dict, metrics: dict):
         """Log trial results to CSV with proper handling of list parameters"""
+        # Combine all data
         row_data = {
             'trial_number': trial_num,
             'timestamp': datetime.now().isoformat(),
-            **metrics  
+            **metrics  # Put metrics first to avoid column mismatches
         }
         
         # Add config parameters, handling lists properly
         for key, value in config.items():
             if isinstance(value, list):
+                # Convert lists to string representation without commas that break CSV
                 row_data[key] = str(value).replace(',', ';')
             elif isinstance(value, (dict, tuple)):
+                # Handle other complex types
                 row_data[key] = str(value).replace(',', ';')
             else:
                 row_data[key] = value
@@ -82,29 +93,107 @@ class SimpleHPO:
         
         # If file is empty, write headers
         if not self.csv_file.exists() or self.csv_file.stat().st_size == 0:
-            df.to_csv(self.csv_file, index=False, quoting=1)  
+            df.to_csv(self.csv_file, index=False, quoting=1)  # Quote all fields
         else:
             df.to_csv(self.csv_file, mode='a', header=False, index=False, quoting=1)
     
     def suggest_params(self, trial: optuna.Trial) -> dict:
-        """Suggest parameters with feasibility checks"""
+        """Suggest parameters with feasibility checks using YAML config"""
         config = self.config.copy()
         config.update(self.fixed_params)
         
-        # Suggest all parameters first
-        for param, spec in self.search_space.items():
-            if spec['search_type'] == 'float':
-                config[param] = trial.suggest_float(param, spec['min'], spec['max'], 
-                                                  log=spec.get('log', False))
+        # Phase 1: Suggest core parameters that affect constraints first
+        # GNN type (if not fixed)
+        if 'gnn_type' not in config and 'gnn_type' in self.search_space:
+            spec = self.search_space['gnn_type']
+            config['gnn_type'] = trial.suggest_categorical('gnn_type', spec['choices'])
+        
+        # GAT heads (if GAT and not fixed)
+        if config.get('gnn_type') == 'GAT' and 'gat_heads' not in config:
+            if 'gat_heads' in self.search_space:
+                spec = self.search_space['gat_heads']
+                if spec['search_type'] == 'categorical':
+                    config['gat_heads'] = trial.suggest_categorical('gat_heads', spec['choices'])
+                elif spec['search_type'] == 'int':
+                    config['gat_heads'] = trial.suggest_int('gat_heads', spec['min'], spec['max'])
+        
+        # Switch head type (affects attention head constraints)
+        if 'switch_head_type' not in config and 'switch_head_type' in self.search_space:
+            spec = self.search_space['switch_head_type']
+            config['switch_head_type'] = trial.suggest_categorical('switch_head_type', spec['choices'])
+        
+        # Phase 2: Suggest GNN hidden dim with constraint awareness
+        if 'gnn_hidden_dim' not in config and 'gnn_hidden_dim' in self.search_space:
+            spec = self.search_space['gnn_hidden_dim']
+            if config.get('gnn_type') == 'GAT' and 'gat_heads' in config:
+                # Filter choices to be divisible by GAT heads
+                gat_heads = config['gat_heads']
+                if spec['search_type'] == 'categorical':
+                    valid_choices = [dim for dim in spec['choices'] if dim % gat_heads == 0]
+                    if valid_choices:
+                        config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', valid_choices)
+                    else:
+                        # Fallback: use nearest multiple
+                        min_dim = min(spec['choices'])
+                        config['gnn_hidden_dim'] = ((min_dim // gat_heads) + 1) * gat_heads
+                else:
+                    # For int ranges, suggest and then adjust
+                    raw_dim = trial.suggest_int('gnn_hidden_dim', spec['min'], spec['max'])
+                    config['gnn_hidden_dim'] = ((raw_dim // gat_heads) + 1) * gat_heads
+            else:
+                # Normal suggestion without constraints
+                if spec['search_type'] == 'categorical':
+                    config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', spec['choices'])
+                elif spec['search_type'] == 'int':
+                    config['gnn_hidden_dim'] = trial.suggest_int('gnn_hidden_dim', spec['min'], spec['max'])
+        
+        # Phase 3: Suggest attention heads with constraint awareness
+        if ('attention' in config.get('switch_head_type', '').lower() and 
+            'switch_attention_heads' not in config and 
+            'switch_attention_heads' in self.search_space):
+            
+            spec = self.search_space['switch_attention_heads']
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 128)
+            
+            if spec['search_type'] == 'categorical':
+                valid_choices = [heads for heads in spec['choices'] if gnn_hidden_dim % heads == 0]
+                if valid_choices:
+                    config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads', valid_choices)
+                else:
+                    # Fallback to smallest choice
+                    config['switch_attention_heads'] = min(spec['choices'])
             elif spec['search_type'] == 'int':
-                config[param] = trial.suggest_int(param, spec['min'], spec['max'], 
-                                                step=spec.get('step', 1))
+                # Find valid range
+                valid_heads = []
+                for heads in range(spec['min'], spec['max'] + 1):
+                    if gnn_hidden_dim % heads == 0:
+                        valid_heads.append(heads)
+                if valid_heads:
+                    config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads_valid', valid_heads)
+                else:
+                    config['switch_attention_heads'] = spec['min']
+        
+        # Phase 4: Process all other parameters from search_space
+        for param, spec in self.search_space.items():
+            if param in config:
+                continue  # Already handled above or in fixed_params
+                
+            if spec['search_type'] == 'float':
+                config[param] = trial.suggest_float(
+                    param, spec['min'], spec['max'], 
+                    log=spec.get('log', False)
+                )
+            elif spec['search_type'] == 'int':
+                config[param] = trial.suggest_int(
+                    param, spec['min'], spec['max'], 
+                    step=spec.get('step', 1)
+                )
             elif spec['search_type'] == 'categorical':
                 config[param] = trial.suggest_categorical(param, spec['choices'])
             elif spec['search_type'] == 'dynamic_list':
                 config[param] = self._suggest_dynamic_list(trial, param, spec)
         
-        # Apply feasibility constraints
+        # Phase 5: Apply remaining constraints and cleanup
         config = self._apply_constraints(trial, config)
         
         return config
@@ -124,6 +213,44 @@ class SimpleHPO:
             dims.append(dim)
         
         return dims
+    
+    def _optuna_constraints(self, trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
+        """Constraint function for Optuna sampler"""
+        p = trial.params
+        cons = []
+        
+        # Constraint 1: GAT divisibility
+        if p.get('gnn_type') == 'GAT':
+            gnn_hidden_dim = p.get('gnn_hidden_dim')
+            gat_heads = p.get('gat_heads')
+            if gnn_hidden_dim is not None and gat_heads is not None:
+                cons.append(float(gnn_hidden_dim % gat_heads))
+        
+        # Constraint 2: Switch attention heads divisibility
+        switch_head_type = p.get('switch_head_type', '')
+        if 'attention' in switch_head_type.lower():
+            gnn_hidden_dim = p.get('gnn_hidden_dim')
+            switch_heads = p.get('switch_attention_heads')
+            if gnn_hidden_dim is not None and switch_heads is not None:
+                cons.append(float(gnn_hidden_dim % switch_heads))
+        
+        # Constraint 3: At least one MLP must be enabled
+        use_node_mlp = p.get('use_node_mlp', True)
+        use_edge_mlp = p.get('use_edge_mlp', True)
+        if not use_node_mlp and not use_edge_mlp:
+            cons.append(1.0)  # Violation
+        else:
+            cons.append(0.0)  # Satisfied
+        
+        # Constraint 4: PhyR requires k_ratio
+        use_phyr = p.get('use_phyr', False)
+        phyr_k_ratio = p.get('phyr_k_ratio')
+        if use_phyr and phyr_k_ratio is None:
+            cons.append(1.0)  # Violation
+        else:
+            cons.append(0.0)  # Satisfied
+        
+        return tuple(cons)
     
     def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
         """Apply comprehensive feasibility constraints"""
@@ -185,21 +312,22 @@ class SimpleHPO:
         if not config.get('use_edge_mlp', True):
             config.pop('edge_hidden_dims', None)
         
-        # Constraint 9: 
+        # Constraint 9: Ensure at least one MLP is used
         if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
             config['use_node_mlp'] = True
             if 'node_hidden_dims' not in config:
                 config['node_hidden_dims'] = [128]
         
-        
+        # Constraint 10: Gated MP requires GNN
         if config.get('use_gated_mp') and not config.get('gnn_type'):
             config['use_gated_mp'] = False
             logger.debug("Disabled gated MP because no GNN type specified")
         
-        
+        # Constraint 11: PhyR parameters only if using PhyR
         if not config.get('use_phyr', False):
             config.pop('phyr_k_ratio', None)
         
+        # Constraint 12: Match criterion to output type
         output_type = config.get('output_type', 'binary')
         if output_type == 'multiclass' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'CrossEntropyLoss'
@@ -208,15 +336,24 @@ class SimpleHPO:
         elif output_type == 'regression' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'MSELoss'
         
-        
+        # Constraint 13: Set num_classes based on output_type
         if output_type == 'multiclass':
-            config['num_classes'] = 2  
+            config['num_classes'] = 2  # Fixed to 2 classes as requested
         elif output_type == 'binary':
             config['num_classes'] = 2
-        else:  
+        else:  # regression
             config.pop('num_classes', None)
         
-    
+        # Constraint 14: Memory limit (batch_size × max_nodes)
+        batch_size = config.get('batch_size', 32)
+        max_nodes = config.get('max_nodes', 1000)
+        memory_limit = 100000  # Adjust based on your GPU memory
+        
+        if batch_size * max_nodes > memory_limit:
+            # Reduce batch size to fit memory
+            config['batch_size'] = max(1, memory_limit // max_nodes)
+            logger.debug(f"Reduced batch_size to {config['batch_size']} for memory constraint")
+        
         return config
     
     def _validate_config(self, config: dict) -> bool:
@@ -308,20 +445,24 @@ class SimpleHPO:
             best_f1 = 0.0
             best_train_loss = float('inf')
             best_val_loss = float('inf')
+            starting_val_loss = float('inf')
             final_train_loss = float('inf')
             final_val_loss = float('inf')
             final_precision = 0.0
             final_recall = 0.0
             final_accuracy = 0.0
             
+            
             patience = 0
-            max_epochs = min(config.get('epochs', 100), 50)
-            max_patience = config.get('patience', 8)
+            max_epochs = min(config.get('epochs', 100), 80)
+            max_patience = config.get('patience', 25)
             
             for epoch in range(max_epochs):
                 train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device)
                 val_loss, val_dict = test(model, val_loader, criterion, self.device)
                 
+                if epoch == 0: 
+                    starting_val_loss = val_loss
                 # Extract metrics
                 current_f1 = val_dict.get('test_f1', 0.0)
                 current_precision = val_dict.get('test_precision', 0.0)
@@ -369,6 +510,7 @@ class SimpleHPO:
             
             # Comprehensive metrics for CSV and Optuna
             metrics = {
+                "starting_val_loss": starting_val_loss,
                 'best_f1_score': best_f1,
                 'best_train_loss': best_train_loss,
                 'best_val_loss': best_val_loss,
@@ -404,6 +546,7 @@ class SimpleHPO:
         except optuna.TrialPruned:
             # Handle pruned trials properly
             pruned_metrics = {
+                "starting_val_loss": float('inf'),
                 'best_f1_score': 0.0,
                 'best_train_loss': float('inf'),
                 'best_val_loss': float('inf'),
@@ -432,6 +575,7 @@ class SimpleHPO:
             
             # Log failure
             failure_metrics = {
+                "starting_val_loss": float('inf'),
                 'best_f1_score': 0.0,
                 'best_train_loss': float('inf'),
                 'best_val_loss': float('inf'),
@@ -472,7 +616,7 @@ class SimpleHPO:
                 max_nodes=config.get('max_nodes', 1000),
                 max_edges=config.get('max_edges', 5000),
                 train_ratio=config.get('train_ratio', 0.85),
-                seed=config.get('seed', 42),
+                seed=self.seed,
                 num_workers=config.get('num_workers', 0),
                 batching_type=config.get('batching_type', 'dynamic'),
             )
@@ -574,7 +718,7 @@ class SimpleHPO:
         # Add hyperparameters (exclude metadata columns)
         exclude_cols = {'trial_number', 'timestamp', 'best_f1_score', 'best_train_loss', 
                        'best_val_loss', 'final_train_loss', 'final_val_loss', 'final_precision',
-                       'final_recall', 'final_accuracy', 'final_epoch', 'converged', 
+                       'final_recall', 'final_accuracy', 'final_epoch', 'converged', "starting_val_loss",
                        'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score'}
         
         param_cols = [col for col in df.columns if col not in exclude_cols]
@@ -651,10 +795,18 @@ class SimpleHPO:
         logger.info(f"CSV tracking: {self.csv_file}")
         
         # Create study
+        sampler = optuna.samplers.TPESampler(
+            seed=self.seed,
+            n_startup_trials=self.n_startup_trials,
+            constraints_func=self._optuna_constraints,
+        )
         study = optuna.create_study(
-            direction="minimize",
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=10),
-            sampler=optuna.samplers.TPESampler(seed=42, n_startup_trials=15)
+            direction= "minimize",
+            pruner=optuna.pruners.MedianPruner(
+                n_startup_trials=self.pruner_startup,
+                n_warmup_steps=self.pruner_warmup,
+            ),
+            sampler=sampler,
         )
         
         # Add callback for experiment-level logging
@@ -690,6 +842,7 @@ class SimpleHPO:
         
         # Save results
         self._save_results(study)
+    
         
         if self.wandb_run:
             wandb.finish()
@@ -783,47 +936,9 @@ class SimpleHPO:
                 df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
                 completed_df = df[df['status'] == 'completed']
                 if len(completed_df) > 0:
-                    # Select columns for top 5 display, including per-class accuracies and loss progression
-                    display_cols = ['trial_number', 'best_f1_score', 'starting_loss', 'best_val_loss', 'final_epoch']
-                    
-                    # Add per-class accuracy columns if they exist
-                    class_cols = [col for col in completed_df.columns if 'class_' in col and 'accuracy' in col]
-                    if class_cols:
-                        display_cols.extend(class_cols)
-                    
-                    # Add overall accuracy if available
-                    if 'final_accuracy' in completed_df.columns:
-                        display_cols.append('final_accuracy')
-                    
-                    # Add loss improvement column if starting_loss exists
-                    if 'starting_loss' in completed_df.columns:
-                        completed_df['loss_improvement'] = completed_df['starting_loss'] - completed_df['best_val_loss']
-                        display_cols.append('loss_improvement')
-                    
-                    top_5 = completed_df.nlargest(5, 'best_f1_score')[display_cols]
+                    top_5 = completed_df.nlargest(5, 'best_f1_score')[['trial_number', 'best_f1_score',"starting_val_loss", 'best_val_loss', 'final_epoch']]
                     logger.info(f"\nTop 5 Trials from CSV:")
                     logger.info(top_5.to_string(index=False))
-                    
-                    # Additional per-class summary for best trial
-                    best_trial = completed_df.loc[completed_df['best_f1_score'].idxmax()]
-                    if class_cols:
-                        logger.info(f"\nBest Trial ({int(best_trial['trial_number'])}) Per-Class Performance:")
-                        for col in class_cols:
-                            class_name = col.replace('class_', '').replace('_accuracy', '')
-                            accuracy = best_trial[col]
-                            if pd.notna(accuracy):
-                                logger.info(f"  Class {class_name}: {accuracy:.1%}")
-                    
-                    # Loss progression summary for best trial
-                    if 'starting_loss' in best_trial and pd.notna(best_trial['starting_loss']):
-                        start_loss = best_trial['starting_loss']
-                        best_loss = best_trial['best_val_loss']
-                        improvement = start_loss - best_loss
-                        improvement_pct = (improvement / start_loss) * 100
-                        logger.info(f"\nBest Trial Loss Progression:")
-                        logger.info(f"  Starting Loss: {start_loss:.4f}")
-                        logger.info(f"  Best Val Loss: {best_loss:.4f}")
-                        logger.info(f"  Improvement: {improvement:.4f} ({improvement_pct:.1f}%)")
                 else:
                     raise ValueError("No completed trials in CSV")
             else:
@@ -837,46 +952,8 @@ class SimpleHPO:
             for i, trial in enumerate(top_trials):
                 f1 = trial.user_attrs.get('best_f1_score', 1-trial.value)
                 val_loss = trial.user_attrs.get('best_val_loss', 'N/A')
-                starting_loss = trial.user_attrs.get('starting_loss', 'N/A')
                 epoch = trial.user_attrs.get('final_epoch', 'N/A')
-                accuracy = trial.user_attrs.get('final_accuracy', 'N/A')
-                
-                # Calculate loss improvement if both values available
-                loss_improvement = ""
-                if starting_loss != 'N/A' and val_loss != 'N/A':
-                    improvement = starting_loss - val_loss
-                    loss_improvement = f", Δ={improvement:.4f}"
-                
-                # Per-class accuracies from Optuna user_attrs
-                class_info = ""
-                for key, value in trial.user_attrs.items():
-                    if 'class_' in key and 'accuracy' in key:
-                        class_name = key.replace('class_', '').replace('_accuracy', '')
-                        class_info += f", Class_{class_name}={value:.1%}"
-                
-                logger.info(f"  Trial {trial.number}: F1={f1:.4f}, Start={starting_loss}, Val={val_loss}{loss_improvement}, Epoch={epoch}{class_info}")
-                
-            # Show best trial per-class summary
-            if top_trials:
-                best_trial = top_trials[0]
-                class_accuracies = {k: v for k, v in best_trial.user_attrs.items() 
-                                  if 'class_' in k and 'accuracy' in k}
-                if class_accuracies:
-                    logger.info(f"\nBest Trial ({best_trial.number}) Per-Class Performance:")
-                    for key, accuracy in class_accuracies.items():
-                        class_name = key.replace('class_', '').replace('_accuracy', '')
-                        logger.info(f"  Class {class_name}: {accuracy:.1%}")
-                
-                # Loss progression for best trial
-                starting_loss = best_trial.user_attrs.get('starting_loss')
-                best_val_loss = best_trial.user_attrs.get('best_val_loss')
-                if starting_loss is not None and best_val_loss is not None:
-                    improvement = starting_loss - best_val_loss
-                    improvement_pct = (improvement / starting_loss) * 100
-                    logger.info(f"\nBest Trial Loss Progression:")
-                    logger.info(f"  Starting Loss: {starting_loss:.4f}")
-                    logger.info(f"  Best Val Loss: {best_val_loss:.4f}")
-                    logger.info(f"  Improvement: {improvement:.4f} ({improvement_pct:.1f}%)")
+                logger.info(f"  Trial {trial.number}: F1={f1:.4f}, Val_Loss={val_loss}, Epoch={epoch}")
 
 
 def main():

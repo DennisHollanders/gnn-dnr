@@ -5,10 +5,9 @@ dataset_names: ["train",
                   "validation",
                   "test"]
 folder_names: 
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
-
+  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
+  - "data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"
   
 dataset_type: "default"
 batching_type: "dynamic"
@@ -112,7 +111,7 @@ search_space:
   # 12. Activation function
   activation:
     search_type: "categorical"
-    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "sigmoid"]
+    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", ]
     
   # 13. Use batch normalization
   use_batch_norm:

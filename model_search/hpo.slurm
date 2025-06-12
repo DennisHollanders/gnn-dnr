@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gnn-train
+#SBATCH --job-name=HPO-GAT
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --nodes=1
@@ -32,4 +32,4 @@ cd $HOME/gnn-dnr || exit 1 # Add error check for cd
 
 echo "Running script using 'poetry run'..."
 
-poetry run python -I model_search/hpo.py --config /vast.mnt/home/20174047/gnn-dnr/model_search/config_files/hpo-mlp.yaml
+poetry run python -I model_search/hpo.py --config hpo-GAT.yaml --trials 250 --wandb --study_name GAT
