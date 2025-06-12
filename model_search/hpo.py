@@ -31,9 +31,7 @@ from train import train, test
 
 
 class SimpleHPO:
-    """Simplified HPO with feasibility checks, CSV tracking, and W&B experiment grouping"""
-    
-    def __init__(self, config_path: str, study_name: str):
+    def __init__(self,  config_path: str, study_name: str):
         self.config_path = config_path
         self.study_name = study_name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,28 +58,33 @@ class SimpleHPO:
         self.experiment_id = f"{study_name}_{timestamp}"
     
     def _init_csv_tracking(self):
-        """Initialize CSV file for tracking all trial results"""
-        # Create CSV with headers for hyperparameters + metrics
         self.csv_file.touch()
         
     def _log_trial_to_csv(self, trial_num: int, config: dict, metrics: dict):
-        """Log trial results to CSV"""
-        # Combine all data
+        """Log trial results to CSV with proper handling of list parameters"""
         row_data = {
             'trial_number': trial_num,
             'timestamp': datetime.now().isoformat(),
-            **config,  # All hyperparameters
-            **metrics  # All metrics
+            **metrics  
         }
         
-        # Write to CSV
+        # Add config parameters, handling lists properly
+        for key, value in config.items():
+            if isinstance(value, list):
+                row_data[key] = str(value).replace(',', ';')
+            elif isinstance(value, (dict, tuple)):
+                row_data[key] = str(value).replace(',', ';')
+            else:
+                row_data[key] = value
+        
+        # Write to CSV with proper quoting
         df = pd.DataFrame([row_data])
         
         # If file is empty, write headers
-        if self.csv_file.stat().st_size == 0:
-            df.to_csv(self.csv_file, index=False)
+        if not self.csv_file.exists() or self.csv_file.stat().st_size == 0:
+            df.to_csv(self.csv_file, index=False, quoting=1)  
         else:
-            df.to_csv(self.csv_file, mode='a', header=False, index=False)
+            df.to_csv(self.csv_file, mode='a', header=False, index=False, quoting=1)
     
     def suggest_params(self, trial: optuna.Trial) -> dict:
         """Suggest parameters with feasibility checks"""
@@ -182,22 +185,21 @@ class SimpleHPO:
         if not config.get('use_edge_mlp', True):
             config.pop('edge_hidden_dims', None)
         
-        # Constraint 9: Ensure at least one MLP is used
+        # Constraint 9: 
         if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
             config['use_node_mlp'] = True
             if 'node_hidden_dims' not in config:
                 config['node_hidden_dims'] = [128]
         
-        # Constraint 10: Gated MP requires GNN
+        
         if config.get('use_gated_mp') and not config.get('gnn_type'):
             config['use_gated_mp'] = False
             logger.debug("Disabled gated MP because no GNN type specified")
         
-        # Constraint 11: PhyR parameters only if using PhyR
+        
         if not config.get('use_phyr', False):
             config.pop('phyr_k_ratio', None)
         
-        # Constraint 12: Match criterion to output type
         output_type = config.get('output_type', 'binary')
         if output_type == 'multiclass' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'CrossEntropyLoss'
@@ -206,24 +208,15 @@ class SimpleHPO:
         elif output_type == 'regression' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'MSELoss'
         
-        # Constraint 13: Set num_classes based on output_type
+        
         if output_type == 'multiclass':
-            config['num_classes'] = 2  # Fixed to 2 classes as requested
+            config['num_classes'] = 2  
         elif output_type == 'binary':
             config['num_classes'] = 2
-        else:  # regression
+        else:  
             config.pop('num_classes', None)
         
-        # Constraint 14: Memory limit (batch_size × max_nodes)
-        batch_size = config.get('batch_size', 32)
-        max_nodes = config.get('max_nodes', 1000)
-        memory_limit = 100000  # Adjust based on your GPU memory
-        
-        if batch_size * max_nodes > memory_limit:
-            # Reduce batch size to fit memory
-            config['batch_size'] = max(1, memory_limit // max_nodes)
-            logger.debug(f"Reduced batch_size to {config['batch_size']} for memory constraint")
-        
+    
         return config
     
     def _validate_config(self, config: dict) -> bool:
@@ -524,49 +517,92 @@ class SimpleHPO:
             return None, None, None, None
     
     def create_parallel_plot(self, study: optuna.Study) -> go.Figure:
-        """Create parallel coordinates plot from CSV data"""
-        # Read from CSV for most comprehensive data
-        if not self.csv_file.exists():
-            return None
-            
-        df = pd.read_csv(self.csv_file)
-        df = df[df['status'] == 'completed'].sort_values('best_f1_score', ascending=False)
+        """Create parallel coordinates plot with robust CSV handling"""
+        # Try to read from CSV first, fallback to Optuna data
+        try:
+            if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
+                try:
+                    df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
+                    df = df[df['status'] == 'completed'].sort_values('best_f1_score', ascending=False)
+                    
+                    if len(df) >= 5:
+                        # Use CSV data
+                        return self._create_plot_from_dataframe(df)
+                except Exception as e:
+                    logger.warning(f"Could not read CSV for plotting: {e}")
+        except Exception:
+            pass
         
-        if len(df) < 5:
+        # Fallback to Optuna data
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        if len(completed_trials) < 5:
             return None
         
-        # Create dimensions - start with key metrics
+        # Build data from Optuna trials
+        data = []
+        for trial in completed_trials:
+            row = trial.params.copy()
+            # Handle list parameters properly
+            for key, value in row.items():
+                if isinstance(value, list):
+                    row[key] = str(value)
+            row['F1_Score'] = trial.user_attrs.get('best_f1_score', 1 - trial.value)
+            row['Trial'] = trial.number
+            data.append(row)
+        
+        df = pd.DataFrame(data).sort_values('F1_Score', ascending=False)
+        return self._create_plot_from_dataframe(df, f1_col='F1_Score')
+    
+    def _create_plot_from_dataframe(self, df: pd.DataFrame, f1_col: str = 'best_f1_score') -> go.Figure:
+        """Create parallel coordinates plot from DataFrame"""
+        # Create dimensions - start with F1 score
         dimensions = [
-            dict(label="F1 Score", values=df['best_f1_score'], 
-                 range=[df['best_f1_score'].min(), df['best_f1_score'].max()]),
-            dict(label="Best Val Loss", values=df['best_val_loss'],
-                 range=[df['best_val_loss'].min(), df['best_val_loss'].max()]),
-            dict(label="Final Epoch", values=df['final_epoch'],
-                 range=[df['final_epoch'].min(), df['final_epoch'].max()]),
+            dict(label="F1 Score", values=df[f1_col], 
+                 range=[df[f1_col].min(), df[f1_col].max()])
         ]
+        
+        # Add other metrics if available
+        for metric in ['best_val_loss', 'final_epoch']:
+            if metric in df.columns and df[metric].notna().any():
+                dimensions.append(dict(
+                    label=metric.replace('_', ' ').title(),
+                    values=df[metric],
+                    range=[df[metric].min(), df[metric].max()]
+                ))
         
         # Add hyperparameters (exclude metadata columns)
         exclude_cols = {'trial_number', 'timestamp', 'best_f1_score', 'best_train_loss', 
                        'best_val_loss', 'final_train_loss', 'final_val_loss', 'final_precision',
                        'final_recall', 'final_accuracy', 'final_epoch', 'converged', 
-                       'model_parameters', 'status', 'error_message'}
+                       'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score'}
         
         param_cols = [col for col in df.columns if col not in exclude_cols]
         
         for col in param_cols:
-            if df[col].dtype in ['object', 'bool']:
-                # Categorical
+            if df[col].dtype in ['object', 'string'] or col.startswith('n_') or 'hidden_dims' in col:
+                # Categorical or list parameters
                 unique_vals = df[col].unique()
                 if len(unique_vals) > 1:  # Only include if there's variation
-                    val_map = {v: i for i, v in enumerate(unique_vals)}
+                    # Handle string representations of lists
+                    processed_vals = []
+                    for val in df[col]:
+                        if isinstance(val, str) and ('[' in val or 'True' in val or 'False' in val):
+                            processed_vals.append(str(val)[:20] + '...' if len(str(val)) > 20 else str(val))
+                        else:
+                            processed_vals.append(str(val))
+                    
+                    unique_processed = list(set(processed_vals))
+                    val_map = {val: i for i, val in enumerate(unique_processed)}
+                    
                     dimensions.append(dict(
                         label=col,
-                        values=df[col].map(val_map),
-                        tickvals=list(range(len(unique_vals))),
-                        ticktext=[str(v) for v in unique_vals]
+                        values=[val_map.get(pv, 0) for pv in processed_vals],
+                        tickvals=list(range(len(unique_processed))),
+                        ticktext=unique_processed
                     ))
             else:
-                # Numerical
+                # Numerical parameter
                 if df[col].nunique() > 1:  # Only include if there's variation
                     dimensions.append(dict(
                         label=col,
@@ -576,7 +612,7 @@ class SimpleHPO:
         
         # Create plot
         fig = go.Figure(data=go.Parcoords(
-            line=dict(color=df['best_f1_score'], colorscale='Viridis', showscale=True,
+            line=dict(color=df[f1_col], colorscale='Viridis', showscale=True,
                      colorbar=dict(title="F1 Score")),
             dimensions=dimensions
         ))
@@ -661,27 +697,46 @@ class SimpleHPO:
         return study
     
     def _save_results(self, study: optuna.Study):
-        """Save results and create visualizations"""
+        """Save results and create visualizations with robust CSV handling"""
         completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         
         if not completed:
             logger.error("No completed trials!")
             return
         
-        # Best results from CSV (most comprehensive)
-        if self.csv_file.exists():
-            df = pd.read_csv(self.csv_file)
-            completed_df = df[df['status'] == 'completed']
-            if len(completed_df) > 0:
-                best_row = completed_df.loc[completed_df['best_f1_score'].idxmax()]
-                best_f1 = best_row['best_f1_score']
-                best_trial_num = best_row['trial_number']
+        # Best results - use Optuna data as fallback if CSV fails
+        best_f1_from_optuna = 1 - study.best_value if study.best_value < 1 else 0
+        best_trial_from_optuna = study.best_trial.number
+        
+        # Try to read CSV, fallback to Optuna data if it fails
+        try:
+            if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
+                # Try reading with different options to handle parsing errors
+                try:
+                    df = pd.read_csv(self.csv_file, quoting=1)
+                except:
+                    # If that fails, try with different settings
+                    try:
+                        df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
+                    except:
+                        # Last resort: read without quotes
+                        df = pd.read_csv(self.csv_file, on_bad_lines='skip')
+                
+                completed_df = df[df['status'] == 'completed']
+                if len(completed_df) > 0:
+                    best_row = completed_df.loc[completed_df['best_f1_score'].idxmax()]
+                    best_f1 = best_row['best_f1_score']
+                    best_trial_num = best_row['trial_number']
+                else:
+                    best_f1 = best_f1_from_optuna
+                    best_trial_num = best_trial_from_optuna
             else:
-                best_f1 = 1 - study.best_value
-                best_trial_num = study.best_trial.number
-        else:
-            best_f1 = 1 - study.best_value  
-            best_trial_num = study.best_trial.number
+                best_f1 = best_f1_from_optuna
+                best_trial_num = best_trial_from_optuna
+        except Exception as e:
+            logger.warning(f"Could not read CSV file: {e}. Using Optuna data.")
+            best_f1 = best_f1_from_optuna
+            best_trial_num = best_trial_from_optuna
         
         # Save best config
         best_config = self.config.copy()
@@ -722,14 +777,106 @@ class SimpleHPO:
         if fig:
             logger.info(f"Interactive plot: {plot_file}")
         
-        # Show top 5 results
-        if self.csv_file.exists():
-            df = pd.read_csv(self.csv_file)
-            completed_df = df[df['status'] == 'completed']
-            if len(completed_df) > 0:
-                top_5 = completed_df.nlargest(5, 'best_f1_score')[['trial_number', 'best_f1_score', 'best_val_loss', 'final_epoch']]
-                logger.info(f"\nTop 5 Trials:")
-                logger.info(top_5.to_string(index=False))
+        # Show top 5 results from Optuna if CSV fails
+        try:
+            if self.csv_file.exists():
+                df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
+                completed_df = df[df['status'] == 'completed']
+                if len(completed_df) > 0:
+                    # Select columns for top 5 display, including per-class accuracies and loss progression
+                    display_cols = ['trial_number', 'best_f1_score', 'starting_loss', 'best_val_loss', 'final_epoch']
+                    
+                    # Add per-class accuracy columns if they exist
+                    class_cols = [col for col in completed_df.columns if 'class_' in col and 'accuracy' in col]
+                    if class_cols:
+                        display_cols.extend(class_cols)
+                    
+                    # Add overall accuracy if available
+                    if 'final_accuracy' in completed_df.columns:
+                        display_cols.append('final_accuracy')
+                    
+                    # Add loss improvement column if starting_loss exists
+                    if 'starting_loss' in completed_df.columns:
+                        completed_df['loss_improvement'] = completed_df['starting_loss'] - completed_df['best_val_loss']
+                        display_cols.append('loss_improvement')
+                    
+                    top_5 = completed_df.nlargest(5, 'best_f1_score')[display_cols]
+                    logger.info(f"\nTop 5 Trials from CSV:")
+                    logger.info(top_5.to_string(index=False))
+                    
+                    # Additional per-class summary for best trial
+                    best_trial = completed_df.loc[completed_df['best_f1_score'].idxmax()]
+                    if class_cols:
+                        logger.info(f"\nBest Trial ({int(best_trial['trial_number'])}) Per-Class Performance:")
+                        for col in class_cols:
+                            class_name = col.replace('class_', '').replace('_accuracy', '')
+                            accuracy = best_trial[col]
+                            if pd.notna(accuracy):
+                                logger.info(f"  Class {class_name}: {accuracy:.1%}")
+                    
+                    # Loss progression summary for best trial
+                    if 'starting_loss' in best_trial and pd.notna(best_trial['starting_loss']):
+                        start_loss = best_trial['starting_loss']
+                        best_loss = best_trial['best_val_loss']
+                        improvement = start_loss - best_loss
+                        improvement_pct = (improvement / start_loss) * 100
+                        logger.info(f"\nBest Trial Loss Progression:")
+                        logger.info(f"  Starting Loss: {start_loss:.4f}")
+                        logger.info(f"  Best Val Loss: {best_loss:.4f}")
+                        logger.info(f"  Improvement: {improvement:.4f} ({improvement_pct:.1f}%)")
+                else:
+                    raise ValueError("No completed trials in CSV")
+            else:
+                raise FileNotFoundError("CSV file not found")
+        except Exception as e:
+            logger.warning(f"Could not show top trials from CSV: {e}")
+            # Show top 5 from Optuna data instead
+            logger.info(f"\nTop 5 Trials from Optuna:")
+            completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            top_trials = sorted(completed_trials, key=lambda t: t.user_attrs.get('best_f1_score', 1-t.value), reverse=True)[:5]
+            for i, trial in enumerate(top_trials):
+                f1 = trial.user_attrs.get('best_f1_score', 1-trial.value)
+                val_loss = trial.user_attrs.get('best_val_loss', 'N/A')
+                starting_loss = trial.user_attrs.get('starting_loss', 'N/A')
+                epoch = trial.user_attrs.get('final_epoch', 'N/A')
+                accuracy = trial.user_attrs.get('final_accuracy', 'N/A')
+                
+                # Calculate loss improvement if both values available
+                loss_improvement = ""
+                if starting_loss != 'N/A' and val_loss != 'N/A':
+                    improvement = starting_loss - val_loss
+                    loss_improvement = f", Δ={improvement:.4f}"
+                
+                # Per-class accuracies from Optuna user_attrs
+                class_info = ""
+                for key, value in trial.user_attrs.items():
+                    if 'class_' in key and 'accuracy' in key:
+                        class_name = key.replace('class_', '').replace('_accuracy', '')
+                        class_info += f", Class_{class_name}={value:.1%}"
+                
+                logger.info(f"  Trial {trial.number}: F1={f1:.4f}, Start={starting_loss}, Val={val_loss}{loss_improvement}, Epoch={epoch}{class_info}")
+                
+            # Show best trial per-class summary
+            if top_trials:
+                best_trial = top_trials[0]
+                class_accuracies = {k: v for k, v in best_trial.user_attrs.items() 
+                                  if 'class_' in k and 'accuracy' in k}
+                if class_accuracies:
+                    logger.info(f"\nBest Trial ({best_trial.number}) Per-Class Performance:")
+                    for key, accuracy in class_accuracies.items():
+                        class_name = key.replace('class_', '').replace('_accuracy', '')
+                        logger.info(f"  Class {class_name}: {accuracy:.1%}")
+                
+                # Loss progression for best trial
+                starting_loss = best_trial.user_attrs.get('starting_loss')
+                best_val_loss = best_trial.user_attrs.get('best_val_loss')
+                if starting_loss is not None and best_val_loss is not None:
+                    improvement = starting_loss - best_val_loss
+                    improvement_pct = (improvement / starting_loss) * 100
+                    logger.info(f"\nBest Trial Loss Progression:")
+                    logger.info(f"  Starting Loss: {starting_loss:.4f}")
+                    logger.info(f"  Best Val Loss: {best_val_loss:.4f}")
+                    logger.info(f"  Improvement: {improvement:.4f} ({improvement_pct:.1f}%)")
 
 
 def main():

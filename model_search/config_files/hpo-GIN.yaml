@@ -10,6 +10,7 @@ folder_names:
   - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
   - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
   - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+
 dataset_type: "default"
 batching_type: "dynamic"
 
@@ -30,7 +31,7 @@ fixed_params:
   
   # Training settings
   epochs: 200
-  patience: 15
+  patience: 100
   
   # Output settings 
   output_type: "binary"  # or "multiclass" - both use 2 classes
@@ -137,8 +138,8 @@ search_space:
   # 16. Switch head layers
   switch_head_layers:
     search_type: "int"
-    min: 1
-    max: 4
+    min: 2
+    max: 5
     
   # 17. Criterion/Loss function
   criterion_name:

@@ -26,32 +26,32 @@ def approximate_connectivity_loss(switch_probs, edge_index, num_nodes, device):
 def enhanced_physics_loss(output, data, device, lambda_phy=0.1, 
                          lambda_connectivity=0.05, lambda_radiality=0.05,
                          normalization_type="adaptive"):
+    # Get base physics loss
     base_phy_loss = physics_loss(output, data, device, normalization_type)
     
+    # Get switch probabilities
     switch_probs = output.get("switch_predictions")
+    if switch_probs is None and "switch_logits" in output:
+        switch_probs = torch.sigmoid(output["switch_logits"])
+    
     if switch_probs is None:
-        switch_probs = torch.sigmoid(output.get("switch_logits"))
+        return base_phy_loss
     
     edge_index = data.edge_index
     num_nodes = data.x.size(0)
-    num_edges = edge_index.size(1)
     
-    
+    # Connectivity loss
     conn_loss = approximate_connectivity_loss(switch_probs, edge_index, num_nodes, device)
     conn_loss_normalized = conn_loss / num_nodes 
     
-    # Radiality constraint - normalized
+    # Radiality loss
     rad_loss = radiality_loss(switch_probs, num_nodes)
     rad_loss_normalized = rad_loss / (num_nodes - 1)**2
     
+    # Combine all losses 
     total_loss = (lambda_phy * base_phy_loss + 
                   lambda_connectivity * conn_loss_normalized + 
                   lambda_radiality * rad_loss_normalized)
-    
-    logger.debug(f"Enhanced physics losses ({normalization_type}) - "
-                f"Base: {base_phy_loss.item():.4f}, "
-                f"Connectivity: {conn_loss_normalized.item():.4f}, "
-                f"Radiality: {rad_loss_normalized.item():.4f}")
     
     return total_loss
 
@@ -285,6 +285,7 @@ def train(model, train_loader, optimizer, criterion, device,
         
         if batch_stats["valid_batch"] and loss.requires_grad:
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             running_loss += loss.item()
