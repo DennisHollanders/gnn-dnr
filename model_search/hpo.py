@@ -600,7 +600,7 @@ class SimpleHPO:
             self._log_trial_to_csv(trial.number, self.suggest_params(trial), failure_metrics)
             
             return 1.0
-       def _load_data_once(self):
+    def _load_data_once(self):
         """Load data once during initialization to avoid repeated loading"""
         try:
             logger.info("Loading data once for all trials...")
