@@ -55,7 +55,7 @@ epochs: 100
 patience: 10
 hp_search: false
 hp_search_n_trials: 50
-wandb: True
+wandb: False
 config: config-cvx.yaml
 evaluate_every_x_epoch: 5
 dataset_type: "cvx"

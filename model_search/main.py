@@ -61,18 +61,6 @@ def parse_args():
     # New argument to allow overriding the description (e.g., "Train PIGNN")
     parser.add_argument("--description", type=str, help="Description for the training job")
     parser.add_argument("--job_name", type=str, default="default_job", help="Job name")
-    parser.add_argument("--dataset_names", type=str, nargs="+", default= ["train","validation","test"], help="Names of datasets to create loaders for")
-    parser.add_argument("--folder_names", type=str, nargs="+", default=[
-                "data\\test_val_real__range-30-230_nTest-1000_nVal-1000_2552025_1\\test",
-                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test",
-                "data\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test"], help="Names of folders to look for datasets in")
-    parser.add_argument("--model_module", type=str, default="first_model",                        help="Name of file containing the model class")
-    parser.add_argument("--hidden_dims", type=int, nargs="+", default=[64, 32, 16], help="Hidden dimensions")
-    parser.add_argument("--latent_dim", type=int, default=8, help="Latent dimension")
-    parser.add_argument("--activation", type=str, default="prelu",
-                        choices=["relu", "leaky_relu", "elu", "selu", "prelu", "sigmoid", "tanh"])
-    parser.add_argument("--criterion_name", type=str, default="MSELoss", help="Criterion")
-    parser.add_argument("--dropout_rate", type=float, default=0.0, help="Dropout rate")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
@@ -82,14 +70,9 @@ def parse_args():
     parser.add_argument("--hp_search_n_trials", type=int, default=50, help="Number of trials for hyperparameter search")
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--config", type=str, help="Path to YAML config file (overrides arguments)")
-    parser.add_argument("--evaluate_every_x_epoch", type=int, default=5, help="Epoch interval for validation")
-    
     parser.add_argument("--dataset_type", type=str, default="default", choices=["default", "PINN", "PIGNN", "GNN", "MLP"],)
     parser.add_argument("--batching_type", type=str, default="dynamic", choices=["standard", "dynamic"])
-    parser.add_argument("--max_nodes", type=int, default=1000)
-    parser.add_argument("--max_edges", type=int, default=5000)
-    parser.add_argument("--train_ratio", type=float, default=0.85)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--config_path", type=str, help="Path to the config file")
     parser.add_argument("--override_job_name", type=str, help="Override job name for saving the model")

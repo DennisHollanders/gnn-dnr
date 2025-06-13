@@ -130,9 +130,7 @@ def process_batch(model, data, criterion, device, is_training=True,
 
                 return total_loss, metrics, batch_stats
         
-        print(f"Predicted scores shape: {predicted_scores.shape}")
-        print(f"Target switches shape: {target_switches.shape}")
-        print(f"Switch loss: {switch_loss.item()}")
+    
 
         loss_components["switch_loss"] = switch_loss
         total_loss = switch_loss

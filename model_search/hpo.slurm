@@ -4,7 +4,7 @@
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task=16
 # SBATCH --gres=gpu:1 
 #SBATCH --mem=16G
 #SBATCH --time=1-00:00:00

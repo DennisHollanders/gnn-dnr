@@ -22,7 +22,7 @@
 /notebooks/
 /Enexis/
 /Enexis_info/
-
+/model_search/models/final_models/
 /data/**
 /network_cache/
 /logs/
