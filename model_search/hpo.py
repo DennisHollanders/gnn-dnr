@@ -62,6 +62,12 @@ class SimpleHPO:
         
         self.wandb_run = None
         self.experiment_id = f"{study_name}_{timestamp}"
+
+        # NEW: Pre-load data once
+        self.train_loader = None
+        self.val_loader = None
+        self.data_sample = None
+        self._load_data_once()
     
     def _init_csv_tracking(self):
         """Initialize CSV file for tracking all trial results"""
@@ -594,39 +600,78 @@ class SimpleHPO:
             self._log_trial_to_csv(trial.number, self.suggest_params(trial), failure_metrics)
             
             return 1.0
-    
+       def _load_data_once(self):
+        """Load data once during initialization to avoid repeated loading"""
+        try:
+            logger.info("Loading data once for all trials...")
+            
+            # Create data loaders using config
+            dataloaders = create_data_loaders(
+                dataset_names=self.config['dataset_names'],
+                folder_names=self.config['folder_names'],
+                dataset_type=self.config.get('dataset_type', 'default'),
+                batch_size=self.config['batch_size'],
+                max_nodes=self.config.get('max_nodes', 1000),
+                max_edges=self.config.get('max_edges', 5000),
+                train_ratio=self.config.get('train_ratio', 0.85),
+                seed=self.seed,
+                num_workers=self.config.get('num_workers', 0),
+                batching_type=self.config.get('batching_type', 'dynamic'),
+            )
+            
+            self.train_loader = dataloaders.get("train")
+            self.val_loader = dataloaders.get("validation")
+            
+            if not self.train_loader or not self.val_loader:
+                raise ValueError("Failed to create data loaders")
+            
+            # Store a sample for getting dimensions
+            self.data_sample = self.train_loader.dataset[0]
+            
+            logger.info(f"Data loaded successfully: {len(self.train_loader)} train batches, {len(self.val_loader)} val batches")
+            
+        except Exception as e:
+            logger.error(f"Failed to load data: {e}")
+            raise
+    def _create_dynamic_data_loader(self, batch_size: int):
+        """Create new data loaders with different batch size if needed"""
+        if batch_size == self.config['batch_size']:
+            # Use pre-loaded loaders
+            return self.train_loader, self.val_loader
+        
+        # Create new loaders with different batch size
+        dataloaders = create_data_loaders(
+            dataset_names=self.config['dataset_names'],
+            folder_names=self.config['folder_names'],
+            dataset_type=self.config.get('dataset_type', 'default'),
+            batch_size=batch_size,  # Use trial-specific batch size
+            max_nodes=self.config.get('max_nodes', 1000),
+            max_edges=self.config.get('max_edges', 5000),
+            train_ratio=self.config.get('train_ratio', 0.85),
+            seed=self.seed,
+            num_workers=self.config.get('num_workers', 0),
+            batching_type=self.config.get('batching_type', 'dynamic'),
+        )
+        
+        return dataloaders.get("train"), dataloaders.get("validation")
+
     def _setup_training(self, config: dict):
-        """Setup model, data, and criterion"""
+        """Setup model and criterion (data is already loaded)"""
         try:
             # Load model
             model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
             model_class = getattr(model_module, config['model_module'])
             
-            # Create data loaders
-            dataloaders = create_data_loaders(
-                dataset_names=config['dataset_names'],
-                folder_names=config['folder_names'],
-                dataset_type=config.get('dataset_type', 'default'),
-                batch_size=config['batch_size'],
-                max_nodes=config.get('max_nodes', 1000),
-                max_edges=config.get('max_edges', 5000),
-                train_ratio=config.get('train_ratio', 0.85),
-                seed=self.seed,
-                num_workers=config.get('num_workers', 0),
-                batching_type=config.get('batching_type', 'dynamic'),
-            )
-            
-            train_loader = dataloaders.get("train")
-            val_loader = dataloaders.get("validation")
+            # Get data loaders (either pre-loaded or create new ones for different batch size)
+            train_loader, val_loader = self._create_dynamic_data_loader(config['batch_size'])
             
             if not train_loader or not val_loader:
                 return None, None, None, None
             
-            # Get dimensions and create model
-            sample = train_loader.dataset[0]
+            # Get dimensions from pre-loaded sample
             model_kwargs = {
-                'node_input_dim': sample.x.shape[1],
-                'edge_input_dim': sample.edge_attr.shape[1],
+                'node_input_dim': self.data_sample.x.shape[1],
+                'edge_input_dim': self.data_sample.edge_attr.shape[1],
             }
             
             # Add relevant parameters
