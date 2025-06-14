@@ -1,5 +1,5 @@
 description: "Debug Config 2 - Graph Attention Switch Head Case"
-job_name: "debug_graph_attention_switch_head"
+job_name: "GAT test"
 
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
@@ -23,26 +23,25 @@ model_kwargs:
   # MLP Configuration (from failed params - converted from dynamic list)
   use_node_mlp: true
   use_edge_mlp: true
-  node_hidden_dims: [192, 32, 128, 64]  # 4 layers as specified
-  edge_hidden_dims: [288, 128, 256]  # 3 layers as specified
+  node_hidden_dims: [512, 256, 128, 64]  # 4 layers as specified
+  edge_hidden_dims: [256, 128, 64]  # 3 layers as specified
   
   # General Configuration (from failed params)
   activation: "tanh"
-  dropout_rate: 0.5154461036366417
+  dropout_rate: 0.01
   use_batch_norm: true
-  use_residual: false
-  use_skip_connections: false
-  pooling: "mean"
+  use_residual: true
+  use_skip_connections: true
+  pooling: "add"
   
-  # Switch Head Configuration (ATTENTION type - this is where the error likely occurs)
+  # Switch Head Configuration 
   switch_head_type: "graph_attention"
   switch_head_layers: 2
-  switch_attention_heads: 1  # PROBLEM: 192 % 1 = 0 (should work, but might cause shape issues)
+  switch_attention_heads: 1  
   
   # Physics Configuration (from failed params)
   use_gated_mp: true
-  use_phyr: true
-  phyr_k_ratio: 0.46988246916295767
+  use_phyr: False
   
   # Loss and normalization
   loss_scaling_strategy: "adaptive_magnitude"
@@ -52,7 +51,7 @@ model_kwargs:
 learning_rate: 0.00039501184838746327
 weight_decay: 1.7382941938393353e-05
 batch_size: 32
-epochs: 10  # Reduced for debugging
+epochs: 100 
 patience: 5
 
 # Physics Loss Weights (from failed params)
@@ -75,8 +74,8 @@ seed: 42
 num_workers: 0  # For debugging
 
 # Criterion (from failed params)
-criterion_name: "MSELoss"
+criterion_name: WeightedBCELoss
 
 # Evaluation
-evaluate_every_x_epoch: 2
+evaluate_every_x_epoch: 5
 wandb: false  # Disable for debugging

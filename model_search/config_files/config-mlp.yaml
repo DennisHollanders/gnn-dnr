@@ -1,86 +1,78 @@
-description: "HPO Best Trial Config - GCN with WeightedBCELoss"
-job_name: "hpo_best_trial_gcn"
+description: "GIN model with hyperparameter optimization"
+job_name: "None"
 
-# HPO Metadata
-_hpo_metadata:
-  best_f1_score: 0.9367  
-  best_trial: 5  
-  completed_trials: 80
-  csv_file: "hpo_results.csv"
-  experiment_id: "hpo_20250614_012009"
-  total_trials: 80
 
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
-folder_names: 
+folder_names:
   - "data\\split_datasets\\train"
   - "data\\split_datasets\\validation"
   - "data\\split_datasets\\test"
+dataset_type: "default"
+batching_type: "dynamic"
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 0
 
 # Model Configuration
 model_module: "AdvancedMLP"
 model_kwargs:
-  # GCN Configuration
-  gnn_type: "GCN"
-  gnn_layers: 5
-  gnn_hidden_dim: 113  # gnn_hidden_dim_multiple * 9 (assuming base 9)
-  
-  # MLP Configuration
-  use_node_mlp: true
+  # GIN Configuration
+  gnn_type: "GIN"
+  gin_mlp_layers: 3
+  gin_eps: 0.06118747565904727
+  gin_train_eps: false
+  gnn_layers: 1
+  gnn_hidden_dim_multiple: 302
+
+  # Edge MLP
   use_edge_mlp: true
-  node_hidden_dims: [352, 256]  # 2 layers as specified
-  edge_hidden_dims: [192, 352]  # 2 layers as specified
-  
+  edge_hidden_dims: [128, 512, 64]
+  n_edge_hidden_dims_layers: 3
+
+  # Node MLP
+  use_node_mlp: true
+  node_hidden_dims: [64, 512, 512]
+  n_node_hidden_dims_layers: 3
+
   # General Configuration
-  activation: "gelu"
-  dropout_rate: 0.060691248558227884
+  activation: "relu"
+  dropout_rate: 0.0013447489600537238
   use_batch_norm: true
-  use_residual: false
+  use_residual: true
   use_skip_connections: true
-  pooling: "max"
-  
-  # Switch Head Configuration
+  pooling: "add"
+
+  # Switch Head
   switch_head_type: "mlp"
-  switch_head_layers: 2
-  
-  # Physics Configuration
-  use_gated_mp: true
-  use_phyr: true
-  phyr_k_ratio: 0.18569452544519777
-  
-  # Loss and normalization
-  loss_scaling_strategy: "fixed"
-  normalization_type: "injection_scale"
+  switch_head_layers: 4
 
+  # Physics
+  use_gated_mp: false
+  use_phyr: false
+  lambda_phy_loss: 0.9634733268065652
+  lambda_connectivity: 0.031023696908473272
+  lambda_radiality: 0.0036467753703689383
+
+  # Loss & Optimization
+  loss_scaling_strategy: "adaptive_magnitude"
+  criterion_name: "WeightedBCELoss"
+  
+  weight_decay: 3.1083921460064515e-05
+learning_rate: 0.0009708944531483163
+weight_decay: 3.1083921460064515e-05
+criterion_name: "WeightedBCELoss"
 # Training Configuration
-learning_rate: 0.008910671508622504
-weight_decay: 1.8285523498725977e-06
 batch_size: 128
-epochs: 100
-patience: 15
+epochs: 200
+patience: 100
 
-# Physics Loss Weights
-lambda_phy_loss: 0.519874529197544
-lambda_connectivity: 0.477593421142367
-lambda_radiality: 0.009166025938972713
-lambda_mask: 0.011670683878208651
-
-# Output configuration
+# Output Configuration
 output_type: "binary"
 num_classes: 2
 
-# Data Loading Configuration
-dataset_type: "default"
-batching_type: "dynamic"
-max_nodes: 5000
-max_edges: 5000
-train_ratio: 0.85
-seed: 42
-num_workers: 0
-
-# Criterion
-criterion_name: "WeightedBCELoss"
-
-# Evaluation
-wandb_project: "GCN_HPO"
+# Logging
+wandb_project: "GIN_HPO"
 wandb: false

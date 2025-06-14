@@ -2,7 +2,7 @@ from enum import nonmember
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GATv2Conv, GINConv, SAGEConv, GraphConv
+from torch_geometric.nn import GCNConv, GATv2Conv, GINConv, GraphConv
 from typing import List, Optional, Dict, Any
 from torch_geometric.nn import MessagePassing
 
@@ -42,8 +42,6 @@ class GNNLayer(nn.Module):
                 nn.Linear(output_dim, output_dim)
             )
             self.conv = GINConv(mlp, eps=eps)
-        elif self.gnn_type == "SAGE":
-            self.conv = SAGEConv(input_dim, output_dim)
         else:
             raise ValueError(f"Unsupported GNN type: {gnn_type}")
     
@@ -61,64 +59,458 @@ class GNNLayer(nn.Module):
 #         y_hard = torch.zeros_like(probs).scatter_(0, idx, 1.0)
 #         return (y_hard - probs).detach() + probs  
 
+# class PhysicsTopK(nn.Module):
+#     def __init__(self, k_ratio: float):
+#         super().__init__()
+#         self.k_ratio = k_ratio
+
+#     def forward(self, probs: torch.Tensor, edge_batch: torch.Tensor):
+#         # probs: [E], edge_batch: [E] indicating graph idx for each edge
+#         num_graphs = int(edge_batch.max().item()) + 1
+#         counts = torch.bincount(edge_batch, minlength=num_graphs)  # [G]
+#         # compute k per graph (at least 1)
+#         k_per_graph = torch.clamp(torch.round(self.k_ratio * counts).long(), min=1)
+
+#         # build hard mask
+#         y_hard = torch.zeros_like(probs)
+#         for g in range(num_graphs):
+#             mask = (edge_batch == g).nonzero(as_tuple=True)[0]
+#             if mask.numel() == 0:
+#                 continue
+#             p = probs[mask]
+#             # per-graph topk (tie-breaker by index)
+#             k = min(k_per_graph[g].item(), p.numel())
+#             topk_vals, topk_idx = p.topk(k, largest=True, sorted=False)
+#             y_hard[mask[topk_idx]] = 1.0
+
+#         # straight‐through
+#         return (y_hard - probs).detach() + probs
+class PhysicsInformedRounding(nn.Module):
+    """
+    Physics-Informed Rounding (PhyR) based on GraPhyR framework.
+    Uses Kruskal-inspired algorithm to select switches maintaining radiality constraint.
+    """
+    def __init__(self,):
+        super().__init__()
+        
+    def forward(self, switch_probs: torch.Tensor, edge_index: torch.Tensor, 
+                edge_batch: torch.Tensor, num_nodes_per_graph: torch.Tensor = None):
+        """
+        Apply physics-informed rounding using Kruskal-inspired algorithm.
+        
+        Args:
+            switch_probs: [E] Switch closing probabilities
+            edge_index: [2, E] Edge connectivity  
+            edge_batch: [E] Graph assignment for each edge
+            num_nodes_per_graph: [G] Number of nodes per graph (optional)
+        
+        Returns:
+            Binary switch decisions maintaining radiality constraint
+        """
+        device = switch_probs.device
+        num_graphs = int(edge_batch.max().item()) + 1
+        
+        # Initialize hard decisions
+        switch_decisions = torch.zeros_like(switch_probs)
+        
+        for g in range(num_graphs):
+            # Get edges for this graph
+            graph_mask = (edge_batch == g)
+            graph_edge_indices = graph_mask.nonzero(as_tuple=True)[0]
+            
+            if graph_edge_indices.numel() == 0:
+                continue
+                
+            # Get graph-specific data
+            graph_probs = switch_probs[graph_mask]
+            graph_edge_index = edge_index[:, graph_mask]
+            
+            # Determine number of nodes in this graph
+            if num_nodes_per_graph is not None:
+                num_nodes = num_nodes_per_graph[g].item()
+            else:
+                num_nodes = int(graph_edge_index.max().item()) + 1
+            
+            # Number of switches to close for radiality: n_nodes - 1
+            target_switches = max(1, num_nodes - 1)
+            
+            # Apply Kruskal-inspired selection
+            selected_edges = self._kruskal_switch_selection(
+                graph_probs, graph_edge_index, target_switches, num_nodes
+            )
+            
+            # Set selected switches to 1
+            if selected_edges.numel() > 0:
+                switch_decisions[graph_edge_indices[selected_edges]] = 1.0
+        
+        # Straight-through estimator for gradients
+        return (switch_decisions - switch_probs).detach() + switch_probs
+    
+    def _kruskal_switch_selection(self, probs, edge_index, edge_batch, num_nodes_per_graph):
+        """
+        Fixed Kruskal-based switch selection with proper node index handling.
+        """
+        device = probs.device
+        selected_edges = torch.zeros_like(probs)
+        
+        # Get unique graphs in the batch
+        unique_graphs = torch.unique(edge_batch)
+        
+        for graph_idx in unique_graphs:
+            # Get edges for this specific graph
+            graph_edge_mask = (edge_batch == graph_idx)
+            graph_edges = edge_index[:, graph_edge_mask]
+            graph_probs = probs[graph_edge_mask]
+            
+            if graph_edges.size(1) == 0:
+                continue
+                
+            # Get unique nodes in this graph and create node mapping
+            unique_nodes = torch.unique(graph_edges)
+            num_nodes = len(unique_nodes)
+            
+            if num_nodes <= 1:
+                continue
+                
+            # Create mapping from original node indices to contiguous indices [0, 1, 2, ...]
+            node_to_idx = {node.item(): idx for idx, node in enumerate(unique_nodes)}
+            
+            # Convert edge indices to contiguous range [0, num_nodes-1]
+            mapped_edges = torch.zeros_like(graph_edges)
+            for i in range(graph_edges.size(1)):
+                u_orig = graph_edges[0, i].item()
+                v_orig = graph_edges[1, i].item()
+                mapped_edges[0, i] = node_to_idx[u_orig]
+                mapped_edges[1, i] = node_to_idx[v_orig]
+            
+            # Sort edges by probability (descending - highest probability first)
+            sorted_indices = torch.argsort(graph_probs, descending=True)
+            
+            # Initialize Union-Find with correct size
+            parent = list(range(num_nodes))
+            rank = [0] * num_nodes
+            
+            def find(x):
+                if parent[x] != x:
+                    parent[x] = find(parent[x])  # Path compression
+                return parent[x]
+            
+            def union(x, y):
+                px, py = find(x), find(y)
+                if px == py:
+                    return False  # Already connected
+                
+                # Union by rank
+                if rank[px] < rank[py]:
+                    parent[px] = py
+                elif rank[px] > rank[py]:
+                    parent[py] = px
+                else:
+                    parent[py] = px
+                    rank[px] += 1
+                return True
+            
+            # Select edges using Kruskal's algorithm
+            selected_count = 0
+            target_edges = num_nodes - 1  # For a tree (radial network)
+            
+            for idx in sorted_indices:
+                if selected_count >= target_edges:
+                    break
+                    
+                u = mapped_edges[0, idx].item()
+                v = mapped_edges[1, idx].item()
+                
+                # Check bounds
+                if u >= num_nodes or v >= num_nodes or u < 0 or v < 0:
+                    print(f"Warning: Invalid node indices u={u}, v={v}, num_nodes={num_nodes}")
+                    continue
+                
+                # Try to add this edge
+                if union(u, v):
+                    # Find the original edge index in the batch
+                    original_edge_idx = torch.where(graph_edge_mask)[0][idx]
+                    selected_edges[original_edge_idx] = 1.0
+                    selected_count += 1
+            
+            # Debug information
+            if selected_count != target_edges:
+                print(f"Warning: Graph {graph_idx.item()} selected {selected_count} edges, target was {target_edges}")
+        
+        return selected_edges
+    def _validate_graph_structure(self, edge_index, edge_batch, num_nodes_per_graph):
+        """
+        Debug function to validate graph structure.
+        """
+        print(f"Edge index shape: {edge_index.shape}")
+        print(f"Edge batch shape: {edge_batch.shape}")
+        print(f"Num nodes per graph: {num_nodes_per_graph}")
+        
+        unique_graphs = torch.unique(edge_batch)
+        print(f"Unique graphs: {unique_graphs}")
+        
+        for graph_idx in unique_graphs:
+            graph_edge_mask = (edge_batch == graph_idx)
+            graph_edges = edge_index[:, graph_edge_mask]
+            
+            if graph_edges.size(1) > 0:
+                unique_nodes = torch.unique(graph_edges)
+                min_node = unique_nodes.min().item()
+                max_node = unique_nodes.max().item()
+                num_unique = len(unique_nodes)
+                
+                print(f"Graph {graph_idx.item()}: "
+                    f"edges={graph_edges.size(1)}, "
+                    f"nodes range=[{min_node}, {max_node}], "
+                    f"unique_nodes={num_unique}")
+
+    # Alternative simpler implementation if Kruskal is still problematic
+    def _simple_physics_rounding(self, probs, edge_index, edge_batch, num_nodes_per_graph):
+        """
+        Simplified physics-aware rounding without Kruskal.
+        Uses top-k selection with basic connectivity check.
+        """
+        device = probs.device
+        selected_edges = torch.zeros_like(probs)
+        
+        unique_graphs = torch.unique(edge_batch)
+        
+        for graph_idx in unique_graphs:
+            graph_edge_mask = (edge_batch == graph_idx)
+            graph_probs = probs[graph_edge_mask]
+            
+            if graph_probs.size(0) == 0:
+                continue
+                
+            # Get target number of edges (assuming radial network)
+            graph_edges = edge_index[:, graph_edge_mask]
+            unique_nodes = torch.unique(graph_edges)
+            target_edges = len(unique_nodes) - 1
+            
+            # Simple top-k selection
+            k = min(target_edges, graph_probs.size(0))
+            if k > 0:
+                _, top_indices = torch.topk(graph_probs, k)
+                
+                # Map back to original indices
+                original_indices = torch.where(graph_edge_mask)[0][top_indices]
+                selected_edges[original_indices] = 1.0
+        
+        return selected_edges
+
+    # Updated physics_rounding method
+    def physics_rounding(self, probs, edge_index, edge_batch, num_nodes_per_graph):
+        """
+        Main physics rounding method with error handling.
+        """
+        try:
+            # Try Kruskal first
+            return self._kruskal_switch_selection(probs, edge_index, edge_batch, num_nodes_per_graph)
+        except Exception as e:
+            print(f"Kruskal failed with error: {e}")
+            print("Falling back to simple physics rounding...")
+            
+            # Debug the graph structure
+            self._validate_graph_structure(edge_index, edge_batch, num_nodes_per_graph)
+            
+            # Fall back to simpler method
+            return self._simple_physics_rounding(probs, edge_index, edge_batch, num_nodes_per_graph)
+
 class PhysicsTopK(nn.Module):
-    def __init__(self, k_ratio: float):
+    """
+    Enhanced Physics-aware TopK selection with radiality constraint option.
+    """
+    def __init__(self, k_ratio: float = 0.8, enforce_radiality: bool = True):
         super().__init__()
         self.k_ratio = k_ratio
+        self.enforce_radiality = enforce_radiality
+        self.physics_rounding = PhysicsInformedRounding() if enforce_radiality else None
 
-    def forward(self, probs: torch.Tensor, edge_batch: torch.Tensor):
-        # probs: [E], edge_batch: [E] indicating graph idx for each edge
+    def forward(self, probs: torch.Tensor, edge_batch: torch.Tensor, 
+                edge_index: torch.Tensor = None, num_nodes_per_graph: torch.Tensor = None):
+        """
+        Apply physics-aware topk selection.
+        
+        Args:
+            probs: [E] Switch probabilities
+            edge_batch: [E] Graph assignment for each edge
+            edge_index: [2, E] Edge connectivity (required if enforce_radiality=True)
+            num_nodes_per_graph: [G] Nodes per graph (optional)
+        """
+        if self.enforce_radiality and edge_index is not None:
+            # Use physics-informed rounding with radiality constraint
+            return self.physics_rounding(probs, edge_index, edge_batch, num_nodes_per_graph)
+        else:
+            # Fallback to simple per-graph topk
+            return self._simple_topk(probs, edge_batch)
+    
+    def _simple_topk(self, probs: torch.Tensor, edge_batch: torch.Tensor):
+        """Simple per-graph topk selection without radiality constraint."""
         num_graphs = int(edge_batch.max().item()) + 1
-        counts = torch.bincount(edge_batch, minlength=num_graphs)  # [G]
-        # compute k per graph (at least 1)
+        counts = torch.bincount(edge_batch, minlength=num_graphs)
         k_per_graph = torch.clamp(torch.round(self.k_ratio * counts).long(), min=1)
 
-        # build hard mask
         y_hard = torch.zeros_like(probs)
         for g in range(num_graphs):
             mask = (edge_batch == g).nonzero(as_tuple=True)[0]
             if mask.numel() == 0:
                 continue
             p = probs[mask]
-            # per-graph topk (tie-breaker by index)
             k = min(k_per_graph[g].item(), p.numel())
-            topk_vals, topk_idx = p.topk(k, largest=True, sorted=False)
+            _, topk_idx = p.topk(k, largest=True, sorted=False)
             y_hard[mask[topk_idx]] = 1.0
 
-        # straight‐through
-        return (y_hard - probs).detach() + probs
-             
+        return (y_hard - probs).detach() + probs     
+# class SwitchGatedMP(MessagePassing):
+#     def __init__(self, in_channels, out_channels, edge_attr_dim, aggr="add"):
+#         super().__init__(aggr=aggr)
+#         self.lin = nn.Linear(in_channels, out_channels, bias=False)
+#         self.res_lin = nn.Linear(in_channels, out_channels, bias=False)
+#         self.gate_mlp = nn.Sequential(
+#             nn.Linear(edge_attr_dim, out_channels),
+#             nn.Sigmoid()
+#         )
+#         self.act = nn.ReLU()
+
+#         nn.init.xavier_uniform_(self.lin.weight)
+#         nn.init.xavier_uniform_(self.res_lin.weight)
+#         for m in self.gate_mlp:
+#             if isinstance(m, nn.Linear):
+#                 nn.init.xavier_uniform_(m.weight)
+#                 nn.init.zeros_(m.bias)
+
+#     def forward(self, x, edge_index, edge_attr):
+#         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+#     def message(self, x_j, x_i, edge_attr):
+#         # compute gate from edge features
+#         gate = self.gate_mlp(edge_attr)  # [E, out_channels]
+#         msg = self.lin(x_j)              # [E, out_channels]
+#         gated = msg * gate               # elementwise
+#         return self.act(gated + self.res_lin(x_i))
+
+#     def update(self, aggr_out):
+#         return self.act(aggr_out)
 class SwitchGatedMP(MessagePassing):
+    """
+    Physics-Informed Gated Message Passing based on GraPhyR framework.
+    Models switches as gates controlling information flow analogous to power flow between nodes.
+    """
     def __init__(self, in_channels, out_channels, edge_attr_dim, aggr="add"):
         super().__init__(aggr=aggr)
-        self.lin = nn.Linear(in_channels, out_channels, bias=False)
-        self.res_lin = nn.Linear(in_channels, out_channels, bias=False)
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(edge_attr_dim, out_channels),
-            nn.Sigmoid()
+        
+        # Node transformation layers
+        self.node_transform = nn.Linear(in_channels, out_channels, bias=False)
+        self.residual_transform = nn.Linear(in_channels, out_channels, bias=False)
+        
+        # Physics-informed gate computation
+        # Expected edge_attr: [R, X, switch_state, line_capacity, ...]
+        self.impedance_encoder = nn.Sequential(
+            nn.Linear(2, out_channels // 2),  # For R, X (resistance, reactance)
+            nn.ReLU(),
+            nn.BatchNorm1d(out_channels // 2)
         )
-        self.act = nn.ReLU()
-
-        nn.init.xavier_uniform_(self.lin.weight)
-        nn.init.xavier_uniform_(self.res_lin.weight)
-        for m in self.gate_mlp:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+        
+        self.switch_encoder = nn.Sequential(
+            nn.Linear(1, out_channels // 4),  # For switch state
+            nn.ReLU()
+        )
+        
+        self.line_encoder = nn.Sequential(
+            nn.Linear(edge_attr_dim - 3, out_channels // 4),  # For other line features
+            nn.ReLU()
+        ) if edge_attr_dim > 3 else None
+        
+        # Physics-informed gate MLP that learns switch behavior
+        gate_input_dim = out_channels // 2 + out_channels // 4
+        if self.line_encoder:
+            gate_input_dim += out_channels // 4
+            
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(gate_input_dim, out_channels),
+            nn.ReLU(),
+            nn.LayerNorm(out_channels),
+            nn.Linear(out_channels, out_channels),
+            nn.Sigmoid()  # Output between 0 and 1 (open to closed)
+        )
+        
+        self.activation = nn.ReLU()
+        
+        # Initialize weights
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        """Initialize weights with Xavier initialization"""
+        nn.init.xavier_uniform_(self.node_transform.weight)
+        nn.init.xavier_uniform_(self.residual_transform.weight)
+        
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
     def forward(self, x, edge_index, edge_attr):
+        """
+        Args:
+            x: Node features [N, in_channels] 
+            edge_index: Edge connectivity [2, E]
+            edge_attr: Edge attributes [E, edge_attr_dim] 
+                      Expected format: [R, X, switch_state, ...other_features]
+        """
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-
+    
     def message(self, x_j, x_i, edge_attr):
-        # compute gate from edge features
-        gate = self.gate_mlp(edge_attr)  # [E, out_channels]
-        msg = self.lin(x_j)              # [E, out_channels]
-        gated = msg * gate               # elementwise
-        return self.act(gated + self.res_lin(x_i))
-
+        """
+        Physics-informed message passing modeling power flow through switches.
+        
+        Implements the key GraPhyR insight: "Gates control the flow of information 
+        through switches in the GNN, modeling the control of physical power flow between nodes"
+        """
+        batch_size = x_j.size(0)
+        
+        # Extract physical parameters (handle potential dimension mismatches)
+        if edge_attr.size(1) >= 3:
+            impedance = edge_attr[:, :2]      # Resistance (R) and Reactance (X)
+            switch_state = edge_attr[:, 2:3]  # Current switch state [0,1]
+            other_features = edge_attr[:, 3:] if edge_attr.size(1) > 3 else None
+        else:
+            # Fallback for simpler edge attributes
+            impedance = edge_attr[:, :2] if edge_attr.size(1) >= 2 else torch.zeros(batch_size, 2, device=edge_attr.device)
+            switch_state = edge_attr[:, -1:] if edge_attr.size(1) >= 1 else torch.ones(batch_size, 1, device=edge_attr.device)
+            other_features = None
+        
+        # Encode physical properties
+        impedance_emb = self.impedance_encoder(impedance)    # [E, out_channels//2]
+        switch_emb = self.switch_encoder(switch_state)       # [E, out_channels//4]
+        
+        # Combine physical embeddings
+        embeddings = [impedance_emb, switch_emb]
+        
+        if other_features is not None and self.line_encoder is not None:
+            line_emb = self.line_encoder(other_features)     # [E, out_channels//4]
+            embeddings.append(line_emb)
+        
+        edge_embedding = torch.cat(embeddings, dim=1)       # [E, gate_input_dim]
+        
+        # Compute physics-informed gate
+        # Models how impedance and switch state affect power transmission capability
+        gate = self.gate_mlp(edge_embedding)                # [E, out_channels]
+        
+        # Transform node features
+        message = self.node_transform(x_j)                  # [E, out_channels]
+        residual = self.residual_transform(x_i)             # [E, out_channels]
+        
+        # Apply physics-informed gating
+        # High impedance or open switches → low gate values → restricted information flow
+        gated_message = message * gate                      # Element-wise multiplication
+        
+        # Residual connection preserving target node information
+        return self.activation(gated_message + residual)
+    
     def update(self, aggr_out):
-        return self.act(aggr_out)
-
+        """Node update after aggregation"""
+        return aggr_out
 class MLPBlock(nn.Module):
 
     def __init__(self, input_dim: int, hidden_dims: List[int], activation: str = "relu",
@@ -303,7 +695,8 @@ class AdvancedMLP(nn.Module):
                  switch_attention_heads: int = 4,  
                  use_gated_mp: bool = False,
                  use_phyr: bool = False,
-                 phyr_k_ratio: float = 0.2,
+                 enforce_radiality: bool = True,
+
                  **kwargs):
         super().__init__()
         
@@ -317,6 +710,15 @@ class AdvancedMLP(nn.Module):
         self.switch_head_type = switch_head_type
         self.activation = get_activation(activation)
         self.dropout = nn.Dropout(dropout_rate)
+    
+        # store physics flags / modules
+        self.use_gated_mp = use_gated_mp
+        self.use_phyr = use_phyr          
+        self.enforce_radiality = enforce_radiality  
+        if self.use_phyr:
+            self.phyr = PhysicsTopK(enforce_radiality)
+        self.switch_gate = None  
+       
         
         # Validate output type
         if self.output_type not in ["binary", "multiclass"]:
@@ -329,7 +731,7 @@ class AdvancedMLP(nn.Module):
             self.gnn_layers = nn.ModuleList()
             current_dim = node_input_dim
 
-            # first layer: optionally SwitchGatedMP
+            # first layer
             if use_gated_mp:
                 self.gnn_layers.append(
                     SwitchGatedMP(current_dim, gnn_hidden_dim, edge_input_dim)
@@ -355,12 +757,6 @@ class AdvancedMLP(nn.Module):
             self.gnn_layers = None
             self.node_features_dim = node_input_dim
 
-        # store physics flags / modules
-        self.use_gated_mp = use_gated_mp
-        self.use_phyr = use_phyr                                            
-        if use_phyr:
-            self.phyr = PhysicsTopK(phyr_k_ratio)   
-        self.switch_gate = None  
         
         # ====================================================================
         # MLP Processing
@@ -500,7 +896,7 @@ class AdvancedMLP(nn.Module):
                 sequence = torch.stack([source_proj, edge_proj, target_proj], dim=1)
                 attended, _ = self.attention(sequence, sequence, sequence)
                 
-                return self.output(attended.view(attended.size(0), -1))
+                return self.output(attended.reshape(attended.size(0), -1))
         
         return GraphAttentionHead()
     
@@ -611,15 +1007,25 @@ class AdvancedMLP(nn.Module):
         # Apply PhysicsTopK if enabled
         if self.use_phyr:
             if batch is not None:
-                # Get edge batch indices
-                edge_batch = batch[edge_index[0]]  # Use source node batch indices
+                edge_batch = batch[edge_index[0]]
             else:
-                # Single graph case
                 edge_batch = torch.zeros(E, dtype=torch.long, device=x.device)
             
-            switch_mask = self.phyr(switch_probs, edge_batch)  
-            outputs["switch_predictions"] = switch_mask  
-            outputs["switch_mask"] = switch_mask   
+            # Get number of nodes per graph for radiality constraint
+            if self.enforce_radiality:
+                if batch is not None:
+                    num_nodes_per_graph = torch.bincount(batch)
+                else:
+                    num_nodes_per_graph = torch.tensor([x.size(0)], device=x.device)
+                
+                switch_mask = self.phyr(
+                    switch_probs, edge_batch, edge_index, num_nodes_per_graph
+                )
+            else:
+                switch_mask = self.phyr(switch_probs, edge_batch)  
+
+            outputs["switch_predictions"] = switch_mask
+            outputs["switch_mask"] = switch_mask 
         
         # Add gated message passing features if available
         if self.use_gated_mp and self.switch_gate is not None:

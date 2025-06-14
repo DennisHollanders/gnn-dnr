@@ -1,4 +1,5 @@
 # Corrected predict_optimize.py with simplified warmstart approach
+from email.policy import strict
 import sys
 import os
 import torch
@@ -20,7 +21,7 @@ if project_root not in sys.path:
 from pyomo.environ import value as pyo_val
 from src.SOCP_class_dnr import SOCP_class
 from model_search.evaluation.evaluation import load_config_from_model_path
-
+from load_data import load_pp_networks
 class Predictor:
     def __init__(self, model_path: str, config_path: str, device: torch.device, sample_loader: DataLoader):
         self.device = device
@@ -31,15 +32,16 @@ class Predictor:
         else:
             print(f"Auto-detecting config next to: {os.path.dirname(model_path)}")
             config = load_config_from_model_path(model_path)
+
+        print(f"Config keys: {list(config.keys())}")
+        print(f"Model kwargs from config: {config.get('model_kwargs', {})}")
+        print(f"Output type: {config.get('output_type', 'not found')}")
+        print(f"Num classes: {config.get('num_classes', 'not found')}")
+
+        # Before model creation
+        print(f"Final model kwargs: {config.get('model_kwargs', {})}")
         
         self.eval_args = argparse.Namespace(**config)
-        print(f"\nLoaded configuration:")
-        print(f"  Model module: {self.eval_args.model_module}")
-        print(f"  Hidden dims: {self.eval_args.hidden_dims}")
-        print(f"  Latent dim: {self.eval_args.latent_dim}")
-        print(f"  Activation: {self.eval_args.activation}")
-        print(f"  Dropout rate: {self.eval_args.dropout_rate}")
-        print(f"  Job name: {self.eval_args.job_name}\n")
         
         sample_data = sample_loader.dataset[0]
         node_input_dim = sample_data.x.shape[1]
@@ -49,42 +51,117 @@ class Predictor:
         print(f"  Node input dim: {node_input_dim}")
         print(f"  Edge input dim: {edge_input_dim}\n")
         
+
         model_module = importlib.import_module(f"models.{self.eval_args.model_module}.{self.eval_args.model_module}")
         model_class = getattr(model_module, self.eval_args.model_module)
         
+        base_kwargs = config.get("model_kwargs", {})
         self.model = model_class(
             node_input_dim=node_input_dim,
             edge_input_dim=edge_input_dim,
-            hidden_dims=self.eval_args.hidden_dims,
-            latent_dim=self.eval_args.latent_dim,
-            activation=self.eval_args.activation,
-            dropout_rate=self.eval_args.dropout_rate,
+            output_type=config.get("output_type", "binary"),
+            num_classes=config.get("num_classes", 2),
+            **base_kwargs
         ).to(self.device)
+        print(f"Model architecture:")
+        print(self.model)
 
+        # Check if the state dict keys match
+        state_dict = torch.load(model_path, map_location=self.device)
+        model_keys = set(self.model.state_dict().keys())
+        saved_keys = set(state_dict.keys())
+        missing_keys = model_keys - saved_keys
+        unexpected_keys = saved_keys - model_keys
+
+        if missing_keys:
+            print(f"Missing keys in saved model: {missing_keys}")
+        if unexpected_keys:
+            print(f"Unexpected keys in saved model: {unexpected_keys}")
+            
+        print(f"State dict loaded successfully: {len(missing_keys) == 0 and len(unexpected_keys) == 0}")
         print(f"Loading model weights from: {model_path}")
         state_dict = torch.load(model_path, map_location=self.device)
         if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
-            self.model.load_state_dict(state_dict["model_state_dict"])
+            self.model.load_state_dict(state_dict["model_state_dict"], strict=False)
         else:
-            self.model.load_state_dict(state_dict)
+            self.model.load_state_dict(state_dict, strict=False)
         print("Model loaded successfully!")
 
         self.model.eval()
 
-    def run(self, dataloader: DataLoader, warmstart_path: str):
+    def run(self, dataloader: DataLoader, warmstart_path: str, graph_ids = None):
+        """
+        Args:
+            dataloader: DataLoader with graph samples
+            warmstart_path: Path to save warmstart pickle
+            graph_ids: List of graph IDs corresponding to dataloader samples
+        """
         warmstarts = {}
+        
+        # If graph_ids provided, use them; otherwise extract from dataset
+        if graph_ids is None:
+            if hasattr(dataloader.dataset, 'graph_ids'):
+                graph_ids = dataloader.dataset.graph_ids
+            else:
+                graph_ids = list(range(len(dataloader.dataset)))
+        
         sample_idx = 0
         with torch.no_grad():
-            for data in tqdm(dataloader, desc="Predicting switch scores", unit="batch", leave=False):
-                data = data.to(self.device)
-                output = self.model(data)
-                scores = output.get("switch_scores")
-                if scores is None:
-                    raise RuntimeError("Model output must contain 'switch_scores'")
-                scores = scores.detach().cpu().squeeze(-1).numpy()
-                warmstarts[sample_idx] = scores
-                sample_idx += 1
-
+            for batch in tqdm(dataloader, desc="Predicting switch scores", unit="batch", leave=False):
+                batch = batch.to(self.device)
+                output = self.model(batch)
+                
+                logits = output.get("switch_logits")
+                if logits is None:
+                    raise RuntimeError("Model output must contain 'switch_logits'")
+                
+                # Handle different tensor shapes
+                logits = logits.detach().cpu().numpy()
+                
+                # Debug: print shape information
+                print(f"Logits shape: {logits.shape}")
+                print(f"Batch size from dataloader: {batch.batch.max().item() + 1 if hasattr(batch, 'batch') else 1}")
+                
+                # For graph neural networks with batch processing
+                if hasattr(batch, 'batch'):  # PyG batched data
+                    # Get number of graphs in this batch
+                    batch_size = batch.batch.max().item() + 1
+                    
+                    # Get edge indices for each graph in the batch
+                    edge_to_graph = batch.batch[batch.edge_index[0]]  # Which graph each edge belongs to
+                    
+                    # Split logits by graph
+                    for graph_idx in range(batch_size):
+                        if sample_idx < len(graph_ids):
+                            # Get edges belonging to this graph
+                            graph_edge_mask = (edge_to_graph == graph_idx).cpu().numpy()
+                            graph_logits = logits[graph_edge_mask]
+                            
+                            # Handle shape - logits might be (num_edges, 1) or (num_edges,)
+                            if graph_logits.ndim > 1 and graph_logits.shape[-1] == 1:
+                                graph_logits = graph_logits.squeeze(-1)
+                            
+                            graph_id = graph_ids[sample_idx]
+                            warmstarts[graph_id] = graph_logits
+                            
+                            print(f"Graph {graph_id}: {len(graph_logits)} switch scores")
+                            sample_idx += 1
+                else:
+                    # Single graph case
+                    if sample_idx < len(graph_ids):
+                        # Handle shape - logits might be (num_edges, 1) or (num_edges,)
+                        if logits.ndim > 1 and logits.shape[-1] == 1:
+                            logits = logits.squeeze(-1)
+                        
+                        graph_id = graph_ids[sample_idx]
+                        warmstarts[graph_id] = logits
+                        
+                        print(f"Graph {graph_id}: {len(logits)} switch scores")
+                        sample_idx += 1
+        
+        print(f"Predicted switch scores for {len(warmstarts)} samples")
+        print(f"Warmstart keys: {list(warmstarts.keys())}")
+        
         os.makedirs(os.path.dirname(warmstart_path), exist_ok=True)
         with open(warmstart_path, "wb") as f:
             pickle.dump(warmstarts, f)
@@ -93,10 +170,35 @@ class Predictor:
 class WarmstartSOCP(SOCP_class):
     """Enhanced SOCP class with warmstart support"""
     
-    def __init__(self, *args, fixed_switches=None, float_warmstart=None, **kwargs):
-        self.fixed_switches = fixed_switches or {}  # switch_idx: desired_status
-        self.float_warmstart = float_warmstart  # array of float values for warmstart
-        super().__init__(*args, **kwargs)
+    def __init__(self, net, graph_id: str = "", *,
+                 logger=None,
+                 switch_penalty: float = 0.0001,
+                 slack_penalty: float = 0.1,
+                 voltage_slack_penalty: float = 0.1,
+                 load_shed_penalty: float = 100,
+                 toggles=None,
+                 debug_level=0,
+                 active_bus_mask=None,
+                 # New warmstart-specific parameters
+                 fixed_switches=None, 
+                 float_warmstart=None):
+        # Store warmstart data before calling parent
+        self.fixed_switches = fixed_switches or {}
+        self.float_warmstart = float_warmstart
+        
+        # Call parent constructor
+        super().__init__(
+            net=net,
+            graph_id=graph_id,
+            logger=logger,
+            switch_penalty=switch_penalty,
+            slack_penalty=slack_penalty,
+            voltage_slack_penalty=voltage_slack_penalty,
+            load_shed_penalty=load_shed_penalty,
+            toggles=toggles,
+            debug_level=debug_level,
+            active_bus_mask=active_bus_mask
+        )
     
     def initialize(self):
         """Override to handle fixed switches"""
@@ -107,7 +209,6 @@ class WarmstartSOCP(SOCP_class):
             print(f"Fixing {len(self.fixed_switches)} switches based on warmstart")
             for switch_idx, desired_status in self.fixed_switches.items():
                 if switch_idx < len(self.switch_df):
-                    # Set the switch to desired status and mark as non-controllable
                     self.switch_df.loc[switch_idx, 'closed'] = bool(desired_status)
                     print(f"Fixed switch {switch_idx} to {'ON' if desired_status else 'OFF'}")
     
@@ -115,7 +216,7 @@ class WarmstartSOCP(SOCP_class):
         """Override to apply warmstart and fix switches"""
         model = super().create_model()
         
-        # Fix switches that were marked as fixed
+        # Fix switches if using hard warmstart
         if self.fixed_switches:
             for switch_idx, desired_status in self.fixed_switches.items():
                 if switch_idx < len(self.switch_df):
@@ -148,7 +249,6 @@ class WarmstartSOCP(SOCP_class):
         # Apply float warmstart to binary variables
         warmstart_count = 0
         if self.toggles.get('all_lines_are_switches', False):
-            # Apply to line_status variables
             switch_idx = 0
             for l in m.lines:
                 if l in self.lines_with_sw and switch_idx < len(self.float_warmstart):
@@ -180,10 +280,9 @@ class WarmstartSOCP(SOCP_class):
         # Set solver options including warmstart
         opt.options.update({
             "Threads": 8, 
-            "TimeLimit": 300, 
-            "MIPGap": 1e-3,
+            "TimeLimit": 6000, 
+            "MIPGap": 1e-2,
             "NonConvex": 2,
-            "StartMethod": 1,  # Enable MIP start
         })
         opt.options.update(solver_kw)
         
@@ -208,6 +307,18 @@ class Optimizer:
         self.results_folder = results_folder
         self.warmstart_mode = warmstart_mode
         self.confidence_threshold = confidence_threshold
+        self.toggles = {
+            "include_voltage_drop_constraint": True,
+            "include_voltage_bounds_constraint": True,
+            "include_power_balance_constraint": True,
+            "include_radiality_constraints": True,
+            "use_spanning_tree_radiality": False,   
+            "use_root_flow": True,
+            "include_switch_penalty": True,
+            "include_cone_constraint": True,
+            "all_lines_are_switches": True,
+            "allow_load_shed": True,
+        }
         
         os.makedirs(self.results_folder, exist_ok=True)
 
@@ -215,35 +326,40 @@ class Optimizer:
         with open(warmstart_path, "rb") as f:
             self.warmstarts = pickle.load(f)
 
-        from load_data import load_pp_networks
-        pp_all = load_pp_networks(self.folder_name)
-        self.graph_ids = sorted(pp_all["mst"].keys())
 
-        if len(self.graph_ids) != len(self.warmstarts):
-            raise ValueError(
-                f"Number of warmstarts ({len(self.warmstarts)}) does not match number of networks ({len(self.graph_ids)})"
-            )
+        pp_all = load_pp_networks(self.folder_name)
+        
+        # Extract graph IDs from the mst networks
+        self.graph_ids = sorted(pp_all["mst"].keys())
+        
+        # Verify warmstart data matches
+        warmstart_ids = set(self.warmstarts.keys())
+        network_ids = set(self.graph_ids)
+        
+        if warmstart_ids != network_ids:
+            missing_in_warmstart = network_ids - warmstart_ids
+            extra_in_warmstart = warmstart_ids - network_ids
+            
+            if missing_in_warmstart:
+                print(f"Warning: Networks without warmstart data: {missing_in_warmstart}")
+            if extra_in_warmstart:
+                print(f"Warning: Warmstart data without networks: {extra_in_warmstart}")
+            
+            # Only process networks that have both data
+            self.graph_ids = sorted(list(network_ids & warmstart_ids))
+            print(f"Processing {len(self.graph_ids)} networks with matching warmstart data")
 
         self.pp_all = pp_all
 
     def _optimize_single(self, args):
         idx, mode = args
-        gid = self.graph_ids[idx]
+        gid = self.graph_ids[idx]  # This gets the graph ID string
 
         # Load original pandapower network
-        net = self.pp_all["mst"][gid].deepcopy()  # Important: make a copy
-        switch_scores = self.warmstarts[idx]
+        net = self.pp_all["mst"][gid].deepcopy() 
         
-        toggles = {
-            "include_voltage_drop_constraint": True,
-            "include_voltage_bounds_constraint": True,
-            "include_power_balance_constraint": True,
-            "include_radiality_constraints": True,
-            "use_root_flow": True,
-            "include_switch_penalty": True,
-            "allow_load_shed": False,
-            "include_cone_constraint": True,
-        }
+        # Use graph ID to get warmstart scores, not index
+        switch_scores = self.warmstarts[gid]  # Changed from self.warmstarts[idx]
 
         try:
             if mode == "soft": 
@@ -254,7 +370,7 @@ class Optimizer:
                 
                 optimizer = WarmstartSOCP(
                     net=net,
-                    toggles=toggles,
+                    toggles=self.toggles,
                     graph_id=gid
                 )
                 
@@ -262,7 +378,7 @@ class Optimizer:
                 # Float warmstart: provide float hints to solver
                 optimizer = WarmstartSOCP(
                     net=net,
-                    toggles=toggles,
+                    toggles=self.toggles,  # Fixed from toggles to self.toggles
                     graph_id=gid,
                     float_warmstart=switch_scores
                 )
@@ -279,7 +395,7 @@ class Optimizer:
                 
                 optimizer = WarmstartSOCP(
                     net=net,
-                    toggles=toggles,
+                    toggles=self.toggles,
                     graph_id=gid,
                     fixed_switches=fixed_switches
                 )
@@ -288,13 +404,13 @@ class Optimizer:
                 # No warmstart: use original network
                 optimizer = SOCP_class(
                     net=net,
-                    toggles=toggles,
+                    toggles=self.toggles,
                     graph_id=gid
                 )
 
             # Initialize and solve
             optimizer.initialize()
-            results = optimizer.solve(solver="gurobi", time_limit=300, mip_gap=1e-3)
+            results = optimizer.solve(solver="gurobi_persistent", TimeLimit=300, MIPGap=1e-3)
                 
             # Extract solution
             if optimizer.model and hasattr(optimizer.model, 'line_status'):
@@ -328,7 +444,6 @@ class Optimizer:
                 'error': str(e),
                 'warmstart_mode': mode
             }
-
     def run(self, num_workers: int = None):
         """Run optimization with warmstart support."""
         if num_workers is None:
@@ -363,10 +478,10 @@ class Optimizer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict-then-Optimize Pipeline")
     parser.add_argument("--config_path", type=str,
-                       default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\MLP\config_files\MLP------clear-monkey-40.yaml",
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\config_files\config-mlp.yaml",
                        help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                       default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\MLP\clear-monkey-40-Best.pt", 
+                       default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\None-Best.pt", 
                        help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str,
                        default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test"],
@@ -400,6 +515,9 @@ if __name__ == "__main__":
     from load_data import create_data_loaders
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pp_networks = load_pp_networks(args.folder_names[0])
+    graph_ids = sorted(pp_networks["mst"].keys())
+
     loaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
@@ -408,6 +526,12 @@ if __name__ == "__main__":
         batching_type="standard",
     )
     test_loader = loaders.get("test", None)
+    # Verify alignment
+    if len(test_loader.dataset) != len(graph_ids):
+        print(f"Warning: Dataset size ({len(test_loader.dataset)}) != number of graphs ({len(graph_ids)})")
+    
+    print(f"Test loader created with {len(test_loader.dataset)} samples")
+    print(f"Graph IDs: {graph_ids[:5]}..." if len(graph_ids) > 5 else f"Graph IDs: {graph_ids}")
 
     print(f"Test loader created with {len(test_loader.dataset)} samples")
 
@@ -434,11 +558,11 @@ if __name__ == "__main__":
             device=device,
             sample_loader=test_loader
         )
-        predictor.run(test_loader, str(full_warmstart_path))
+        predictor.run(test_loader, str(full_warmstart_path), graph_ids=graph_ids)
 
     if args.optimize:
         print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
-        
+
         optimizer = Optimizer(
             folder_name=args.folder_names[0],  
             warmstart_path=str(full_warmstart_path),
