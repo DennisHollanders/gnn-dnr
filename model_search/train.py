@@ -387,12 +387,30 @@ def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor,
     f1 = 2 * precision * recall / (precision + recall + eps)
     jaccard = tp / (tp + fp + fn + eps)
     dice = 2 * tp / (2 * tp + fp + fn + eps)
+    
+    # Add MCC calculation
+    mcc_numerator = (tp * tn) - (fp * fn)
+    mcc_denominator = torch.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    mcc = mcc_numerator / (mcc_denominator + eps)
+    
+    # Add balanced accuracy
+    sensitivity = recall  # TPR
+    specificity = tn / (tn + fp + eps)  # TNR
+    balanced_acc = (sensitivity + specificity) / 2
+    
+    # Add F1 for minority class (class 0)
+    f1_minority = 2 * tn / (2 * tn + fp + fn + eps)
 
     return {
         "accuracy": accuracy.item(),
         "precision": precision.item(),
         "recall": recall.item(),
         "f1": f1.item(),
+        "mcc": mcc.item(), 
+        "balanced_acc": balanced_acc.item(),  
+        "f1_minority": f1_minority.item(), 
+        "sensitivity": sensitivity.item(),
+        "specificity": specificity.item(),
         "jaccard": jaccard.item(),
         "dice": dice.item(),
         "tp": tp.item(), "fp": fp.item(),

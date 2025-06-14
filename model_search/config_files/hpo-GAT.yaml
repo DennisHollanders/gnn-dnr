@@ -12,28 +12,26 @@ folder_names:
 dataset_type: "default"
 batching_type: "dynamic"
 
-# Fixed parameters 
-fixed_params:
-  # Core GNN settings
-  gnn_type: "GAT"  
-  use_node_mlp: true
-  use_edge_mlp: true
-  
-  # Data settings
-  batch_size: 32
-  max_nodes: 1000
-  max_edges: 5000
-  train_ratio: 0.85
-  num_workers: 0
-  seed: 42
-  
-  # Training settings
-  epochs: 200
-  patience: 15
-  
-  # W&B settings
-  wandb_project: "GAT_HPO"
-  
+
+# Core GNN settings
+gnn_type: "GAT"  
+use_node_mlp: true
+use_edge_mlp: true
+
+# Data settings
+batch_size: 32
+max_nodes: 1000
+max_edges: 5000
+num_workers: 0
+seed: 42
+
+# Training settings
+epochs: 200
+patience: 15
+
+# W&B settings
+wandb_project: "GAT_HPO"
+
 # Search space - 26 dimensions
 search_space:
   # 1. Learning rate 

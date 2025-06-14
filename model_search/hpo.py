@@ -1,4 +1,5 @@
 import argparse
+from typing import final
 import yaml
 import torch
 import torch.optim as optim
@@ -38,7 +39,7 @@ class SimpleHPO:
         self.n_startup_trials = startup_trials
         self.pruner_startup = pruner_startup
         self.pruner_warmup = pruner_warmup
-        self.seed = 0 
+        self.seed = 2
         self.config_path = config_path
         self.study_name = study_name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,7 +100,7 @@ class SimpleHPO:
         
         # If file is empty, write headers
         if not self.csv_file.exists() or self.csv_file.stat().st_size == 0:
-            df.to_csv(self.csv_file, index=False, quoting=1)  # Quote all fields
+            df.to_csv(self.csv_file, index=False, quoting=1) 
         else:
             df.to_csv(self.csv_file, mode='a', header=False, index=False, quoting=1)
     
@@ -108,7 +109,7 @@ class SimpleHPO:
         config = self.config.copy()
         config.update(self.fixed_params)
         
-        # Phase 1: Suggest GAT heads FIRST (this affects all dimension constraints)
+        # Phase 1: Suggest GAT heads FIRST 
         if 'gat_heads' not in config and 'gat_heads' in self.search_space:
             spec = self.search_space['gat_heads']
             if spec['search_type'] == 'categorical':
@@ -119,7 +120,7 @@ class SimpleHPO:
         # Phase 2: Suggest GNN hidden dim with GAT constraint awareness
         if 'gnn_hidden_dim' not in config and 'gnn_hidden_dim' in self.search_space:
             spec = self.search_space['gnn_hidden_dim']
-            gat_heads = config.get('gat_heads', 1)  # Default to 1 if not GAT
+            gat_heads = config.get('gat_heads', 1) 
             
             if spec['search_type'] == 'categorical':
                 # Filter choices to be divisible by GAT heads
@@ -127,7 +128,7 @@ class SimpleHPO:
                 if not valid_choices:
                     # Fallback: find nearest multiples
                     valid_choices = [((dim // gat_heads) + 1) * gat_heads for dim in spec['choices']]
-                    valid_choices = list(set(valid_choices))  # Remove duplicates
+                    valid_choices = list(set(valid_choices)) 
                 config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', valid_choices)
             elif spec['search_type'] == 'int':
                 # Suggest in multiples of gat_heads
@@ -161,7 +162,7 @@ class SimpleHPO:
                         if gnn_hidden_dim >= heads and gnn_hidden_dim % heads == 0:
                             valid_choices.append(heads)
                     if not valid_choices:
-                        valid_choices = [1]  # Safe fallback
+                        valid_choices = [1]  
                 config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads', valid_choices)
             elif spec['search_type'] == 'int':
                 # Find valid divisors within range
@@ -170,7 +171,7 @@ class SimpleHPO:
                     if gnn_hidden_dim % heads == 0:
                         valid_heads.append(heads)
                 if not valid_heads:
-                    valid_heads = [1]  # Safe fallback
+                    valid_heads = [1]  
                 config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads_valid', valid_heads)
         
         # Phase 5: Process all other parameters
@@ -199,17 +200,33 @@ class SimpleHPO:
         return config
     
     def _suggest_dynamic_list(self, trial: optuna.Trial, param: str, spec: dict) -> list:
-        """Handle dynamic list parameters like hidden_dims"""
+        """Handle dynamic list parameters like hidden_dims - constrained to powers of 2"""
         n_layers = trial.suggest_int(f'n_{param}_layers', 
                                    spec.get('n_layers_min', 1), 
                                    spec.get('n_layers_max', 3))
         
+        # Generate valid powers of 2 within the specified range
+        dim_min = spec.get('dim_min', 32)
+        dim_max = spec.get('dim_max', 256)
+        
+        # Find powers of 2 within range
+        valid_powers = []
+        power = 1
+        while power <= dim_max:
+            if power >= dim_min:
+                valid_powers.append(power)
+            power *= 2
+        
+        # Fallback if no valid powers found
+        if not valid_powers:
+            valid_powers = [32, 64, 128, 256]  
+            valid_powers = [p for p in valid_powers if dim_min <= p <= dim_max]
+            if not valid_powers:
+                valid_powers = [dim_min] 
+        
         dims = []
         for i in range(n_layers):
-            dim = trial.suggest_int(f'{param}_{i}', 
-                                  spec.get('dim_min', 32), 
-                                  spec.get('dim_max', 256), 
-                                  step=spec.get('dim_step', 32))
+            dim = trial.suggest_categorical(f'{param}_{i}', valid_powers)
             dims.append(dim)
         
         return dims
@@ -233,23 +250,22 @@ class SimpleHPO:
             switch_heads = p.get('switch_attention_heads')
             if gnn_hidden_dim is not None and switch_heads is not None:
                 cons.append(float(gnn_hidden_dim % switch_heads))
-                #cons.append(float(p['hidden_dim'] % p['switch_attention_heads']))
         
         # Constraint 3: At least one MLP must be enabled
         use_node_mlp = p.get('use_node_mlp', True)
         use_edge_mlp = p.get('use_edge_mlp', True)
         if not use_node_mlp and not use_edge_mlp:
-            cons.append(1.0)  # Violation
+            cons.append(1.0)  
         else:
-            cons.append(0.0)  # Satisfied
+            cons.append(0.0) 
         
         # Constraint 4: PhyR requires k_ratio
         use_phyr = p.get('use_phyr', False)
         phyr_k_ratio = p.get('phyr_k_ratio')
         if use_phyr and phyr_k_ratio is None:
-            cons.append(1.0)  # Violation
+            cons.append(1.0)  
         else:
-            cons.append(0.0)  # Satisfied
+            cons.append(0.0)  
         
         return tuple(cons)
     
@@ -339,7 +355,7 @@ class SimpleHPO:
         
         # Constraint 13: Set num_classes based on output_type
         if output_type == 'multiclass':
-            config['num_classes'] = 2  # Fixed to 2 classes as requested
+            config['num_classes'] = 2  
         elif output_type == 'binary':
             config['num_classes'] = 2
         else:  # regression
@@ -348,7 +364,7 @@ class SimpleHPO:
         # Constraint 14: Memory limit (batch_size × max_nodes)
         batch_size = config.get('batch_size', 32)
         max_nodes = config.get('max_nodes', 1000)
-        memory_limit = 100000  # Adjust based on your GPU memory
+        memory_limit = 100000  
         
         if batch_size * max_nodes > memory_limit:
             # Reduce batch size to fit memory
@@ -403,11 +419,11 @@ class SimpleHPO:
         if self.wandb_run:
             trial_run = wandb.init(
                 project=self.config.get('wandb_project', 'HPO'),
-                group=self.experiment_id,  # Group all trials together
+                group=self.experiment_id, 
                 name=f"trial_{trial.number:03d}",
                 job_type="hpo_trial",
                 tags=[self.study_name, "hpo_trial"],
-                config=None,  # Will set later
+                config=None, 
                 reinit=True
             )
         
@@ -432,7 +448,7 @@ class SimpleHPO:
                 if trial_run:
                     wandb.log({"status": "failed_setup"})
                     wandb.finish()
-                return 1.0
+                return -1.0 
             
             # Log configuration validity and model size
             model_params = sum(p.numel() for p in model.parameters())
@@ -443,17 +459,13 @@ class SimpleHPO:
                                  lr=config['learning_rate'], 
                                  weight_decay=config['weight_decay'])
             
-            best_f1 = 0.0
+            starting_val_loss = float('inf')
             best_train_loss = float('inf')
             best_val_loss = float('inf')
-            starting_val_loss = float('inf')
-            final_train_loss = float('inf')
-            final_val_loss = float('inf')
-            final_precision = 0.0
-            final_recall = 0.0
-            final_accuracy = 0.0
-            
-            
+            best_minority_f1 = 0.0
+            best_mcc = -1.0 
+            best_balanced_accuracy = 0.0
+           
             patience = 0
             max_epochs = min(config.get('epochs', 100), 80)
             max_patience = config.get('patience', 25)
@@ -464,62 +476,52 @@ class SimpleHPO:
                 
                 if epoch == 0: 
                     starting_val_loss = val_loss
-                # Extract metrics
-                current_f1 = val_dict.get('test_f1', 0.0)
-                current_precision = val_dict.get('test_precision', 0.0)
-                current_recall = val_dict.get('test_recall', 0.0)
-                current_accuracy = val_dict.get('test_accuracy', 0.0)
+                    starting_train_loss = train_loss
+
+                # Extract metrics 
+                current_f1_minority = val_dict.get('test_f1_minority', 0.0)
+                current_mcc = val_dict.get('test_mcc', 0.0)
+                current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
                 
-                # Fallback F1 calculation if not available
-                if current_f1 == 0.0 and current_precision + current_recall > 0:
-                    current_f1 = 2 * current_precision * current_recall / (current_precision + current_recall + 1e-8)
-                
-                # Track best and final metrics
-                if current_f1 > best_f1:
-                    best_f1 = current_f1
+                if current_mcc > best_mcc:
+                    best_mcc = current_mcc
+                    best_minority_f1 = current_f1_minority
+                    best_balanced_accuracy = current_balanced_accuracy
                     best_train_loss = train_loss
                     best_val_loss = val_loss
                     patience = 0
                 else:
                     patience += 1
-                
-                # Always update final metrics
-                final_train_loss = train_loss
-                final_val_loss = val_loss
-                final_precision = current_precision
-                final_recall = current_recall
-                final_accuracy = current_accuracy
-                
-                # Log to W&B every epoch
+    
                 if trial_run:
                     wandb.log({
                         "epoch": epoch,
                         "train_loss": train_loss,
                         "val_loss": val_loss,
-                        "f1_score": current_f1,
-                        "precision": current_precision,
-                        "recall": current_recall,
-                        "accuracy": current_accuracy,
-                        "best_f1": best_f1,
+                        "val_f1_minority": current_f1_minority,
+                        "val_mcc": current_mcc,
+                        "val_balanced_accuracy": current_balanced_accuracy,
                         "patience": patience
                     })
                 
-                # Pruning and early stopping
-                trial.report(1 - current_f1, epoch)
+    
+                trial.report(current_mcc, epoch)
                 if trial.should_prune() or patience >= max_patience:
                     break
-            
-            # Comprehensive metrics for CSV and Optuna
+
             metrics = {
                 "starting_val_loss": starting_val_loss,
-                'best_f1_score': best_f1,
+                "starting_train_loss": starting_train_loss,
+                'best_mcc': best_mcc,  
                 'best_train_loss': best_train_loss,
                 'best_val_loss': best_val_loss,
-                'final_train_loss': final_train_loss,
-                'final_val_loss': final_val_loss,
-                'final_precision': final_precision,
-                'final_recall': final_recall,
-                'final_accuracy': final_accuracy,
+                "best_f1_minority": best_minority_f1,
+                "best_balanced_accuracy": best_balanced_accuracy,
+                "final_train_loss": train_loss,
+                "final_val_loss" : val_loss,
+                "final_f1_minority" : current_f1_minority,
+                "final_mcc" : current_mcc,
+                "final_balanced_accuracy" : current_balanced_accuracy,
                 'final_epoch': epoch,
                 'converged': patience < max_patience,
                 'model_parameters': model_params,
@@ -530,32 +532,32 @@ class SimpleHPO:
             # Store in Optuna trial
             for key, value in metrics.items():
                 trial.set_user_attr(key, value)
-            
-            # Log final metrics to W&B
+
             if trial_run:
                 wandb.log(metrics)
-                wandb.log({"trial_score": 1 - best_f1})  # The objective value
+                wandb.log({"trial_score": best_mcc})  
                 wandb.finish()
-            
-            # Log to CSV
+
             self._log_trial_to_csv(trial.number, config, metrics)
+            logger.info(f"Trial {trial.number}: MCC={best_mcc:.4f}, Val_Loss={best_val_loss:.4f}, Epoch={epoch}, Params={model_params:,}")
             
-            logger.info(f"Trial {trial.number}: F1={best_f1:.4f}, Val_Loss={best_val_loss:.4f}, Epoch={epoch}, Params={model_params:,}")
-            
-            return 1 - best_f1  # Minimize
+            return best_mcc 
             
         except optuna.TrialPruned:
             # Handle pruned trials properly
             pruned_metrics = {
                 "starting_val_loss": float('inf'),
-                'best_f1_score': 0.0,
+                "starting_train_loss": float('inf'),
+                'best_mcc': 0.0,  
+                "best_f1_minority": 0.0,
+                "best_balanced_accuracy": 0.0,
                 'best_train_loss': float('inf'),
                 'best_val_loss': float('inf'),
                 'final_train_loss': float('inf'),
                 'final_val_loss': float('inf'),
-                'final_precision': 0.0,
-                'final_recall': 0.0,
-                'final_accuracy': 0.0,
+                'final_f1_minority': 0.0,
+                'final_mcc': 0.0,  
+                'final_balanced_accuracy': 0.0,
                 'final_epoch': 0,
                 'converged': False,
                 'model_parameters': 0,
@@ -573,25 +575,27 @@ class SimpleHPO:
             
         except Exception as e:
             logger.error(f"Trial {trial.number} failed: {e}")
-            
-            # Log failure
             failure_metrics = {
                 "starting_val_loss": float('inf'),
-                'best_f1_score': 0.0,
+                "starting_train_loss": float('inf'),	
+                'best_mcc': 0.0, 
+                "best_f1_minority": 0.0,
+                "best_balanced_accuracy": 0.0,
                 'best_train_loss': float('inf'),
                 'best_val_loss': float('inf'),
                 'final_train_loss': float('inf'),
                 'final_val_loss': float('inf'),
-                'final_precision': 0.0,
-                'final_recall': 0.0,
-                'final_accuracy': 0.0,
+                'final_f1_minority': 0.0,
+                'final_mcc': 0.0,  
+                'final_balanced_accuracy': 0.0,
                 'final_epoch': 0,
                 'converged': False,
                 'model_parameters': 0,
-                'status': 'failed',
-                'config_valid': False,
+                'status': 'failed', 
+                'config_valid': True, 
                 'error_message': str(e)
             }
+
             
             if trial_run:
                 wandb.log(failure_metrics)
@@ -599,13 +603,13 @@ class SimpleHPO:
             
             self._log_trial_to_csv(trial.number, self.suggest_params(trial), failure_metrics)
             
-            return 1.0
+            return -1.0
+    
     def _load_data_once(self):
         """Load data once during initialization to avoid repeated loading"""
         try:
             logger.info("Loading data once for all trials...")
-            
-            # Create data loaders using config
+
             dataloaders = create_data_loaders(
                 dataset_names=self.config['dataset_names'],
                 folder_names=self.config['folder_names'],
@@ -625,7 +629,6 @@ class SimpleHPO:
             if not self.train_loader or not self.val_loader:
                 raise ValueError("Failed to create data loaders")
             
-            # Store a sample for getting dimensions
             self.data_sample = self.train_loader.dataset[0]
             
             logger.info(f"Data loaded successfully: {len(self.train_loader)} train batches, {len(self.val_loader)} val batches")
@@ -633,10 +636,10 @@ class SimpleHPO:
         except Exception as e:
             logger.error(f"Failed to load data: {e}")
             raise
+    
     def _create_dynamic_data_loader(self, batch_size: int):
         """Create new data loaders with different batch size if needed"""
         if batch_size == self.config['batch_size']:
-            # Use pre-loaded loaders
             return self.train_loader, self.val_loader
         
         # Create new loaders with different batch size
@@ -644,7 +647,7 @@ class SimpleHPO:
             dataset_names=self.config['dataset_names'],
             folder_names=self.config['folder_names'],
             dataset_type=self.config.get('dataset_type', 'default'),
-            batch_size=batch_size,  # Use trial-specific batch size
+            batch_size=batch_size,  
             max_nodes=self.config.get('max_nodes', 1000),
             max_edges=self.config.get('max_edges', 5000),
             train_ratio=self.config.get('train_ratio', 0.85),
@@ -662,19 +665,18 @@ class SimpleHPO:
             model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
             model_class = getattr(model_module, config['model_module'])
             
-            # Get data loaders (either pre-loaded or create new ones for different batch size)
+            # Get data loaders 
             train_loader, val_loader = self._create_dynamic_data_loader(config['batch_size'])
             
             if not train_loader or not val_loader:
                 return None, None, None, None
             
-            # Get dimensions from pre-loaded sample
+
             model_kwargs = {
                 'node_input_dim': self.data_sample.x.shape[1],
                 'edge_input_dim': self.data_sample.edge_attr.shape[1],
             }
-            
-            # Add relevant parameters
+ 
             for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
                        'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
                        'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
@@ -686,8 +688,7 @@ class SimpleHPO:
                     model_kwargs[key] = config[key]
             
             model = model_class(**model_kwargs).to(self.device)
-            
-            # Create criterion
+
             criterion_name = config.get('criterion_name', 'MSELoss')
             if hasattr(model_module, criterion_name):
                 criterion = getattr(model_module, criterion_name)()
@@ -702,51 +703,46 @@ class SimpleHPO:
     
     def create_parallel_plot(self, study: optuna.Study) -> go.Figure:
         """Create parallel coordinates plot with robust CSV handling"""
-        # Try to read from CSV first, fallback to Optuna data
         try:
             if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
                 try:
                     df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
-                    df = df[df['status'] == 'completed'].sort_values('best_f1_score', ascending=False)
+                    df = df[df['status'] == 'completed'].sort_values('best_mcc', ascending=False)  # Changed: Sort by MCC
                     
                     if len(df) >= 5:
-                        # Use CSV data
                         return self._create_plot_from_dataframe(df)
                 except Exception as e:
                     logger.warning(f"Could not read CSV for plotting: {e}")
         except Exception:
             pass
-        
-        # Fallback to Optuna data
+ 
         completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         
         if len(completed_trials) < 5:
             return None
         
-        # Build data from Optuna trials
+
         data = []
         for trial in completed_trials:
             row = trial.params.copy()
-            # Handle list parameters properly
             for key, value in row.items():
                 if isinstance(value, list):
                     row[key] = str(value)
-            row['F1_Score'] = trial.user_attrs.get('best_f1_score', 1 - trial.value)
+            row['best_mcc'] = trial.user_attrs.get('best_mcc', trial.value)
             row['Trial'] = trial.number
             data.append(row)
         
-        df = pd.DataFrame(data).sort_values('F1_Score', ascending=False)
-        return self._create_plot_from_dataframe(df, f1_col='F1_Score')
+        df = pd.DataFrame(data).sort_values('best_mcc', ascending=False)
+        return self._create_plot_from_dataframe(df, eval_metric='best_mcc') 
     
-    def _create_plot_from_dataframe(self, df: pd.DataFrame, f1_col: str = 'best_f1_score') -> go.Figure:
+    def _create_plot_from_dataframe(self, df: pd.DataFrame, eval_metric: str = 'best_mcc') -> go.Figure:
         """Create parallel coordinates plot from DataFrame"""
-        # Create dimensions - start with F1 score
+
         dimensions = [
-            dict(label="F1 Score", values=df[f1_col], 
-                 range=[df[f1_col].min(), df[f1_col].max()])
+            dict(label=eval_metric, values=df[eval_metric], 
+                 range=[df[eval_metric].min(), df[eval_metric].max()])
         ]
         
-        # Add other metrics if available
         for metric in ['best_val_loss', 'final_epoch']:
             if metric in df.columns and df[metric].notna().any():
                 dimensions.append(dict(
@@ -755,20 +751,20 @@ class SimpleHPO:
                     range=[df[metric].min(), df[metric].max()]
                 ))
         
-        # Add hyperparameters (exclude metadata columns)
+        # Add hyperparameters 
         exclude_cols = {'trial_number', 'timestamp', 'best_f1_score', 'best_train_loss', 
                        'best_val_loss', 'final_train_loss', 'final_val_loss', 'final_precision',
                        'final_recall', 'final_accuracy', 'final_epoch', 'converged', "starting_val_loss",
-                       'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score'}
+                       'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score',
+                       'best_mcc', 'final_mcc', 'best_f1_minority', 'final_f1_minority', 
+                       'best_balanced_accuracy', 'final_balanced_accuracy'}
         
         param_cols = [col for col in df.columns if col not in exclude_cols]
         
         for col in param_cols:
             if df[col].dtype in ['object', 'string'] or col.startswith('n_') or 'hidden_dims' in col:
-                # Categorical or list parameters
                 unique_vals = df[col].unique()
-                if len(unique_vals) > 1:  # Only include if there's variation
-                    # Handle string representations of lists
+                if len(unique_vals) > 1: 
                     processed_vals = []
                     for val in df[col]:
                         if isinstance(val, str) and ('[' in val or 'True' in val or 'False' in val):
@@ -787,17 +783,17 @@ class SimpleHPO:
                     ))
             else:
                 # Numerical parameter
-                if df[col].nunique() > 1:  # Only include if there's variation
+                if df[col].nunique() > 1:  
                     dimensions.append(dict(
                         label=col,
                         values=df[col],
                         range=[df[col].min(), df[col].max()]
                     ))
         
-        # Create plot
+
         fig = go.Figure(data=go.Parcoords(
-            line=dict(color=df[f1_col], colorscale='Viridis', showscale=True,
-                     colorbar=dict(title="F1 Score")),
+            line=dict(color=df[eval_metric], colorscale='Viridis', showscale=True,
+                     colorbar=dict(title="MCC Score")), 
             dimensions=dimensions
         ))
         
@@ -811,8 +807,7 @@ class SimpleHPO:
     
     def run(self, n_trials: int = 100, use_wandb: bool = False) -> optuna.Study:
         """Run optimization with experiment-level W&B tracking"""
-        
-        # Initialize experiment-level W&B run
+
         if use_wandb:
             self.wandb_run = wandb.init(
                 project=self.config.get('wandb_project', 'HPO'),
@@ -834,14 +829,13 @@ class SimpleHPO:
         logger.info(f"Results directory: {self.results_dir}")
         logger.info(f"CSV tracking: {self.csv_file}")
         
-        # Create study
         sampler = optuna.samplers.TPESampler(
             seed=self.seed,
             n_startup_trials=self.n_startup_trials,
             constraints_func=self._optuna_constraints,
         )
         study = optuna.create_study(
-            direction= "minimize",
+            direction="maximize", 
             pruner=optuna.pruners.MedianPruner(
                 n_startup_trials=self.pruner_startup,
                 n_warmup_steps=self.pruner_warmup,
@@ -849,9 +843,7 @@ class SimpleHPO:
             sampler=sampler,
         )
         
-        # Add callback for experiment-level logging
         def experiment_callback(study, trial):
-            # Only log if we have an active W&B run and trial completed successfully
             if (trial.state == optuna.trial.TrialState.COMPLETE and 
                 self.wandb_run is not None and 
                 not self.wandb_run._backend and  
@@ -860,39 +852,34 @@ class SimpleHPO:
                 try:
                     completed_trials = len([t for t in study.trials 
                                         if t.state == optuna.trial.TrialState.COMPLETE])
-                    best_f1 = study.best_value if study.best_value < 1 else 0
-                    
-                    # Log experiment-level metrics
+                    best_mcc = study.best_value if study.best_value > -1 else -1  
+ 
                     wandb.log({
                         "experiment/completed_trials": completed_trials,
-                        "experiment/best_f1_so_far": best_f1,
+                        "experiment/best_mcc_so_far": best_mcc,  
                         "experiment/trial_number": trial.number,
-                        "experiment/current_trial_f1": trial.user_attrs.get('best_f1_score', 0),
+                        "experiment/current_trial_mcc": trial.user_attrs.get('best_mcc', -1),  
                     })
                 except Exception as e:
                     logger.warning(f"Failed to log to W&B in callback: {e}")
         
         # Run optimization
         study.optimize(self.objective, n_trials=n_trials, callbacks=[experiment_callback])
-        
-        # Final experiment summary
+     
         completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         if self.wandb_run and completed:
             try:
                 # Log final experiment summary
-                all_f1s = [t.user_attrs.get('best_f1_score', 0) for t in completed]
+                all_mccs = [t.user_attrs.get('best_mcc', -1) for t in completed]  
                 wandb.log({
-                    "experiment/final_best_f1": max(all_f1s),
-                    "experiment/mean_f1": np.mean(all_f1s),
-                    "experiment/std_f1": np.std(all_f1s),
+                    "experiment/final_best_mcc": max(all_mccs),  
+                    "experiment/mean_mcc": np.mean(all_mccs),  
+                    "experiment/std_mcc": np.std(all_mccs), 
                     "experiment/total_completed": len(completed),
                     "experiment/success_rate": len(completed) / len(study.trials)
                 })
             except Exception as e:
                 logger.warning(f"Failed to log final summary to W&B: {e}")
-    
-        
-        # Save results
         self._save_results(study)
     
         
@@ -912,46 +899,41 @@ class SimpleHPO:
             logger.error("No completed trials!")
             return
         
-        # Best results - use Optuna data as fallback if CSV fails
-        best_f1_from_optuna = 1 - study.best_value if study.best_value < 1 else 0
+        best_mcc = study.best_value if study.best_value > -1 else -1  
         best_trial_from_optuna = study.best_trial.number
-        
-        # Try to read CSV, fallback to Optuna data if it fails
+
         try:
             if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
-                # Try reading with different options to handle parsing errors
                 try:
                     df = pd.read_csv(self.csv_file, quoting=1)
                 except:
-                    # If that fails, try with different settings
                     try:
                         df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
                     except:
-                        # Last resort: read without quotes
                         df = pd.read_csv(self.csv_file, on_bad_lines='skip')
                 
                 completed_df = df[df['status'] == 'completed']
                 if len(completed_df) > 0:
-                    best_row = completed_df.loc[completed_df['best_f1_score'].idxmax()]
-                    best_f1 = best_row['best_f1_score']
+                    best_row = completed_df.loc[completed_df['best_mcc'].idxmax()]
+                    best_mcc_from_csv = best_row['best_mcc'] 
                     best_trial_num = best_row['trial_number']
                 else:
-                    best_f1 = best_f1_from_optuna
+                    best_mcc_from_csv = best_mcc
                     best_trial_num = best_trial_from_optuna
             else:
-                best_f1 = best_f1_from_optuna
+                best_mcc_from_csv = best_mcc
                 best_trial_num = best_trial_from_optuna
         except Exception as e:
             logger.warning(f"Could not read CSV file: {e}. Using Optuna data.")
-            best_f1 = best_f1_from_optuna
+            best_mcc_from_csv = best_mcc
             best_trial_num = best_trial_from_optuna
         
-        # Save best config
+
         best_config = self.config.copy()
         best_config.update(self.fixed_params)
         best_config.update(study.best_params)
         best_config['_hpo_metadata'] = {
-            'best_f1_score': best_f1,
+            'best_mcc': best_mcc,  
             'best_trial': best_trial_num,
             'total_trials': len(study.trials),
             'completed_trials': len(completed),
@@ -962,36 +944,32 @@ class SimpleHPO:
         config_file = self.results_dir / "best_config.yaml"
         with open(config_file, 'w') as f:
             yaml.dump(best_config, f)
-        
-        # Save parallel coordinates plot  
+
         fig = self.create_parallel_plot(study)
         if fig:
             plot_file = self.results_dir / "parallel_coordinates.html"
             fig.write_html(plot_file)
             logger.info(f"Interactive plot saved: {plot_file}")
-        
-        # Save study
+
         with open(self.results_dir / "study.pkl", 'wb') as f:
             pickle.dump(study, f)
-        
-        # Print summary
+       
         logger.info(f"\nHPO Experiment Complete!")
         logger.info(f"Experiment ID: {self.experiment_id}")
-        logger.info(f"Best F1 Score: {best_f1:.4f} (Trial #{best_trial_num})")
+        logger.info(f"Best MCC Score: {best_mcc:.4f} (Trial #{best_trial_num})")  
         logger.info(f"Completed Trials: {len(completed)}/{len(study.trials)}")
         logger.info(f"Results saved to: {self.results_dir}")
         logger.info(f"CSV data: {self.csv_file}")
         logger.info(f"Best config: {config_file}")
         if fig:
             logger.info(f"Interactive plot: {plot_file}")
-        
-        # Show top 5 results from Optuna if CSV fails
+
         try:
             if self.csv_file.exists():
                 df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
                 completed_df = df[df['status'] == 'completed']
                 if len(completed_df) > 0:
-                    top_5 = completed_df.nlargest(5, 'best_f1_score')[['trial_number', 'best_f1_score',"starting_val_loss", 'best_val_loss', 'final_epoch']]
+                    top_5 = completed_df.nlargest(5, 'best_mcc')[['trial_number', 'best_mcc', "starting_val_loss", 'best_val_loss', 'final_epoch']]
                     logger.info(f"\nTop 5 Trials from CSV:")
                     logger.info(top_5.to_string(index=False))
                 else:
@@ -1000,15 +978,14 @@ class SimpleHPO:
                 raise FileNotFoundError("CSV file not found")
         except Exception as e:
             logger.warning(f"Could not show top trials from CSV: {e}")
-            # Show top 5 from Optuna data instead
             logger.info(f"\nTop 5 Trials from Optuna:")
             completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            top_trials = sorted(completed_trials, key=lambda t: t.user_attrs.get('best_f1_score', 1-t.value), reverse=True)[:5]
+            top_trials = sorted(completed_trials, key=lambda t: t.user_attrs.get('best_mcc', t.value), reverse=True)[:5]
             for i, trial in enumerate(top_trials):
-                f1 = trial.user_attrs.get('best_f1_score', 1-trial.value)
+                mcc = trial.user_attrs.get('best_mcc', trial.value)  
                 val_loss = trial.user_attrs.get('best_val_loss', 'N/A')
                 epoch = trial.user_attrs.get('final_epoch', 'N/A')
-                logger.info(f"  Trial {trial.number}: F1={f1:.4f}, Val_Loss={val_loss}, Epoch={epoch}")
+                logger.info(f"  Trial {trial.number}: MCC={mcc:.4f}, Val_Loss={val_loss}, Epoch={epoch}")  
 
 
 def main():

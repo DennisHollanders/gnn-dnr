@@ -1,5 +1,14 @@
-description: "Debug Config 1 - MLP Switch Head Case"
-job_name: "debug_mlp_switch_head"
+description: "HPO Best Trial Config - GCN with WeightedBCELoss"
+job_name: "hpo_best_trial_gcn"
+
+# HPO Metadata
+_hpo_metadata:
+  best_f1_score: 0.9367  
+  best_trial: 5  
+  completed_trials: 80
+  csv_file: "hpo_results.csv"
+  experiment_id: "hpo_20250614_012009"
+  total_trials: 80
 
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
@@ -9,73 +18,69 @@ folder_names:
   - "data\\split_datasets\\test"
 
 # Model Configuration
-model_module: "AdvancedMLP"  
+model_module: "AdvancedMLP"
 model_kwargs:
-  # GAT Configuration (from failed params)
-  gnn_type: "GAT"  
-  gnn_layers: 6
-  gnn_hidden_dim: 96  # Should be divisible by gat_heads (96 % 2 = 0 ✓)
-  gat_heads: 2
-  gat_dropout: 0.12541721858747987
-  gat_v2: true
-  gat_edge_dim: 64
+  # GCN Configuration
+  gnn_type: "GCN"
+  gnn_layers: 5
+  gnn_hidden_dim: 113  # gnn_hidden_dim_multiple * 9 (assuming base 9)
   
-  # MLP Configuration (from failed params - converted from dynamic list)
+  # MLP Configuration
   use_node_mlp: true
   use_edge_mlp: true
-  node_hidden_dims: [480, 32, 352, 256]  # 4 layers as specified
-  edge_hidden_dims: [32, 416]  # 2 layers as specified
+  node_hidden_dims: [352, 256]  # 2 layers as specified
+  edge_hidden_dims: [192, 352]  # 2 layers as specified
   
-  # General Configuration (from failed params)
-  activation: "elu"
-  dropout_rate: 0.48206043808097504
-  use_batch_norm: false
+  # General Configuration
+  activation: "gelu"
+  dropout_rate: 0.060691248558227884
+  use_batch_norm: true
   use_residual: false
   use_skip_connections: true
-  pooling: "mean"
+  pooling: "max"
   
-  # Switch Head Configuration (MLP type - no attention heads needed)
+  # Switch Head Configuration
   switch_head_type: "mlp"
-  switch_head_layers: 4
-  # Note: switch_attention_heads should be ignored for MLP type
+  switch_head_layers: 2
   
-  # Physics Configuration (from failed params)
+  # Physics Configuration
   use_gated_mp: true
-  use_phyr: false  # phyr_k_ratio should be ignored
+  use_phyr: true
+  phyr_k_ratio: 0.18569452544519777
   
   # Loss and normalization
-  loss_scaling_strategy: "adaptive_magnitude"
-  normalization_type: "per_node"
+  loss_scaling_strategy: "fixed"
+  normalization_type: "injection_scale"
 
-# Training Configuration (from failed params)
-learning_rate: 0.005589299134044199
-weight_decay: 1.1124827202322426e-05
-batch_size: 32
-epochs: 10  # Reduced for debugging
-patience: 5
+# Training Configuration
+learning_rate: 0.008910671508622504
+weight_decay: 1.8285523498725977e-06
+batch_size: 128
+epochs: 100
+patience: 15
 
-# Physics Loss Weights (from failed params)
-lambda_phy_loss: 0.029875900764771497
-lambda_connectivity: 0.005255539725273635
-lambda_radiality: 0.13226810449268056
-lambda_mask: 0.01
+# Physics Loss Weights
+lambda_phy_loss: 0.519874529197544
+lambda_connectivity: 0.477593421142367
+lambda_radiality: 0.009166025938972713
+lambda_mask: 0.011670683878208651
 
 # Output configuration
-output_type: "binary"  # Since using FocalLoss
+output_type: "binary"
 num_classes: 2
 
 # Data Loading Configuration
 dataset_type: "default"
 batching_type: "dynamic"
-max_nodes: 1000
+max_nodes: 5000
 max_edges: 5000
 train_ratio: 0.85
 seed: 42
-num_workers: 0  # For debugging
+num_workers: 0
 
-# Criterion (from failed params)
-criterion_name: "FocalLoss"
+# Criterion
+criterion_name: "WeightedBCELoss"
 
 # Evaluation
-evaluate_every_x_epoch: 2
-wandb: false  # Disable for debugging
+wandb_project: "GCN_HPO"
+wandb: false
