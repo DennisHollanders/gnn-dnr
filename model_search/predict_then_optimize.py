@@ -9,9 +9,10 @@ import importlib
 from pathlib import Path
 from tqdm import tqdm
 import argparse
+import logging
 import pandas as pd
 import json
-
+import numpy as np
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -22,6 +23,7 @@ from model_search.evaluation.evaluation import load_config_from_model_path
 from load_data import load_pp_networks
 
 from model_search.models.AdvancedMLP.AdvancedMLP import PhysicsInformedRounding
+from data_generation.define_ground_truth import is_radial_and_connected
 
 def collapse_switches_to_one_per_line(net):
     """
@@ -318,7 +320,6 @@ class WarmstartSOCP(SOCP_class):
     """Enhanced SOCP class with warmstart support"""
     
     def __init__(self, net, graph_id: str = "", *,
-                 logger=None,
                  switch_penalty: float = 0.0001,
                  slack_penalty: float = 0.1,
                  voltage_slack_penalty: float = 0.1,
@@ -334,7 +335,6 @@ class WarmstartSOCP(SOCP_class):
         super().__init__(
             net=net,
             graph_id=graph_id,
-            logger=logger,
             switch_penalty=switch_penalty,
             slack_penalty=slack_penalty,
             voltage_slack_penalty=voltage_slack_penalty,
@@ -397,7 +397,7 @@ class WarmstartSOCP(SOCP_class):
                 if l in self.lines_with_sw and switch_idx < len(self.float_warmstart):
                     float_value = max(0.0, min(1.0, float(self.float_warmstart[switch_idx])))
                     m.line_status[l].set_value(float_value)
-                    self.logger.debug(f"Float warmstart: line {l} = {float_value:.3f}")
+                    print(f"Float warmstart: line {l} = {float_value:.3f}")
                     switch_idx += 1
                     warmstart_count += 1
         else:
@@ -408,7 +408,7 @@ class WarmstartSOCP(SOCP_class):
                     if switch_idx < len(self.float_warmstart):
                         float_value = max(0.0, min(1.0, float(self.float_warmstart[switch_idx])))
                         m.switch_status[s].set_value(float_value)
-                        self.logger.debug(f"Float warmstart: switch {s} = {float_value:.3f}")
+                        print(f"Float warmstart: switch {s} = {float_value:.3f}")
                         switch_idx += 1
                         warmstart_count += 1
         
@@ -433,7 +433,7 @@ class WarmstartSOCP(SOCP_class):
         self.solve_time = time.time() - start
         
         obj_val = pyo_val(self.model.objective)
-        self.logger.info("Solved with float warmstart in %.2fs (obj = %.3f)", self.solve_time, obj_val)
+        print("Solved with float warmstart in %.2fs (obj = %.3f)", self.solve_time, obj_val)
         
         return self.solver_results
 
@@ -523,20 +523,30 @@ class ExplicitSaver:
         filepath = folder / f"{graph_id}.json"
         pp.to_json(net, str(filepath))
     
-    def add_csv_entry(self, graph_id: str, ground_truth: list, initial_state: list, 
-                     gnn_prediction: list, warmstart_config: list, final_optima: list):
-        """Add entry to CSV data with length validation"""
+    def add_csv_entry(self, graph_id: str,ground_truth: list,initial_state: list,gnn_probs: list,gnn_prediction: list,warmstart_config: list,final_optima: list,
+                     solve_time: float,objective: float,radial: bool,connected: bool,pf_converged: bool,
+                     switches_changed: int,gt_loss: float,pred_loss: float):              # predicted network loss
         
         # Find the minimum length to ensure consistency
         lengths = [len(arr) for arr in [ground_truth, initial_state, gnn_prediction, warmstart_config, final_optima]]
-
         self.csv_data.append({
-            'graph_id': graph_id,
-            'ground_truth': json.dumps(ground_truth),
-            'initial_state': json.dumps(initial_state),
-            'gnn_prediction': json.dumps(gnn_prediction),
-            'warmstart_config': json.dumps(warmstart_config),
-            'final_optima': json.dumps(final_optima)
+            'graph_id':           graph_id,
+             'ground_truth':       json.dumps(ground_truth),
+            'initial_state':      json.dumps(initial_state),
+            'gnn_probs':          json.dumps(gnn_probs),
+            'gnn_prediction':     json.dumps(gnn_prediction),
+            'warmstart_config':   json.dumps(warmstart_config),
+            'final_optima':       json.dumps(final_optima),
+            'solve_time':         solve_time,
+            'objective':          objective,
+            'radial':             radial,
+            'connected':          connected,
+            'pf_converged':       pf_converged,
+            'switches_changed':   switches_changed,
+            'gt_loss':            gt_loss,
+            'pred_loss':          pred_loss,
+            # flag for “same loss but different switch pattern”
+            'same_loss_diff_topo': abs(gt_loss - pred_loss) < 1e-6
         })
 
     def save_csv(self):
@@ -601,39 +611,37 @@ class Optimizer:
         gid = self.graph_ids[idx]
 
         # Load original pandapower network
-        net = self.pp_all["mst"][gid].deepcopy() 
-        
+        net = self.pp_all["mst"][gid].deepcopy()
+
         # Get predictions and apply rounding
         raw_predictions = self.predictions[gid]
         rounded_predictions = self.saver.apply_rounding(
-            raw_predictions, 
-            self.saver.rounding_method, 
-            network=net 
+            raw_predictions,
+            self.saver.rounding_method,
+            network=net
         )
 
         try:
-            if mode == "soft": 
+            if mode == "soft":
                 # Soft warmstart: modify initial switch states (one per line)
                 collapsed_switches, _ = collapse_switches_to_one_per_line(net)
-                
-                # Apply predictions to ALL switches for each line
+
                 for i, (_, collapsed_switch) in enumerate(collapsed_switches.iterrows()):
                     if i < len(rounded_predictions):
                         line_idx = collapsed_switch['element']
-                        # Update ALL switches for this line
-                        line_switches = net.switch[(net.switch['et'] == 'l') & (net.switch['element'] == line_idx)]
-                        for switch_idx in line_switches.index:
+                        mask = (net.switch['et'] == 'l') & (net.switch['element'] == line_idx)
+                        for switch_idx in net.switch[mask].index:
                             net.switch.at[switch_idx, 'closed'] = bool(rounded_predictions[i])
-                
+
                 # Save warmstart network
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
-                
+
                 optimizer = WarmstartSOCP(
                     net=net,
                     toggles=self.toggles,
                     graph_id=gid
                 )
-                
+
             elif mode == "float":
                 # Float warmstart: provide float hints to solver
                 optimizer = WarmstartSOCP(
@@ -642,54 +650,92 @@ class Optimizer:
                     graph_id=gid,
                     float_warmstart=raw_predictions
                 )
-                
+
                 # For float mode, save the original network with predictions applied
                 warmstart_net = net.deepcopy()
                 collapsed_switches, _ = collapse_switches_to_one_per_line(warmstart_net)
-                
+
                 for i, (_, collapsed_switch) in enumerate(collapsed_switches.iterrows()):
                     if i < len(rounded_predictions):
                         line_idx = collapsed_switch['element']
-                        # Update ALL switches for this line
-                        line_switches = warmstart_net.switch[(warmstart_net.switch['et'] == 'l') & 
-                                                            (warmstart_net.switch['element'] == line_idx)]
-                        for switch_idx in line_switches.index:
+                        mask = (warmstart_net.switch['et'] == 'l') & (warmstart_net.switch['element'] == line_idx)
+                        for switch_idx in warmstart_net.switch[mask].index:
                             warmstart_net.switch.at[switch_idx, 'closed'] = bool(rounded_predictions[i])
-                
+
                 self.saver.save_network_as_json(warmstart_net, self.saver.warmstart_networks_folder, gid)
-                
+
             elif mode == "hard":
                 # Hard warmstart: fix high-confidence switches
-                fixed_switches = {}
                 collapsed_switches, _ = collapse_switches_to_one_per_line(net)
-                
+                total_lines = len(collapsed_switches)
+                fixed_count = 0
+
+                # Compute threshold bounds
+                T = self.confidence_threshold
+                half = T / 2.0
+                upper = 0.5 + half
+                lower = 0.5 - half
+
+                # Compute stats over the actually thresholded lines
+                probs = raw_predictions[:total_lines]
+                fixed_pos = [p for p in probs if p >= upper]
+                fixed_neg = [p for p in probs if p <= lower]
+                avg_fixed_pos = float(np.mean(fixed_pos)) if fixed_pos else 0.0
+                avg_fixed_neg = float(np.mean(fixed_neg)) if fixed_neg else 0.0
+
+                fixed_switches = {}
                 for i, (_, collapsed_switch) in enumerate(collapsed_switches.iterrows()):
-                    if i < len(raw_predictions):
-                        score = raw_predictions[i]
-                        confidence = abs(score - 0.5) * 2  # Distance from 0.5, scaled to [0,1]
-                        if confidence >= self.confidence_threshold:
-                            line_idx = collapsed_switch['element']
-                            # Fix ALL switches for this line
-                            line_switches = net.switch[(net.switch['et'] == 'l') & 
-                                                      (net.switch['element'] == line_idx)]
-                            for switch_idx in line_switches.index:
-                                fixed_switches[switch_idx] = 1 if score > 0.5 else 0
-                                net.switch.at[switch_idx, 'closed'] = bool(score > 0.5)
-                
+                    if i >= len(raw_predictions):
+                        break
+                    score = raw_predictions[i]
+
+                    # multiclass (softmax) case
+                    if hasattr(score, "__len__") and len(score) == 2:
+                        p0, p1 = score
+                        if p1 >= T and p1 > p0:
+                            decision = 1
+                        elif p0 >= T and p0 > p1:
+                            decision = 0
+                        else:
+                            continue
+                    else:
+                        # scalar (sigmoid) case
+                        p = float(score)
+                        if p >= upper:
+                            decision = 1
+                        elif p <= lower:
+                            decision = 0
+                        else:
+                            continue
+
+                    # Apply the fix to all switches on this line
+                    line_idx = collapsed_switch['element']
+                    mask = (net.switch['et'] == 'l') & (net.switch['element'] == line_idx)
+                    for switch_idx in net.switch[mask].index:
+                        fixed_switches[switch_idx] = decision
+                        net.switch.at[switch_idx, 'closed'] = bool(decision)
+                    fixed_count += 1
+
                 # Save warmstart network
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
-                
+
                 optimizer = WarmstartSOCP(
                     net=net,
                     toggles=self.toggles,
                     graph_id=gid,
                     fixed_switches=fixed_switches
                 )
-                
+
+                # Summary log
+                pct_fixed = (fixed_count / total_lines * 100) if total_lines else 0.0
+                print(f"[HardWarmStart] Fixed %d/%d lines (%.1f%%) | avg(p│fixed=1)=%.3f | avg(p│fixed=0)=%.3f",
+                    fixed_count, total_lines, pct_fixed, avg_fixed_pos, avg_fixed_neg
+                )
+
             else:  # mode == "none"
                 # No warmstart: use original network
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
-                
+
                 optimizer = SOCP_class(
                     net=net,
                     toggles=self.toggles,
@@ -699,66 +745,63 @@ class Optimizer:
             # Initialize and solve
             optimizer.initialize()
             results = optimizer.solve(solver="gurobi_persistent", TimeLimit=300, MIPGap=1e-3)
-                
-            # Extract solution and create final network
-            if optimizer.model and hasattr(optimizer.model, 'line_status'):
-                solution = {}
-                final_switch_states = []
-                
-                # Extract solution values
-                for l in optimizer.model.lines:
-                    solution[l] = round(pyo_val(optimizer.model.line_status[l]))
-                
-                # Create final network with optimized switch states
-                final_net = self.pp_all["mst"][gid].deepcopy()
-                collapsed_switches, _ = collapse_switches_to_one_per_line(final_net)
-                
-                # Map solution back to switches (one state per line)
-                solution_values = list(solution.values())
-                for i, (_, collapsed_switch) in enumerate(collapsed_switches.iterrows()):
-                    if i < len(solution_values):
-                        line_idx = collapsed_switch['element']
-                        switch_state = solution_values[i]
-                        # Update ALL switches for this line
-                        line_switches = final_net.switch[(final_net.switch['et'] == 'l') & 
-                                                        (final_net.switch['element'] == line_idx)]
-                        for switch_idx in line_switches.index:
-                            final_net.switch.at[switch_idx, 'closed'] = bool(switch_state)
-                        final_switch_states.append(int(switch_state))
-                
-                # Save final optimized network
-                self.saver.save_network_as_json(final_net, self.saver.prediction_networks_folder, gid)
-                
-                # Extract data for CSV
-                ground_truth = self.saver.extract_ground_truth(self.pp_all, gid)
-                initial_state = self.saver.extract_initial_state(self.pp_all, gid)
-                
-                # Add to CSV data
-                self.saver.add_csv_entry(
-                    graph_id=gid,
-                    ground_truth=ground_truth,
-                    initial_state=initial_state,
-                    gnn_prediction=rounded_predictions,
-                    warmstart_config=rounded_predictions,  # Same as prediction for most modes
-                    final_optima=final_switch_states
-                )
                     
-                return gid, {
-                    'solution': solution,
-                    'objective': pyo_val(optimizer.model.objective),
-                    'solve_time': optimizer.solve_time,
-                    'switches_changed': getattr(optimizer, 'num_switches_changed', 0),
-                    'warmstart_mode': mode,
-                    'success': True
-                }
-            else:
-                return gid, {
-                    'solution': None,
-                    'success': False,
-                    'error': 'No valid solution found',
-                    'warmstart_mode': mode
-                }
+
+            gt_net = self.pp_all["mst_opt"][gid]
+            try:
+                pp.runpp(gt_net, enforce_q_lims=False)
+                gt_loss = float(gt_net.res_line["pl_mw"].sum())
+            except:
+                gt_loss = float("nan")
+
+            try:
+                pp.runpp(final_net, enforce_q_lims=False)
+                pred_loss = float(final_net.res_line["pl_mw"].sum())
+                pf_ok = bool(final_net.converged)
+            except:
+                pred_loss = float("nan")
+                pf_ok = False
+                
+            radial_ok, connected_ok = is_radial_and_connected(final_net, include_switches=True)
+
+            # count flips vs. GT-optimal
+            gt_states   = self.saver.extract_ground_truth(self.pp_all, gid)
+            pred_states = final_switch_states
+            flips = sum(1 for g, p in zip(gt_states, pred_states) if g != p)
+
+            # Extract data for CSV
+            ground_truth = self.saver.extract_ground_truth(self.pp_all, gid)
+            initial_state = self.saver.extract_initial_state(self.pp_all, gid)
             
+            # Add to CSV data
+            self.saver.add_csv_entry(
+                graph_id=gid,
+                ground_truth=ground_truth,
+                initial_state=initial_state,
+                gnn_probs=self.predictions[gid],
+                gnn_prediction=rounded_predictions,
+                warmstart_config=rounded_predictions,
+                final_optima=final_switch_states,
+                solve_time=optimizer.solve_time,
+                objective=pyo_val(optimizer.model.objective),
+                radial=radial_ok,
+                connected=connected_ok,
+                pf_converged=pf_ok,
+                switches_changed=flips,
+                gt_loss=gt_loss,
+                pred_loss=pred_loss
+            )
+                
+            return gid, {
+                'solution': solution,
+                'objective': pyo_val(optimizer.model.objective),
+                'solve_time': optimizer.solve_time,
+                'switches_changed': getattr(optimizer, 'num_switches_changed', 0),
+                'warmstart_mode': mode,
+                'success': True
+            }
+
+        
         except Exception as e:
             print(f"Error optimizing network {gid}: {str(e)}")
             import traceback
@@ -830,7 +873,7 @@ if __name__ == "__main__":
                        choices=["round", "PhyR"],
                        default="round",
                        help="Rounding method for predictions")
-    parser.add_argument("--confidence_threshold", type=float, default=0.9,
+    parser.add_argument("--confidence_threshold", type=float, default=1,
                        help="Confidence threshold for hard warmstart")
     
     parser.add_argument("--num_workers", type=int, default=1,

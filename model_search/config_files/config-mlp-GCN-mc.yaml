@@ -1,0 +1,77 @@
+description: "GIN model with hyperparameter optimization"
+job_name: "best-GCN"
+
+
+# Data Configuration
+dataset_names: ["train", "validation", "test"]
+folder_names:
+  - "data\\split_datasets\\train"
+  - "data\\split_datasets\\validation"
+  - "data\\split_datasets\\test"
+dataset_type: "default"
+batching_type: "dynamic"
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 0
+
+# Model Configuration
+model_module: "AdvancedMLP"
+model_kwargs:
+  # GIN Configuration
+  gnn_type: "GCN"
+  gnn_layers: 1
+  gnn_hidden_dim_multiple: 360
+
+  # Edge MLP
+  use_edge_mlp: true
+  edge_hidden_dims: [256, 512]
+  n_edge_hidden_dims_layers: 2
+
+  # Node MLP
+  use_node_mlp: true
+  node_hidden_dims: [256, 512, 512]
+  n_node_hidden_dims_layers: 3
+
+  # General Configuration
+  activation: "leaky_relu"
+  dropout_rate: 0
+  use_batch_norm: true
+  use_residual: true
+  use_skip_connections: true
+  pooling: "add"
+  normalization_type: adaptive
+
+  # Switch Head
+  switch_head_type: "mlp"
+  switch_head_layers: 3
+
+  # Physics
+  use_gated_mp: true
+  use_phyr: false
+  lambda_connectivity: 0.0022114859650502207
+  lambda_mask: 0.05936503481046906
+  lambda_phy_loss: 0.07459167213752221
+  lambda_radiality: 0.001644915684713298
+
+  # Loss & Optimization
+  loss_scaling_strategy: "fixed"
+  criterion_name: "FocalLoss"
+  
+  weight_decay: 3.1083921460064515e-05
+learning_rate: 0.00035760499745340354
+weight_decay: 3.1083921460064515e-05
+criterion_name: "FocalLoss"
+# Training Configuration
+batch_size: 128
+epochs: 200
+patience: 20
+
+# Output Configuration
+output_type: "multiclass"
+num_classes: 2
+
+# Logging
+wandb_project: "GIN_HPO"
+wandb: true
