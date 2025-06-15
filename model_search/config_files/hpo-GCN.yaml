@@ -1,11 +1,12 @@
-# GCN HPO Configuration
-# Estimated trials needed: 24 dimensions × 10 = 240 trials
+
+# ====================================================================
+# hpo-GCN-phase1.yaml
+# Phase 1: Architecture Search (10 dimensions)
+# ====================================================================
 
 # Basic model configuration
 model_module: "AdvancedMLP"
-dataset_names: ["train",
-                  "validation",
-                  "test"]
+dataset_names: ["train", "validation", "test"]
 folder_names:
   - "data\\split_datasets\\train"
   - "data\\split_datasets\\validation"
@@ -13,7 +14,7 @@ folder_names:
 dataset_type: "default"
 batching_type: "dynamic"
 
-# Fixed parameters (not optimized)
+# Fixed parameters for Phase 1
 fixed_params:
   # Core GNN settings
   gnn_type: "GCN"  
@@ -21,7 +22,7 @@ fixed_params:
   use_edge_mlp: true
   
   # Data settings
-  batch_size: 32
+  batch_size: 128
   max_nodes: 1000
   max_edges: 5000
   train_ratio: 0.85
@@ -31,158 +32,86 @@ fixed_params:
   # Training settings
   epochs: 200
   patience: 15
+  learning_rate: 0.000025  # 1e-4 * 32/batch_size = 1e-4 * 32/128
+  
+  # Fixed architecture choices for Phase 1
+  activation: "relu"
+  use_batch_norm: true
+  use_residual: false
+  criterion_name: "WeightedBCELoss"
+  normalization_type: "simple"
+  use_gated_mp: false
+  use_phyr: false
+  pooling: "add"
   
   # Output settings 
-  output_type: "binary"  
-  num_classes: 2  
-  
-  # W&B settings
-  wandb_project: "GCN_HPO"
-  
-# Search space - 24 dimensions
+  output_type: "multi_class"
+  num_classes: 2
+  wandb_project: "GCN_HPO_Phase1"
+
+# Phase 1 Search Space - 10 dimensions 
 search_space:
-  # 1. Learning rate (log scale)
-  learning_rate:
-    search_type: "float"
-    min: 0.00001
-    max: 0.01
-    log: true
+  # 1. GNN layers
+  gnn_layers:
+    search_type: "int"
+    min: 1
+    max: 4
     
-  # 2. Weight decay (log scale)
-  weight_decay:
-    search_type: "float"
-    min: 0.000001
-    max: 0.001
-    log: true
+  # 2. GNN hidden dimension
+  gnn_hidden_dim:
+    search_type: "categorical"
+    choices: [64, 128, 256, 384, 512]
     
   # 3. Dropout rate
   dropout_rate:
     search_type: "float"
     min: 0.0
-    max: 0.7
+    max: 0.5
     
-  # 4. GNN layers (specific to backbone)
-  gnn_layers:
+  # 4. Number of node MLP layers
+  node_mlp_layers:
     search_type: "int"
     min: 1
-    max: 6
+    max: 3
     
-  # 5. GNN hidden dimension
-  gnn_hidden_dim:
+  # 5. Node MLP hidden dimension
+  node_mlp_dim:
+    search_type: "categorical"
+    choices: [64, 128, 256, 384]
+    
+  # 6. Number of edge MLP layers
+  edge_mlp_layers:
     search_type: "int"
-    min: 32
-    max: 512
-    step: 32
+    min: 1
+    max: 3
     
-  # 6. Node MLP hidden dimensions (dynamic list)
-  node_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 32
-    dim_max: 512
-    dim_step: 32
-    
-  # 7. Edge MLP hidden dimensions (dynamic list)
-  edge_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 32
-    dim_max: 512
-    dim_step: 32
-    
-  # 8. Activation function
-  activation:
+  # 7. Edge MLP hidden dimension
+  edge_mlp_dim:
     search_type: "categorical"
-    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "sigmoid"]
+    choices: [32, 64, 128, 256]
     
-  # 9. Use batch normalization
-  use_batch_norm:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 10. Use residual connections
-  use_residual:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 11. Use skip connections
-  use_skip_connections:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 12. Switch head type
+  # 8. Switch head type
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "attention","graph_attention"]
+    choices: ["mlp", "attention", "graph_attention"]
     
-  # 13. Switch head layers
+  # 9. Switch head layers
   switch_head_layers:
     search_type: "int"
     min: 1
-    max: 4
+    max: 5
     
-  # 14. Criterion/Loss function
-  criterion_name:
-    search_type: "categorical"
-    choices: ["MSELoss", "CrossEntropyLoss",  "WeightedBCELoss","FocalLoss" ]
-    
-  # 15. Normalization type
-  normalization_type:
-    search_type: "categorical"
-    choices: ["none","simple", "injection_scale","adaptive", "per_node"]
-    
-  # 16. Loss scaling strategy
-  loss_scaling_strategy:
-    search_type: "categorical"
-    choices: ["fixed", "adaptive_ratio", "adaptive_magnitude", "uncertainty_weighted"]
-    
-  # 17. Use gated message passing
-  use_gated_mp:
+  # 10. Use skip connections
+  use_skip_connections:
     search_type: "categorical"
     choices: [true, false]
-    
-  # 18. Use PhyR (Physics-enhanced Reasoning)
-  use_phyr:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 19. PhyR k ratio (only if use_phyr=true)
-  phyr_k_ratio:
-    search_type: "float"
-    min: 0.1
-    max: 0.5
-    
-  # 20. Physics loss weight
-  lambda_phy_loss:
-    search_type: "float"
-    min: 0.01
-    max: 1.0
-    log: true
-    
-  # 21. Connectivity loss weight
-  lambda_connectivity:
-    search_type: "float"
-    min: 0.001
-    max: 0.5
-    log: true
-    
-  # 22. Radiality loss weight
-  lambda_radiality:
-    search_type: "float"
-    min: 0.001
-    max: 0.5
-    log: true
-    
-  # 23. Mask/sparsity loss weight
-  lambda_mask:
-    search_type: "float"
-    min: 0.001
-    max: 0.1
-    log: true
-    
-  # 24. Graph pooling method
-  pooling:
-    search_type: "categorical"
-    choices: ["mean", "max", "add"]
+
+# Phase 2 Parameters (for fine-tuning best architecture):
+# learning_rate: [1e-5, 1e-3] (log scale)
+# weight_decay: [1e-6, 1e-3] (log scale)  
+# activation: ["relu", "gelu", "elu", "leaky_relu"]
+# use_batch_norm: [true, false]
+# use_residual: [true, false]
+# criterion_name: ["CrossEntropyLoss", "WeightedBCELoss", "FocalLoss"]
+# normalization_type: ["simple", "injection_scale", "adaptive"]
+# loss_scaling_strategy: ["fixed", "adaptive_ratio", "adaptive_magnitude"]
