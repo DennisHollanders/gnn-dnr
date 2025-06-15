@@ -14,14 +14,14 @@ LOG_DIR="\$HOME/gnn-dnr/slurm_logs"
 
 # Model configurations
 declare -A MODELS
-MODELS["GAT"]="\$HOME/gnn-dnr/model_search/models/GAT/best_model.pt"
-MODELS["GIN"]="\$HOME/gnn-dnr/model_search/models/GIN/best_model.pt"
-MODELS["GCN"]="\$HOME/gnn-dnr/model_search/models/GCN/best_model.pt"
+MODELS["GAT"]="/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/blooming-snow-15-Best.pt"
+MODELS["GIN"]="/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/cosmic-field-12-Best.pt"
+MODELS["GCN"]="/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/volcanic-moon-10-Best.pt"
 
 declare -A CONFIGS
-CONFIGS["GAT"]="\$HOME/gnn-dnr/model_search/config_files/config-GAT.yaml"
-CONFIGS["GIN"]="\$HOME/gnn-dnr/model_search/config_files/config-GIN.yaml"
-CONFIGS["GCN"]="\$HOME/gnn-dnr/model_search/config_files/config-GCN.yaml"
+CONFIGS["GAT"]="/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/AdvancedMLP------blooming-snow-15.yaml"
+CONFIGS["GIN"]="/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/AdvancedMLP------cosmic-field-12.yaml"
+CONFIGS["GCN"]="/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/AdvancedMLP------volcanic-moon-10.yaml"
 
 # Experiment parameters
 DATASET_NAME="test"

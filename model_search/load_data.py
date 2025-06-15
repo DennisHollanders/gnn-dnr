@@ -17,7 +17,7 @@ from tqdm import tqdm
 import concurrent.futures
 
 # Add necessary source paths
-src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model_search"))
 if src_path not in sys.path:
     sys.path.append(src_path)
 
