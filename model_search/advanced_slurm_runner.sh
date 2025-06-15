@@ -9,8 +9,8 @@
 
 # Base directories
 BASE_DIR="\$HOME/gnn-dnr"
-DATA_DIR="\$HOME/gnn-dnr/data/source_datasets/test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test"
-LOG_DIR="\$HOME/gnn-dnr/slurm_logs"
+DATA_DIR= "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test/"
+LOG_DIR= \$HOME/gnn-dnr/logs
 
 # Model configurations
 declare -A MODELS
@@ -35,13 +35,18 @@ CPUS=16
 NODES=1
 NTASKS_PER_NODE=1
 
+SUBMIT_LOG="${LOG_DIR}/all_submissions.log"
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
 create_log_dir() {
     mkdir -p "$LOG_DIR"
+    # ensure the master log exists
+    touch "$SUBMIT_LOG"
     echo "Created log directory: $LOG_DIR"
+    echo "Master submission log: $SUBMIT_LOG"
 }
 
 submit_job() {
@@ -97,7 +102,7 @@ cd \$HOME/gnn-dnr || exit 1 # Add error check for cd
 
 echo "Running script using 'poetry run'..."
 
-poetry run python -I predict_then_optimize.py \\
+poetry run python -I model_search/predict_then_optimize.py \\
     --config_path "${config_path}" \\
     --model_path "${model_path}" \\
     --folder_names "${DATA_DIR}" \\
@@ -114,9 +119,22 @@ echo "Completed at: \$(date)"
 EOF
 
     # Submit the job
-    local job_id=$(sbatch "$job_script" | awk '{print $4}')
-    echo "Submitted job: $job_name (ID: $job_id)"
-    return 0
+    #local job_id=$(sbatch "$job_script" | awk '{print $4}')
+    #echo "Submitted job: $job_name (ID: $job_id)"
+    #return 0
+    local sbatch_out
+    if sbatch_out=$(sbatch "$job_script"); then
+      # parse job ID from “Submitted batch job <ID>”
+      local job_id=$(echo "$sbatch_out" | awk '{print $4}')
+      echo "Submitted job: $job_name (ID: $job_id)"
+      # append to the master submission log:
+      echo "$(date '+%F %T') | $job_name | $job_id | script=$job_script" \
+           >> "$SUBMIT_LOG"
+    else
+      echo "ERROR submitting $job_name"
+      echo "$(date '+%F %T') | FAILED | $job_name | ERROR in sbatch" \
+           >> "$SUBMIT_LOG"
+    fi
 }
 
 # ============================================================================
@@ -180,6 +198,7 @@ main() {
         
         echo "Submitted $((job_count)) jobs for $model_name"
         echo "---"
+        
     done
     
     echo "============================================================="

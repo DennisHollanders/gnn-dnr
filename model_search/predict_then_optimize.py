@@ -20,11 +20,35 @@ if project_root not in sys.path:
 from pyomo.environ import value as pyo_val
 from src.SOCP_class_dnr import SOCP_class
 from model_search.evaluation.evaluation import load_config_from_model_path
-from model_search.load_data import load_pp_networks
 
 from model_search.models.AdvancedMLP.AdvancedMLP import PhysicsInformedRounding
 from data_generation.define_ground_truth import is_radial_and_connected
 
+def load_pp_networks(base_directory):
+    nets = {"mst": {}, "mst_opt": {}}
+    for phase in ["mst", "mst_opt"]:
+        folder = os.path.join(base_directory, phase, "pandapower_networks")
+        if not os.path.isdir(folder):
+            continue
+        for fn in tqdm(os.listdir(folder), desc=f"Loading {phase} networks from {folder}"):
+            if not fn.endswith(".json"):
+                continue
+            path = os.path.join(folder, fn)
+            try:
+                net = pp.from_json(path)
+            except:
+                with open(path) as f:
+                    raw = f.read()
+                if raw.startswith('"') and raw.endswith('"'):
+                    raw = json.loads(raw)
+                try:
+                    net = pp.from_json_string(raw)
+                except:
+                    net = from_json_dict(json.loads(raw))
+            if net.bus.empty:
+                continue
+            nets[phase][fn] = net
+    return nets
 def collapse_switches_to_one_per_line(net):
     """
     Collapse multiple switches per line to one representative switch per line.
