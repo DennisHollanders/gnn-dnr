@@ -1129,7 +1129,7 @@ def apply_optimization(folder_path, toggles=None, debug=False, serialize=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_03062025_range-130-100_10\original",
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test\original",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test/original",
                         #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_22052025_range-130-100_10\original",

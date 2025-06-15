@@ -20,30 +20,32 @@ num_workers: 0
 model_module: "AdvancedMLP"
 model_kwargs:
   # GIN Configuration
-  gnn_type: "GIN"
-  gin_mlp_layers: 3
-  gin_eps: 0.06118747565904727
-  gin_train_eps: false
-  gnn_layers: 1
-  gnn_hidden_dim_multiple: 302
+  gnn_type: "GAT"
+  gat_dropout: 0.05099716381479796
+  gat_edge_dim: 40
+  gat_heads: 2
+  gat_v2: true
+  gnn_layers: 4
+  gnn_hidden_dim_multiple: 224
 
   # Edge MLP
   use_edge_mlp: true
-  edge_hidden_dims: [128, 512, 64]
-  n_edge_hidden_dims_layers: 3
+  edge_hidden_dims: [128, 256,]
+  n_edge_hidden_dims_layers: 2
 
   # Node MLP
   use_node_mlp: true
-  node_hidden_dims: [256, 512, 256,128]
+  node_hidden_dims: [64, 64, 128,256]
   n_node_hidden_dims_layers: 4
 
   # General Configuration
-  activation: "relu"
+  activation: "leaky_relu"
   dropout_rate: 0.0013447489600537238
   use_batch_norm: true
   use_residual: true
   use_skip_connections: true
   pooling: "add"
+  normalization_type: per_node
 
   # Switch Head
   switch_head_type: "mlp"
@@ -52,17 +54,18 @@ model_kwargs:
   # Physics
   use_gated_mp: true
   use_phyr: false
-  lambda_phy_loss: 0.9634733268065652
-  lambda_connectivity: 0.031023696908473272
-  lambda_radiality: 0.0036467753703689383
+  lambda_connectivity: 0.0028830179868523345
+  lambda_phy_loss: 0.96543480711283145
+  lambda_radiality: 0.001834148675023315
+  learning_rate: 0.009123940339510332
 
   # Loss & Optimization
   loss_scaling_strategy: "adaptive_magnitude"
   criterion_name: "WeightedBCELoss"
   
-  weight_decay: 3.1083921460064515e-05
+  weight_decay: 0.00015996260658050464
 learning_rate: 0.0009708944531483163
-weight_decay: 3.1083921460064515e-05
+weight_decay: 0.00015996260658050464
 criterion_name: "WeightedBCELoss"
 # Training Configuration
 batch_size: 128
@@ -70,7 +73,7 @@ epochs: 200
 patience: 20
 
 # Output Configuration
-output_type: "binary"
+output_type: "mutliclass"
 num_classes: 2
 
 # Logging

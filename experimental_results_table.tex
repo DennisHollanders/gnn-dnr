@@ -1,0 +1,73 @@
+\begin{table*}[p]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.2}
+  \resizebox{\textwidth}{!}{%
+    \arrayrulecolor{black}%
+    \begin{tabular}{lllcccccccc}
+      \toprule
+      Model & Method & Variant & Time [s] & F1 & Recall & Precision
+            & $\delta$ solution & Radial wrong & Non-radial & Infeasible \\
+      \midrule
+      \multirow{11}{*}{GAT}
+        & \multirow{2}{*}{DirectPrediction}
+        &                             & Rounding          &  &  &  &  &  &  &  &  \\
+        &                             & PhyR               &  &  &  &  &  &  &  &  \\
+      \arrayrulecolor{gray!60}\cdashline{2-11}
+        & \multirow{3}{*}{SoftWarmStart}
+        &                             & Floats            &  &  &  &  &  &  &  &  \\
+        &                             & Binary Rounding   &  &  &  &  &  &  &  &  \\
+        &                             & Binary PhyR       &  &  &  &  &  &  &  &  \\
+      \cdashline{2-11}
+        & \multirow{5}{*}{HardWarmStart}
+        &                             & 0.9               &  &  &  &  &  &  &  &  \\
+        &                             & 0.7               &  &  &  &  &  &  &  &  \\
+        &                             & 0.5               &  &  &  &  &  &  &  &  \\
+        &                             & 0.3               &  &  &  &  &  &  &  &  \\
+        &                             & 0.1               &  &  &  &  &  &  &  &  \\
+      \cdashline{2-11}
+        & DFL                         & --                &  &  &  &  &  &  &  &  \\
+      \arrayrulecolor{black}\midrule
+      \multirow{11}{*}{GIN}
+        & \multirow{2}{*}{DirectPrediction}
+        &                             & Rounding          &  &  &  &  &  &  &  &  \\
+        &                             & PhyR               &  &  &  &  &  &  &  &  \\
+      \arrayrulecolor{gray!60}\cdashline{2-11}
+        & \multirow{3}{*}{SoftWarmStart}
+        &                             & Floats            &  &  &  &  &  &  &  &  \\
+        &                             & Binary Rounding   &  &  &  &  &  &  &  &  \\
+        &                             & Binary PhyR       &  &  &  &  &  &  &  &  \\
+      \cdashline{2-11}
+        & \multirow{5}{*}{HardWarmStart}
+        &                             & 0.9               &  &  &  &  &  &  &  &  \\
+        &                             & 0.7               &  &  &  &  &  &  &  &  \\
+        &                             & 0.5               &  &  &  &  &  &  &  &  \\
+        &                             & 0.3               &  &  &  &  &  &  &  &  \\
+        &                             & 0.1               &  &  &  &  &  &  &  &  \\
+      \cdashline{2-11}
+        & DFL                         & --                &  &  &  &  &  &  &  &  \\
+      \arrayrulecolor{black}\midrule
+      \multirow{11}{*}{GCN}
+        & \multirow{2}{*}{DirectPrediction}
+        &                             & Rounding          &  &  &  &  &  &  &  &  \\
+        &                             & PhyR               &  &  &  &  &  &  &  &  \\
+      \arrayrulecolor{gray!60}\cdashline{2-11}
+        & \multirow{3}{*}{SoftWarmStart}
+        &                             & Floats            &  &  &  &  &  &  &  &  \\
+        &                             & Binary Rounding   &  &  &  &  &  &  &  &  \\
+        &                             & Binary PhyR       &  &  &  &  &  &  &  &  \\
+      \cdashline{2-11}
+        & \multirow{5}{*}{HardWarmStart}
+        &                             & 0.9               &  &  &  &  &  &  &  &  \\
+        &                             & 0.7               &  &  &  &  &  &  &  &  \\
+        &                             & 0.5               &  &  &  &  &  &  &  &  \\
+        &                             & 0.3               &  &  &  &  &  &  &  &  \\
+        &                             & 0.1               &  &  &  &  &  &  &  &  \\
+      \cdashline{2-11}
+        & DFL                         & --                &  &  &  &  &  &  &  &  \\
+      \bottomrule
+    \end{tabular}%
+  }
+  \caption{Model Metrics and Error Distribution Comparison}
+  \label{tab:full-result}
+\end{table*}

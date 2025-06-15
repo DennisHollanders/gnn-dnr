@@ -1,0 +1,77 @@
+description: "GAT model with hyperparameter optimization (large‐scale search)"
+job_name: "GAT_HPO_Large"
+
+# Data Configuration
+dataset_names: ["train", "validation", "test"]
+folder_names:
+  - "data/split_datasets/train"
+  - "data/split_datasets/validation"
+  - "data/split_datasets/test"
+dataset_type: "default"
+batching_type: "dynamic"
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 4
+
+# Model Configuration
+model_module: "AdvancedMLP"
+model_kwargs:
+  # GAT Configuration
+  gnn_type: GAT
+  gnn_layers: 4
+  gnn_hidden_dim: 512 
+  gat_heads: 4
+  gat_dropout: 0.005
+  gat_v2: true
+
+  # Edge MLP
+  use_edge_mlp: true
+  edge_hidden_dims:
+    - [256, 512]
+
+  # Node MLP
+  use_node_mlp: true
+  node_hidden_dims:
+    - [256, 512, 1024]
+  # General Configuration
+  activation: "leaky_relu"
+  dropout_rate:  0.01
+  use_batch_norm: true
+  use_residual: true
+  use_skip_connections: true
+  pooling: "add"
+  normalization_type: "per_node"
+
+  # Switch Head
+  switch_head_type: "mlp"
+  switch_head_layers: 4
+
+  # Physics losses
+  use_gated_mp: true
+  use_phyr: false
+  lambda_connectivity: 1e-1
+  lambda_phy_loss: 0.5
+  lambda_radiality: 1e-2
+
+  # Optimizer
+  learning_rate: 1e-4, 5e-4
+  weight_decay: 1e-5
+
+  # Loss & Optimization
+  loss_scaling_strategy: "adaptive_magnitude"
+  criterion_name: "WeightedBCELoss"
+
+# Training Configuration
+batch_size: [64, 128, 256]
+epochs: 200
+patience: 20
+
+# Output Configuration
+output_type: "mutliclass"
+num_classes: 2
+
+# Logging
+wandb_project: "GAT_HPO_Large"
+wandb: true

@@ -195,6 +195,8 @@ def main():
     if hasattr(args, 'output_type') and args.output_type == "multiclass":
         if args.criterion_name == "CrossEntropyLoss":
             criterion = nn.CrossEntropyLoss()
+        if args.criterion_name == "WeightedBCELoss":
+            criterion = WeightedBCELoss(pos_weight=2.0)
         else:
             logger.warning(f"Using {args.criterion_name} with multiclass - may need adaptation")
             criterion = getattr(nn, args.criterion_name)()

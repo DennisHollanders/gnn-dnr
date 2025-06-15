@@ -90,7 +90,7 @@ class PhysicsInformedRounding(nn.Module):
     Physics-Informed Rounding (PhyR) based on GraPhyR framework.
     Uses Kruskal-inspired algorithm to select switches maintaining radiality constraint.
     """
-    def __init__(self,):
+    def __init__(self):
         super().__init__()
         
     def forward(self, switch_probs: torch.Tensor, edge_index: torch.Tensor, 
@@ -108,6 +108,11 @@ class PhysicsInformedRounding(nn.Module):
             Binary switch decisions maintaining radiality constraint
         """
         device = switch_probs.device
+        
+        # Ensure correct dtypes
+        edge_index = edge_index.long()
+        edge_batch = edge_batch.long()
+        
         num_graphs = int(edge_batch.max().item()) + 1
         
         # Initialize hard decisions
@@ -127,7 +132,7 @@ class PhysicsInformedRounding(nn.Module):
             
             # Determine number of nodes in this graph
             if num_nodes_per_graph is not None:
-                num_nodes = num_nodes_per_graph[g].item()
+                num_nodes = int(num_nodes_per_graph[g].item())
             else:
                 num_nodes = int(graph_edge_index.max().item()) + 1
             
@@ -141,136 +146,124 @@ class PhysicsInformedRounding(nn.Module):
             
             # Set selected switches to 1
             if selected_edges.numel() > 0:
-                switch_decisions[graph_edge_indices[selected_edges]] = 1.0
+                # Find which edges were selected
+                selected_mask = selected_edges > 0.5
+                selected_local_indices = selected_mask.nonzero(as_tuple=True)[0]
+                
+                # Map back to global indices
+                for local_idx in selected_local_indices:
+                    global_idx = graph_edge_indices[local_idx]
+                    switch_decisions[global_idx] = 1.0
         
         # Straight-through estimator for gradients
         return (switch_decisions - switch_probs).detach() + switch_probs
     
-    def _kruskal_switch_selection(self, probs, edge_index, edge_batch, num_nodes_per_graph):
+    def _kruskal_switch_selection(self, probs, edge_index, target_switches, num_nodes):
         """
-        Fixed Kruskal-based switch selection with proper node index handling.
+        Kruskal-based switch selection with proper type handling.
+        
+        Args:
+            probs: [E_graph] Switch probabilities for this graph
+            edge_index: [2, E_graph] Edge connectivity for this graph  
+            target_switches: int, number of switches to select
+            num_nodes: int, number of nodes in this graph
         """
         device = probs.device
+        
+        # Ensure edge_index is long type
+        edge_index = edge_index.long()
+        
+        if edge_index.size(1) == 0 or num_nodes <= 1:
+            return torch.zeros_like(probs)
+        
+        # Get unique nodes and create node mapping
+        unique_nodes = torch.unique(edge_index)
+        actual_num_nodes = len(unique_nodes)
+        
+        if actual_num_nodes <= 1:
+            return torch.zeros_like(probs)
+        
+        # Create mapping from original node indices to contiguous indices [0, 1, 2, ...]
+        # Use tensor operations to avoid Python loops where possible
+        node_mapping = torch.zeros(unique_nodes.max().item() + 1, dtype=torch.long, device=device)
+        node_mapping[unique_nodes] = torch.arange(actual_num_nodes, dtype=torch.long, device=device)
+        
+        # Convert edge indices to contiguous range [0, num_nodes-1]
+        mapped_edges = torch.zeros_like(edge_index)
+        mapped_edges[0] = node_mapping[edge_index[0]]
+        mapped_edges[1] = node_mapping[edge_index[1]]
+        
+        # Sort edges by probability (descending - highest probability first)
+        sorted_indices = torch.argsort(probs, descending=True)
+        
+        # Initialize Union-Find data structures
+        parent = list(range(actual_num_nodes))
+        rank = [0] * actual_num_nodes
+        
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])  # Path compression
+            return parent[x]
+        
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px == py:
+                return False  # Already connected
+            
+            # Union by rank
+            if rank[px] < rank[py]:
+                parent[px] = py
+            elif rank[px] > rank[py]:
+                parent[py] = px
+            else:
+                parent[py] = px
+                rank[px] += 1
+            return True
+        
+        # Select edges using Kruskal's algorithm
+        selected_indices = []
+        target_edges = min(target_switches, actual_num_nodes - 1)  # For a tree (radial network)
+        
+        for idx_tensor in sorted_indices:
+            if len(selected_indices) >= target_edges:
+                break
+            
+            # Convert tensor index to Python int
+            idx = int(idx_tensor.item())
+            
+            # Get node indices as Python ints
+            u = int(mapped_edges[0, idx].item())
+            v = int(mapped_edges[1, idx].item())
+            
+            # Bounds check (should not be needed with proper mapping, but just in case)
+            if u >= actual_num_nodes or v >= actual_num_nodes or u < 0 or v < 0:
+                print(f"Warning: Invalid node indices u={u}, v={v}, num_nodes={actual_num_nodes}")
+                continue
+            
+            # Try to add this edge
+            if union(u, v):
+                selected_indices.append(idx)
+        
+        # Create result tensor
         selected_edges = torch.zeros_like(probs)
-        
-        # Get unique graphs in the batch
-        unique_graphs = torch.unique(edge_batch)
-        
-        for graph_idx in unique_graphs:
-            # Get edges for this specific graph
-            graph_edge_mask = (edge_batch == graph_idx)
-            graph_edges = edge_index[:, graph_edge_mask]
-            graph_probs = probs[graph_edge_mask]
-            
-            if graph_edges.size(1) == 0:
-                continue
-                
-            # Get unique nodes in this graph and create node mapping
-            unique_nodes = torch.unique(graph_edges)
-            num_nodes = len(unique_nodes)
-            
-            if num_nodes <= 1:
-                continue
-                
-            # Create mapping from original node indices to contiguous indices [0, 1, 2, ...]
-            node_to_idx = {node.item(): idx for idx, node in enumerate(unique_nodes)}
-            
-            # Convert edge indices to contiguous range [0, num_nodes-1]
-            mapped_edges = torch.zeros_like(graph_edges)
-            for i in range(graph_edges.size(1)):
-                u_orig = graph_edges[0, i].item()
-                v_orig = graph_edges[1, i].item()
-                mapped_edges[0, i] = node_to_idx[u_orig]
-                mapped_edges[1, i] = node_to_idx[v_orig]
-            
-            # Sort edges by probability (descending - highest probability first)
-            sorted_indices = torch.argsort(graph_probs, descending=True)
-            
-            # Initialize Union-Find with correct size
-            parent = list(range(num_nodes))
-            rank = [0] * num_nodes
-            
-            def find(x):
-                if parent[x] != x:
-                    parent[x] = find(parent[x])  # Path compression
-                return parent[x]
-            
-            def union(x, y):
-                px, py = find(x), find(y)
-                if px == py:
-                    return False  # Already connected
-                
-                # Union by rank
-                if rank[px] < rank[py]:
-                    parent[px] = py
-                elif rank[px] > rank[py]:
-                    parent[py] = px
-                else:
-                    parent[py] = px
-                    rank[px] += 1
-                return True
-            
-            # Select edges using Kruskal's algorithm
-            selected_count = 0
-            target_edges = num_nodes - 1  # For a tree (radial network)
-            
-            for idx in sorted_indices:
-                if selected_count >= target_edges:
-                    break
-                    
-                u = mapped_edges[0, idx].item()
-                v = mapped_edges[1, idx].item()
-                
-                # Check bounds
-                if u >= num_nodes or v >= num_nodes or u < 0 or v < 0:
-                    print(f"Warning: Invalid node indices u={u}, v={v}, num_nodes={num_nodes}")
-                    continue
-                
-                # Try to add this edge
-                if union(u, v):
-                    # Find the original edge index in the batch
-                    original_edge_idx = torch.where(graph_edge_mask)[0][idx]
-                    selected_edges[original_edge_idx] = 1.0
-                    selected_count += 1
-            
-            # Debug information
-            if selected_count != target_edges:
-                print(f"Warning: Graph {graph_idx.item()} selected {selected_count} edges, target was {target_edges}")
+        if selected_indices:
+            # Convert list of indices to tensor for advanced indexing
+            selected_indices_tensor = torch.tensor(selected_indices, dtype=torch.long, device=device)
+            selected_edges[selected_indices_tensor] = 1.0
         
         return selected_edges
-    def _validate_graph_structure(self, edge_index, edge_batch, num_nodes_per_graph):
-        """
-        Debug function to validate graph structure.
-        """
-        print(f"Edge index shape: {edge_index.shape}")
-        print(f"Edge batch shape: {edge_batch.shape}")
-        print(f"Num nodes per graph: {num_nodes_per_graph}")
-        
-        unique_graphs = torch.unique(edge_batch)
-        print(f"Unique graphs: {unique_graphs}")
-        
-        for graph_idx in unique_graphs:
-            graph_edge_mask = (edge_batch == graph_idx)
-            graph_edges = edge_index[:, graph_edge_mask]
-            
-            if graph_edges.size(1) > 0:
-                unique_nodes = torch.unique(graph_edges)
-                min_node = unique_nodes.min().item()
-                max_node = unique_nodes.max().item()
-                num_unique = len(unique_nodes)
-                
-                print(f"Graph {graph_idx.item()}: "
-                    f"edges={graph_edges.size(1)}, "
-                    f"nodes range=[{min_node}, {max_node}], "
-                    f"unique_nodes={num_unique}")
-
-    # Alternative simpler implementation if Kruskal is still problematic
+    
     def _simple_physics_rounding(self, probs, edge_index, edge_batch, num_nodes_per_graph):
         """
         Simplified physics-aware rounding without Kruskal.
         Uses top-k selection with basic connectivity check.
         """
         device = probs.device
+        
+        # Ensure correct dtypes
+        edge_index = edge_index.long()
+        edge_batch = edge_batch.long()
+        
         selected_edges = torch.zeros_like(probs)
         
         unique_graphs = torch.unique(edge_batch)
@@ -285,7 +278,7 @@ class PhysicsInformedRounding(nn.Module):
             # Get target number of edges (assuming radial network)
             graph_edges = edge_index[:, graph_edge_mask]
             unique_nodes = torch.unique(graph_edges)
-            target_edges = len(unique_nodes) - 1
+            target_edges = max(1, len(unique_nodes) - 1)
             
             # Simple top-k selection
             k = min(target_edges, graph_probs.size(0))
@@ -298,20 +291,16 @@ class PhysicsInformedRounding(nn.Module):
         
         return selected_edges
 
-    # Updated physics_rounding method
     def physics_rounding(self, probs, edge_index, edge_batch, num_nodes_per_graph):
         """
         Main physics rounding method with error handling.
         """
         try:
-            # Try Kruskal first
-            return self._kruskal_switch_selection(probs, edge_index, edge_batch, num_nodes_per_graph)
+            # Use the forward method for proper per-graph processing
+            return self.forward(probs, edge_index, edge_batch, num_nodes_per_graph)
         except Exception as e:
             print(f"Kruskal failed with error: {e}")
             print("Falling back to simple physics rounding...")
-            
-            # Debug the graph structure
-            self._validate_graph_structure(edge_index, edge_batch, num_nodes_per_graph)
             
             # Fall back to simpler method
             return self._simple_physics_rounding(probs, edge_index, edge_batch, num_nodes_per_graph)
@@ -901,10 +890,11 @@ class AdvancedMLP(nn.Module):
         return GraphAttentionHead()
     
     def forward(self, data) -> Dict[str, torch.Tensor]:
+        """Updated forward method with better multiclass handling"""
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
         batch = getattr(data, 'batch', None)
         E = edge_index.size(1) 
-       
+    
         # Store original features for skip connections
         original_x = x.float()
         original_edge_attr = edge_attr.float()
@@ -975,24 +965,21 @@ class AdvancedMLP(nn.Module):
 
         # Process switch outputs based on output type
         if self.output_type == "multiclass":
-            # switch_logits shape: [E, num_classes]
             switch_probs_full = F.softmax(switch_logits, dim=1)
-            # For downstream compatibility, extract "closed" probability (class 1)
             switch_probs = switch_probs_full[:, 1] if self.num_classes == 2 else switch_probs_full[:, -1]
         else:
-            # Binary case: switch_logits shape: [E, 1] or [E]
             if switch_logits.dim() > 1 and switch_logits.size(-1) == 1:
                 switch_logits = switch_logits.squeeze(-1)
             switch_probs = torch.sigmoid(switch_logits)
             switch_probs_full = None
 
         # Physics and flow predictions
-        flows_hat = self.flow_head(combined_features)  # Use combined features for better flow prediction
+        flows_hat = self.flow_head(combined_features)  
         volt_hat = self.voltage_head2(node_features, edge_index) 
 
         outputs = {
-            "switch_logits": switch_logits,          # Raw logits for loss computation
-            "switch_predictions": switch_probs,      # Binary probabilities for physics/downstream
+            "switch_logits": switch_logits,          
+            "switch_predictions": switch_probs,      
             "voltage_predictions": voltage_logits,
             "node_embeddings": node_features,
             "edge_embeddings": edge_features,
@@ -1003,6 +990,7 @@ class AdvancedMLP(nn.Module):
         # Add multiclass probabilities if available
         if switch_probs_full is not None:
             outputs["switch_probabilities"] = switch_probs_full
+            print(f"Added switch_probabilities with shape: {switch_probs_full.shape}")
         
         # Apply PhysicsTopK if enabled
         if self.use_phyr:

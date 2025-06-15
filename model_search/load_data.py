@@ -58,28 +58,23 @@ def load_pp_networks(base_directory):
 def create_pyg_from_pp(pp_net_raw):
     """
     Accepts either a pandapower Net, a JSON string, or a dict.
-    Converts to a Net if needed, then runs PF and extracts features.
+    Converts to a Net if needed, then extracts features and
+    a deduplicated line-switch state.
     """
     # --- ensure we have a Net object ---
     if isinstance(pp_net_raw, str):
-        # raw JSON string
         pp_net = pp.from_json_string(pp_net_raw)
     elif isinstance(pp_net_raw, dict):
-        # loaded JSON dict
         pp_net = from_json_dict(pp_net_raw)
     else:
-        # already a Net
         pp_net = pp_net_raw
 
-    # --- run power flow ---
-    # pp.runpp(pp_net)
-
-    # ── build a dense, contiguous bus-id → row lookup ─────────────
-    bus_ids = pp_net.bus.index.to_numpy(dtype=int)          
-    id2row  = {bid: i for i, bid in enumerate(bus_ids)}      
+    # --- bus lookup ---
+    bus_ids = pp_net.bus.index.to_numpy(dtype=int)
+    id2row  = {bid: i for i, bid in enumerate(bus_ids)}
 
     # --- node features ---
-    bus_res = pp_net.res_bus.loc[bus_ids]     
+    bus_res = pp_net.res_bus.loc[bus_ids]
     x = torch.tensor(np.vstack([
         bus_res.p_mw.values,
         bus_res.q_mvar.values,
@@ -87,31 +82,44 @@ def create_pyg_from_pp(pp_net_raw):
         bus_res.va_degree.values
     ]).T, dtype=torch.float)
 
-    # --- edge list & features ---
-    lines = pp_net.line
-    n_lines = len(lines)
-
-        # Re-index bus connections using pandas' map for efficiency
-    from_b = lines.from_bus.map(id2row).to_numpy(dtype=np.int64)
-    to_b   = lines.to_bus.map(id2row).to_numpy(dtype=np.int64)
-    
+    # --- prepare line edges ---
+    lines    = pp_net.line
+    n_lines  = len(lines)
+    from_b   = lines.from_bus.map(id2row).to_numpy(dtype=np.int64)
+    to_b     = lines.to_bus.map(id2row).to_numpy(dtype=np.int64)
     edge_index = torch.from_numpy(np.vstack((from_b, to_b)))
 
+    # --- deduplicate line switches ---
     switch_state = np.ones(n_lines, dtype=int)
-    line_switches = pp_net.switch[pp_net.switch.et == "l"]
-    # build a map from line-ID → row idx in `lines`
+    ls = pp_net.switch[pp_net.switch.et == "l"]
+
+    # check for any line with conflicting switch states
+    conflicts = (
+        ls.groupby("element")["closed"]
+          .nunique()
+          .loc[lambda s: s > 1]
+    )
+    if not conflicts.empty:
+        logger.warning(
+            f"Found conflicting switch states on lines: {conflicts.index.tolist()}"
+        )
+
+    # keep only one switch per line (first by switch-ID)
+    ls_unique = ls.sort_index().drop_duplicates(subset="element", keep="first")
+
+    # map line-IDs to row positions
     line_idx = lines.index.to_numpy(dtype=int)
     id2pos   = {lid: pos for pos, lid in enumerate(line_idx)}
-    # extract positions for each switch’s element
-    elems    = line_switches.element.to_numpy(dtype=int)
+    elems    = ls_unique.element.to_numpy(dtype=int)
     positions = np.array([id2pos[e] for e in elems], dtype=int)
-    switch_state[positions] = line_switches.closed.to_numpy(dtype=int)
 
+    # assign closed/open
+    switch_state[positions] = ls_unique.closed.to_numpy(dtype=int)
+
+    # --- line features ---
     R = lines.r_ohm_per_km.to_numpy()
     X = lines.x_ohm_per_km.to_numpy()
-    
     edge_attr = torch.from_numpy(np.vstack([R, X, switch_state]).T).float()
-
 
     return Data(
         x=x,

@@ -5,9 +5,9 @@ job_name: "None"
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
 folder_names:
-  - "data\\split_datasets\\train"
-  - "data\\split_datasets\\validation"
-  - "data\\split_datasets\\test"
+  - "data\\split_datasets_without_synthetic\\train"
+  - "data\\split_datasets_without_synthetic\\validation"
+  - "data\\split_datasets_without_synthetic\\test"
 dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000
@@ -29,12 +29,12 @@ model_kwargs:
 
   # Edge MLP
   use_edge_mlp: true
-  edge_hidden_dims: [128, 512, 64]
+  edge_hidden_dims: [128, 256, 128]
   n_edge_hidden_dims_layers: 3
 
   # Node MLP
   use_node_mlp: true
-  node_hidden_dims: [256, 512, 256,128]
+  node_hidden_dims: [256, 512,256, 128]
   n_node_hidden_dims_layers: 4
 
   # General Configuration
@@ -58,19 +58,19 @@ model_kwargs:
 
   # Loss & Optimization
   loss_scaling_strategy: "adaptive_magnitude"
-  criterion_name: "WeightedBCELoss"
+  criterion_name: "CrossEntropyLoss"
   
   weight_decay: 3.1083921460064515e-05
 learning_rate: 0.0009708944531483163
 weight_decay: 3.1083921460064515e-05
-criterion_name: "WeightedBCELoss"
+criterion_name: "CrossEntropyLoss"
 # Training Configuration
 batch_size: 128
 epochs: 200
 patience: 20
 
 # Output Configuration
-output_type: "binary"
+output_type: "multiclass"
 num_classes: 2
 
 # Logging
