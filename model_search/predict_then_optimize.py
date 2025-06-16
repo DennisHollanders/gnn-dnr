@@ -40,38 +40,38 @@ class NetworkSwitchManager:
         self.state_labels = []
         
         # Store initial state
-        initial_state = self.get_switch_states()
-        self.add_state(initial_state, "initial")
-    def debug_switch_states(self, label=""):
-        """Debug method to print detailed switch state information"""
-        print(f"\n=== DEBUG SWITCH STATES {label} ===")
-        print(f"Network has {len(self.net.switch)} total switches")
-        line_switches = self.net.switch[self.net.switch['et'] == 'l']
-        print(f"Line switches: {len(line_switches)}")
+        self.initial_state = self.get_switch_states()
+        self.add_state(self.initial_state, "initial")
+    # def debug_switch_states(self, label=""):
+    #     """Debug method to print detailed switch state information"""
+    #     print(f"\n=== DEBUG SWITCH STATES {label} ===")
+    #     print(f"Network has {len(self.net.switch)} total switches")
+    #     line_switches = self.net.switch[self.net.switch['et'] == 'l']
+    #     print(f"Line switches: {len(line_switches)}")
         
-        # Show collapsed switches
-        print(f"\nCollapsed switches (one per line): {len(self.collapsed_switches)}")
-        for _, row in self.collapsed_switches.iterrows():
-            line_id = row['element']
-            all_switches = self.line_to_switches_map.get(line_id, [])
-            states = [self.net.switch.at[idx, 'closed'] for idx in all_switches]
-            print(f"  Line {line_id}: switches {all_switches} = {states}")
+    #     # Show collapsed switches
+    #     print(f"\nCollapsed switches (one per line): {len(self.collapsed_switches)}")
+    #     for _, row in self.collapsed_switches.iterrows():
+    #         line_id = row['element']
+    #         all_switches = self.line_to_switches_map.get(line_id, [])
+    #         states = [self.net.switch.at[idx, 'closed'] for idx in all_switches]
+    #         print(f"  Line {line_id}: switches {all_switches} = {states}")
         
-        # Show current state
-        current = self.get_switch_states()
-        print(f"\nCurrent state vector: {current}")
-        print(f"  Closed: {sum(current)}, Open: {len(current) - sum(current)}")
+    #     # Show current state
+    #     current = self.get_switch_states()
+    #     print(f"\nCurrent state vector: {current}")
+    #     print(f"  Closed: {sum(current)}, Open: {len(current) - sum(current)}")
         
-    def debug_plot_data(self, states, label):
-        """Debug plotting data"""
-        print(f"\n=== DEBUG PLOT DATA for {label} ===")
-        print(f"States provided: {states[:10]}..." if len(states) > 10 else f"States: {states}")
-        print(f"Number of states: {len(states)}")
-        print(f"Min: {min(states)}, Max: {max(states)}")
+    # def debug_plot_data(self, states, label):
+    #     """Debug plotting data"""
+    #     print(f"\n=== DEBUG PLOT DATA for {label} ===")
+    #     print(f"States provided: {states[:10]}..." if len(states) > 10 else f"States: {states}")
+    #     print(f"Number of states: {len(states)}")
+    #     print(f"Min: {min(states)}, Max: {max(states)}")
         
-        # Check line mapping
-        sorted_lines = sorted(self.collapsed_switches["element"].unique())
-        print(f"Lines being plotted: {sorted_lines[:10]}..." if len(sorted_lines) > 10 else f"Lines: {sorted_lines}") 
+    #     # Check line mapping
+    #     sorted_lines = sorted(self.collapsed_switches["element"].unique())
+    #     print(f"Lines being plotted: {sorted_lines[:10]}..." if len(sorted_lines) > 10 else f"Lines: {sorted_lines}") 
     def _build_line_to_switches_map(self):
         """Build mapping from line_id to all switch indices that control that line"""
         line_switches = self.net.switch[self.net.switch['et'] == 'l'].copy()
@@ -130,10 +130,10 @@ class NetworkSwitchManager:
         self.state_history.append(list(states))
         self.state_labels.append(label)
         
-        # Debug output
-        if label in ["initial", "gnn_round", "ground_truth", "gnn_only_final"]:
-            self.debug_switch_states(label)
-            self.debug_plot_data(states, label)
+        # # Debug output
+        # if label in ["initial", "gnn_round", "ground_truth", "gnn_only_final"]:
+        #     self.debug_switch_states(label)
+        #     self.debug_plot_data(states, label)
     
     def get_ground_truth_states(self, opt_net):
         """Extract ground truth states from optimized network"""
@@ -215,7 +215,10 @@ class NetworkSwitchManager:
             
             line_states = {}
             sorted_switches = self.collapsed_switches.sort_values("element")
+            switches_plotted =0 
             for j, (_, switch_row) in enumerate(sorted_switches.iterrows()):
+                switches_plotted += 1
+            
                 line_id = switch_row['element']
                 line_states[line_id] = states[j] if j < len(states) else 0
             
@@ -226,7 +229,7 @@ class NetworkSwitchManager:
                     switch_values.append(line_states.get(line_id, 0))
                 else:
                     regular_edges.append((u, v))
-            
+            print(f"Plotting {switches_plotted} switches for label '{label}'")
             # Draw the graph - edges first, then nodes
             # Regular edges in grey (draw first, under everything)
             if regular_edges:
@@ -728,7 +731,6 @@ class Optimizer:
             base_switch_manager = NetworkSwitchManager(base_net)
             initial_state = base_switch_manager.get_initial_states()  
             
-
             ground_truth = self.saver.extract_ground_truth(self.pp_all, gid, base_switch_manager)
             
             # Now create working copy for modifications
@@ -743,6 +745,7 @@ class Optimizer:
                 self.saver.first_graph_manager.add_state(ground_truth, "ground_truth")
                 
             rounded = self.saver.apply_rounding(raw_preds, self.saver.rounding_method, switch_manager)
+            switch_manager.set_switch_states(rounded, f"gnn_{self.saver.rounding_method}")
             
             # Get initial state for comparison
             original_states = switch_manager.get_switch_states()
