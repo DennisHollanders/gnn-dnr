@@ -1,3 +1,4 @@
+from random import shuffle
 import sys
 import os
 import torch
@@ -142,9 +143,14 @@ class NetworkSwitchManager:
         else:
             pos = nx.spring_layout(G, seed=0)  
         return pos
-    
-    def plot_state_comparison(self, figsize=(15, 4), save_path=None):
-        """Plot comparison of all tracked states with gradient coloring"""
+    def plot_state_comparison(self, figsize=(15, 4), save_path=None, fixed_switches=None):
+        """Plot comparison of all tracked states with gradient coloring
+        
+        Args:
+            figsize: Figure size
+            save_path: Path to save figure
+            fixed_switches: Dict of {line_id: value} for fixed switches (optional)
+        """
         if not self.state_history:
             print("No states to plot")
             return
@@ -158,87 +164,150 @@ class NetworkSwitchManager:
         G = self._build_graph_for_plotting()
         pos = self._get_positions(G)
         
-        # Create colormap for gradient (red to green: closed to open)
+        # Use a colormap with strong contrast between 0 and 1
         import matplotlib.cm as cm
-        cmap = cm.RdYlGn_r  
+        import matplotlib.colors as mcolors
+        
+        # Create custom colormap: red for open (0), green for closed (1)
+        cmap = mcolors.LinearSegmentedColormap.from_list("", ["red", "green"])
         
         for i, (states, label) in enumerate(zip(self.state_history, self.state_labels)):
             ax = axes[i]
-            print("average of states:", np.mean(states))
-            print(f"length of states: {len(states)}")
-            print("label")
-            print("states", states)
-
-            is_probability = label == "gnn_probs" or any(0 < s < 1 for s in states if isinstance(s, (int, float)))
             
-            regular_edges = []
-            switch_edges = []
-            switch_values = []
-
-            for u, v, data in G.edges(data=True):
-                switch_edges.append((u, v))
-                switch_values.append(states[i])
-
-
-            switch_values = states
-            if states:
-                avg_val = np.mean(states)
-                n_closed = sum(1 for v in states if v > 0.5)
-                n_open = len(states) - n_closed
-                print(f"Plotting '{label}': {len(states)} switches, avg={avg_val:.3f}, closed={n_closed}, open={n_open}")
-
-            if regular_edges:
-                nx.draw_networkx_edges(G, pos, edgelist=regular_edges, 
-                                    edge_color="lightgrey", width=1.0, ax=ax)
+            # Create line_id -> state mapping
+            line_to_state_idx = {lid: idx for idx, lid in enumerate(self.line_order)}
+            line_states = {lid: states[line_to_state_idx[lid]] for lid in self.line_order}
             
-            # Draw switches with gradient colors (draw second, over regular edges)
-            if switch_edges and switch_values:
-                switch_values = np.array(switch_values)
+            # Track nodes connected to open switches
+            open_switch_nodes = set()
+            
+            # For gnn_probs, use gradient coloring
+            if label == "gnn_probs":
+                # Draw non-switch edges first
+                for u, v, data in G.edges(data=True):
+                    if not data['is_switch']:
+                        nx.draw_networkx_edges(G, pos, edgelist=[(u, v)],
+                                            edge_color="lightgrey", width=1.0, ax=ax, alpha=0.3)
                 
-                # Draw each switch edge individually with its color
-                for edge, value in zip(switch_edges, switch_values):
-                    color = cmap(value)  # Get color from colormap
-                    
-                    # Check if this is hard warmstart and if this switch is fixed
-                    is_fixed = hasattr(self, 'fixed_switches') and label == "hard_warmstart"
-                    
-                    if is_fixed:
-                        # Draw double line for fixed switches
-                        nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                            edge_color=[color], width=4.0, ax=ax, alpha=0.8)
-                        nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                            edge_color=['white'], width=2.0, ax=ax, alpha=0.8)
-                        nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                            edge_color=[color], width=1.0, ax=ax, alpha=0.8)
-                    else:
-                        # Regular switch edge
-                        nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                            edge_color=[color], width=2.5, ax=ax, alpha=0.8)
-            
-            # All nodes in grey (draw last, on top of edges)
-            nx.draw_networkx_nodes(G, pos, node_size=20, node_color="lightgrey", 
-                                edgecolors="grey", linewidths=0.3, ax=ax)
-            
-            # Count switches
-            if is_probability:
-                # For probabilities, show average value
-                avg_value = np.mean(states)
-                ax.set_title(f"{label}\navg prob: {avg_value:.2f}")
+                # Draw switch edges with gradient colors
+                for u, v, data in G.edges(data=True):
+                    line_id = data['line_id']
+                    if data['is_switch']:
+                        state_value = line_states.get(line_id, 0)
+                        color = cmap(state_value)  # This will scale 0-1 automatically
+                        nx.draw_networkx_edges(G, pos, edgelist=[(u, v)],
+                                            edge_color=[color], width=3.0, ax=ax, alpha=0.9)
+                        
+                        if state_value < 0.5:
+                            open_switch_nodes.add(u)
+                            open_switch_nodes.add(v)
             else:
-                # For binary states, count open/closed
-                n_closed = sum(states)
-                n_open = len(states) - n_closed
-                ax.set_title(f"{label}\n{n_closed:.1f} closed, {n_open:.1f} open")
+                # For binary states, separate edges by type
+                switch_edges_open = []
+                switch_edges_closed = []
+                switch_edges_fixed_open = []
+                switch_edges_fixed_closed = []
+                non_switch_edges = []
+                
+                # Categorize edges
+                for u, v, data in G.edges(data=True):
+                    line_id = data['line_id']
+                    
+                    if data['is_switch']:
+                        state_value = line_states.get(line_id, 0)
+                        
+                        # Check if this switch is fixed
+                        is_fixed = fixed_switches and line_id in fixed_switches
+                        
+                        if state_value < 0.5:
+                            if is_fixed:
+                                switch_edges_fixed_open.append((u, v))
+                            else:
+                                switch_edges_open.append((u, v))
+                            open_switch_nodes.add(u)
+                            open_switch_nodes.add(v)
+                        else:
+                            if is_fixed:
+                                switch_edges_fixed_closed.append((u, v))
+                            else:
+                                switch_edges_closed.append((u, v))
+                    else:
+                        non_switch_edges.append((u, v))
+                
+                # Draw edges with appropriate colors
+                # Non-switch edges (thin grey)
+                if non_switch_edges:
+                    nx.draw_networkx_edges(G, pos, edgelist=non_switch_edges,
+                                        edge_color="lightgrey", width=1.0, ax=ax, alpha=0.3)
+                
+                # Open switches (thick red, solid line)
+                if switch_edges_open:
+                    nx.draw_networkx_edges(G, pos, edgelist=switch_edges_open,
+                                        edge_color="red", width=3.0, ax=ax, alpha=0.9)
+                
+                # Closed switches (thick green)
+                if switch_edges_closed:
+                    nx.draw_networkx_edges(G, pos, edgelist=switch_edges_closed,
+                                        edge_color="green", width=3.0, ax=ax, alpha=0.9)
+                
+                # Fixed open switches (thick red, double dashed)
+                if switch_edges_fixed_open:
+                    nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_open,
+                                        edge_color="red", width=3.0, ax=ax, alpha=0.9,
+                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                    nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_open,
+                                        edge_color="black", width=1.0, ax=ax, alpha=0.9,
+                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                
+                # Fixed closed switches (thick green, double dashed)
+                if switch_edges_fixed_closed:
+                    nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_closed,
+                                        edge_color="green", width=3.0, ax=ax, alpha=0.9,
+                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                    nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_closed,
+                                        edge_color="black", width=1.0, ax=ax,
+                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
             
+            # Draw nodes
+            node_colors = []
+            for node in G.nodes():
+                if node in open_switch_nodes:
+                    node_colors.append("red")
+                else:
+                    node_colors.append("lightgrey")
+            
+            nx.draw_networkx_nodes(G, pos, node_size=30, node_color=node_colors,
+                                edgecolors="black", linewidths=0.5, ax=ax)
+            
+            # Set title with counts
+            if label == "gnn_probs":
+                avg_value = np.mean(states)
+                title = f"{label}\navg prob: {avg_value:.2f}"
+            else:
+                n_closed = sum(1 for s in states if s > 0.5)
+                n_open = len(states) - n_closed
+                title = f"{label}\n{n_closed} closed, {n_open} open"
+            
+            ax.set_title(title, fontsize=10)
             ax.axis("off")
         
-        # Add colorbar to show the gradient scale
-        if switch_edges:  # Only add colorbar if there are switches
-            sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=1))
-            sm.set_array([])
-            cbar = fig.colorbar(sm, ax=axes, orientation='horizontal', 
-                            shrink=0.6, pad=0.1, aspect=30)
-            cbar.set_label('Switch State (0=Open, 1=Closed)', fontsize=10)
+        # Add colorbar for probability visualization
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=1))
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axes, orientation='horizontal', 
+                        shrink=0.6, pad=0.1, aspect=30)
+        cbar.set_label('Switch State (0=Open/Red, 1=Closed/Green)', fontsize=10)
+        
+        # Add legend
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='green', lw=3, label='Closed Switch'),
+            Line2D([0], [0], color='red', lw=3, label='Open Switch'),
+            Line2D([0], [0], color='red', lw=3, linestyle=(0, (5, 2, 1, 2)), label='Fixed Open Switch'),
+            Line2D([0], [0], color='green', lw=3, linestyle=(0, (5, 2, 1, 2)), label='Fixed Closed Switch'),
+            Line2D([0], [0], color='lightgrey', lw=1, label='Non-switch Line'),
+        ]
+        fig.legend(handles=legend_elements, loc='lower center', ncol=5, bbox_to_anchor=(0.5, -0.15))
         
         plt.tight_layout()
         
@@ -247,7 +316,77 @@ class NetworkSwitchManager:
             plt.close(fig)
         else:
             plt.show()
-
+    # def plot_state_comparison(self, figsize=(15, 4), save_path=None):
+    #     """Plot comparison of all tracked states with gradient coloring"""
+    #     if not self.state_history:
+    #         print("No states to plot")
+    #         return
+        
+    #     n_states = len(self.state_history)
+    #     fig, axes = plt.subplots(1, n_states, figsize=figsize)
+        
+    #     if n_states == 1:
+    #         axes = [axes]
+        
+    #     G = self._build_graph_for_plotting()
+    #     pos = self._get_positions(G)
+        
+    #     # Create colormap for gradient (red=closed, green=open)
+    #     import matplotlib.cm as cm
+    #     cmap = cm.RdYlGn_r  
+        
+    #     for i, (states, label) in enumerate(zip(self.state_history, self.state_labels)):
+    #         ax = axes[i]
+            
+    #         # Create line_id -> state mapping
+    #         line_states = {lid: states[j] for j, lid in enumerate(self.line_order)}
+            
+    #         # Separate edges by type and get their colors
+    #         for u, v, data in G.edges(data=True):
+    #             line_id = data['line_id']
+                
+    #             if data['is_switch']:
+    #                 # Get the state value for this switch
+    #                 state_value = line_states.get(line_id, 0)
+    #                 color = cmap(state_value)
+                    
+    #                 # Draw switch edge with color based on state
+    #                 nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], 
+    #                                     edge_color=[color], width=2.5, ax=ax, alpha=0.8)
+    #             else:
+    #                 # Draw non-switch edge in grey
+    #                 nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], 
+    #                                     edge_color="lightgrey", width=1.0, ax=ax)
+            
+    #         # Draw all nodes
+    #         nx.draw_networkx_nodes(G, pos, node_size=20, node_color="lightgrey", 
+    #                             edgecolors="grey", linewidths=0.3, ax=ax)
+            
+    #         # Set title based on state type
+    #         if label == "gnn_probs":
+    #             avg_value = np.mean(states)
+    #             ax.set_title(f"{label}\navg prob: {avg_value:.2f}")
+    #         else:
+    #             n_closed = sum(1 for s in states if s > 0.5)
+    #             n_open = len(states) - n_closed
+    #             ax.set_title(f"{label}\n{n_closed} closed, {n_open} open")
+            
+    #         ax.axis("off")
+        
+    #     # Add colorbar
+    #     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=1))
+    #     sm.set_array([])
+    #     cbar = fig.colorbar(sm, ax=axes, orientation='horizontal', 
+    #                     shrink=0.6, pad=0.1, aspect=30)
+    #     cbar.set_label('Switch State (0=Open, 1=Closed)', fontsize=10)
+        
+    #     plt.tight_layout()
+        
+    #     if save_path:
+    #         plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    #         plt.close(fig)
+    #     else:
+    #         plt.show()
 
 
 def collapse_switches_to_one_per_line(net):
@@ -302,6 +441,7 @@ def apply_physics_informed_rounding(switch_probs, switch_manager, device='cpu'):
 class Predictor:
     def __init__(self, model_path, config_path, device, sample_loader):
         self.device = device
+
         config = (yaml.safe_load(open(config_path)) if config_path
                   else load_config_from_model_path(model_path))
         self.eval_args = argparse.Namespace(**config)
@@ -342,39 +482,31 @@ class Predictor:
         self.loader = sample_loader
 
     def run(self, loader=None, graph_ids=None):
-            loader = loader or self.loader
-            preds = {}
-            batch_counter = 0  # Track which graph we're processing
-            print(f"graph_ids: {graph_ids}")
-            print(f"Predicting on {len(loader.dataset)} samples with {self.eval_args.model_module} model...")
-            with torch.no_grad():
-                for batch in tqdm(loader, desc="Predicting", leave=False):
-                    start_time = time.time()
-                    batch = batch.to(self.device)
-                    out = self.model(batch)
-                    if "switch_probabilities" in out:
-                        probs = out["switch_probabilities"][..., 1]
-                    elif "switch_predictions" in out:
-                        probs = out["switch_predictions"]
-                    else:
-                        logits = out.get("switch_logits")
-                        if logits.shape[-1] == 1:
-                            probs = torch.sigmoid(logits).squeeze(-1)
-                        else:
-                            probs = torch.softmax(logits, dim=-1)[..., 1]
-                    probs = probs.cpu().numpy()
-                    gnn_time = time.time() - start_time
-                    preds[graph_ids[batch_counter]] = probs.tolist() 
-                    self.gnn_times[graph_ids[batch_counter]] = gnn_time
-                    batch_counter += 1
-                    
+        loader = loader or self.loader
+        preds = {}
+        print(f"Predicting on {len(loader.dataset)} samples with {self.eval_args.model_module} model…")
+        with torch.no_grad():
+            for i, batch in enumerate(tqdm(loader, desc="Predicting", leave=False)):
+                start = time.time()
+                batch = batch.to(self.device)
+                out = self.model(batch)
+                logits = out.get("switch_logits")
+                if logits is None:
+                    raise RuntimeError("No logits found in model output")
+                if logits.dim() == 1 or (logits.dim() == 2 and logits.size(1) == 1):
+                    probs = torch.sigmoid(logits).squeeze(-1)
+                elif logits.dim() >= 2 and logits.size(-1) == 2:
+                    probs = torch.softmax(logits, dim=-1)[..., 1]
+                else:
+                    raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
+                probs = probs.cpu().numpy().tolist()
+                gnn_time = time.time() - start
 
-            print(f"Predictions complete. Total graphs: {len(preds)}")
-            print(f"Prediction keys: {list(preds.keys())}")
-            if preds:
-                first_key = list(preds.keys())[0]
-                print(f"Example predictions for first graph ({first_key}): {preds[first_key][:5]}...")
-            
+                # pick the true graph_id from the batch (fallback to graph_ids[i])
+                gid =  batch.graph_id.item()
+
+                preds[gid] = probs
+                self.gnn_times[gid] = gnn_time
             return preds, self.gnn_times
 
 class WarmstartSOCP(SOCP_class):
@@ -391,7 +523,7 @@ class WarmstartSOCP(SOCP_class):
     def create_model(self):
         model = super().create_model()
         for idx, val in self.fixed_switches.items():
-            row = self.switch_df.iloc[idx]
+            row = self.switch_df.loc[idx]
             if row.et == 'l' and row.element in model.lines:
                 model.line_status[row.element].fix(val)
         return model
@@ -567,25 +699,33 @@ class Optimizer:
         }
 
         self.pp_all = load_pp_networks(self.folder_name)
-        self.graph_ids = sorted(self.pp_all["mst"].keys())
+        self.graph_ids = self.pp_all["mst"].keys
 
         # align predictions/network IDs
-        preds = set(self.predictions.keys())
-        nets  = set(self.graph_ids)
-        if preds != nets:
-            common = sorted(preds & nets)
-            print(f"Processing only {len(common)} matching graphs")
-            self.graph_ids = common
+        preds = self.predictions.keys()
+        nets  = self.graph_ids
+        for i in range(50): 
+            print(f"Prediction {i}: {preds[i]} with {len(self.predictions[preds[i]])} switches and nets {nets[i]} with {len(self.pp_all['mst'][nets[i]].switch)} switches")
+        # if preds != nets:
+        #     common = sorted(preds & nets)
+        #     print(f"Processing only {len(common)} matching graphs")
+        #     self.graph_ids = common
 
 
     def _optimize_single(self, args):
         idx, mode = args
         gid = self.graph_ids[idx]
+        print(f"Processing graph {idx+1}/{len(self.graph_ids)}: {gid} with mode '{mode}'")
         gnn_time = self.gnn_times.get(gid, 0.0)
+
+
+        print(f"retrieving gnn output of {gid} to process optimization of {gid}")
         try:
             # Create network and manager
             net = self.pp_all["mst"][gid].deepcopy()
             switch_manager = NetworkSwitchManager(net)
+
+            print(f"network {gid} has {len(switch_manager.collapsed_switches)} switches and nodes: {len(switch_manager.net.bus)}")
             
             # Store manager for visualization
             self.saver.graph_managers[gid] = switch_manager
@@ -780,6 +920,7 @@ class Optimizer:
         print(f"Running optimization ({self.warmstart_mode}) with {num_workers} workers")
 
         args = [(i, self.warmstart_mode) for i in range(len(self.graph_ids))]
+        
         results = {}
 
         if num_workers > 1:
@@ -800,10 +941,11 @@ if __name__ == "__main__":
                         default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------jumping-wave-13.yaml",
                         help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\jumping-wave-13-Best.pt", 
+                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\jumping-wave-13-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
                         default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
+                        #default = [r"data/split_datasets/test"],
                         help="Folder containing 'mst' and 'mst_opt' subfolders")
     parser.add_argument("--dataset_names", type=str, nargs="+",
                         default=["test"],
@@ -812,13 +954,13 @@ if __name__ == "__main__":
     # Warmstart arguments
     parser.add_argument("--warmstart_mode", type=str,
                         choices=["only_gnn_predictions", "soft", "float", "hard", "optimization_without_warmstart"],
-                        default="only_gnn_predictions",
+                        default="hard",
                         help="Warmstart strategy")
     parser.add_argument("--rounding_method", type=str,
                         choices=["round", "PhyR"],
-                        default="round",
+                        default="PhyR",
                         help="Rounding method for predictions")
-    parser.add_argument("--confidence_threshold", type=float, default=0.5,
+    parser.add_argument("--confidence_threshold", type=float, default=0.1,
                         help="Confidence threshold for hard warmstart")
     
     parser.add_argument("--num_workers", type=int, default=0,
@@ -827,6 +969,7 @@ if __name__ == "__main__":
                         help="Run prediction step")
     parser.add_argument("--optimize", action="store_true", default=True, 
                         help="Run optimization step")
+    parser.add_argument("--visualize", default=True, help="Save visualizations of all graphs")
     
     args = parser.parse_args()
 
@@ -835,16 +978,18 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pp_networks = load_pp_networks(args.folder_names[0])
-    print(pp_networks)
+
     graph_ids = sorted(pp_networks["mst"].keys())
 
     loaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
         dataset_type="default",
+        shuffle=False,
         batch_size=1)
     test_loader = loaders.get("test", None)
-    
+    for batch in test_loader:
+        print(f"first batch:    {batch[0]}")
     # Verify alignment
     if len(test_loader.dataset) != len(graph_ids):
         print(f"Warning: Dataset size ({len(test_loader.dataset)}) != number of graphs ({len(graph_ids)})")
@@ -895,11 +1040,12 @@ if __name__ == "__main__":
             gnn_times=gnn_times,
         )
         final_results, csv_path = optimizer.run(num_workers=args.num_workers)
-
-        # Save visualizations for all graphs
-        print("\nSaving visualizations for all graphs...")
-        saver.save_all_visualizations()
-        print(f"Visualizations saved to: {saver.visualization_folder}")
+        
+        if args.visualize:
+            # Save visualizations for all graphs
+            print("\nSaving visualizations for all graphs...")
+            saver.save_all_visualizations()
+            print(f"Visualizations saved to: {saver.visualization_folder}")
 
         print(f"Optimization completed with {len(final_results)} results.")
         print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")

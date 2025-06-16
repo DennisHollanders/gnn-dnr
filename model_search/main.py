@@ -145,6 +145,7 @@ def main():
         seed=args.seed,
         num_workers=args.num_workers,
         batching_type=args.batching_type,
+        shuffle=True,  # Set shuffle to True for training data
     )
     train_loader, validation_loader, test_loader = dataloaders.get("train"),  dataloaders.get("validation"), dataloaders.get("test")
 
