@@ -168,20 +168,13 @@ class NetworkSwitchManager:
             # Check if this is probability data (values between 0 and 1 but not exactly 0 or 1)
             is_probability = label == "gnn_probs" or any(0 < s < 1 for s in states if isinstance(s, (int, float)))
             
-            # Separate regular edges and switch edges with their values
             regular_edges = []
             switch_edges = []
             switch_values = []
-            
-            line_states = {}
-            sorted_switches = self.collapsed_switches.sort_values("element")
-            switches_plotted =0 
-            for j, (_, switch_row) in enumerate(sorted_switches.iterrows()):
-                switches_plotted += 1
-            
-                line_id = switch_row['element']
-                line_states[line_id] = states[j] if j < len(states) else 0
-            
+
+            # Build a mapping from line_id -> state using our canonical order
+            line_states = {lid: states[i] for i, lid in enumerate(self.line_order)}
+
             for u, v, data in G.edges(data=True):
                 line_id = data['line_id']
                 if data['is_switch']:
@@ -189,9 +182,13 @@ class NetworkSwitchManager:
                     switch_values.append(line_states.get(line_id, 0))
                 else:
                     regular_edges.append((u, v))
-            # Build a mapping from line_id -> state using our canonical order
-            line_states = { lid: states[i] for i, lid in enumerate(self.line_order) }
-            print(f"Plotting {switches_plotted} switches for label '{label}, with average value {np.mean(switch_values) if switch_values else 'N/A'}'")
+
+            # Debug print
+            if switch_values:
+                avg_val = np.mean(switch_values)
+                n_closed = sum(1 for v in switch_values if v > 0.5)
+                n_open = len(switch_values) - n_closed
+                print(f"Plotting '{label}': {len(switch_values)} switches, avg={avg_val:.3f}, closed={n_closed}, open={n_open}")
             # Draw the graph - edges first, then nodes
             # Regular edges in grey (draw first, under everything)
             if regular_edges:
