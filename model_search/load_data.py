@@ -143,7 +143,7 @@ def process_single_graph(gid, pp_all, dataset_type):
     data_y = create_pyg_from_pp(net_opt)
     data_x.edge_y = data_y.edge_attr[:, 2]    # switch_state
     data_x.node_y_voltage = data_y.x[:, 2]    # vm_pu
-    data_x.graph_id = torch.tensor([gid], dtype=torch.long)
+    data_x.graph_id = gid
     if dataset_type == "cvx":
         cvx_feat =cxv_features(pp_all[phase][gid] )
         # Store CVX features as additional attributes in the Data object
@@ -484,14 +484,17 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
-    parser.add_argument("--dataset_names", type=str, nargs="+", default= ["train",
-                                                                         "validation","test"
+    parser.add_argument("--dataset_names", type=str, nargs="+", default= [
+                                                                        "train",
+                                                                         "validation",
+                                                                         "test"
                                                                           ]
                                                                           , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
                 r"data\split_datasets\train",
                 r"data\split_datasets\validation",
                 r"data\split_datasets\test",
+                #r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test"
                 #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
     parser.add_argument("--dataset_type", type=str, default="default", 
