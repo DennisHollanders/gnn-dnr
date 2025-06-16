@@ -21,20 +21,18 @@ model_kwargs:
   # GAT Configuration
   gnn_type: GAT
   gnn_layers: 4
-  gnn_hidden_dim: 512 
+  gnn_hidden_dim: 256 
   gat_heads: 4
   gat_dropout: 0.005
   gat_v2: true
 
   # Edge MLP
   use_edge_mlp: true
-  edge_hidden_dims:
-    - [256, 512]
+  edge_hidden_dims: [256, 512]
 
   # Node MLP
   use_node_mlp: true
-  node_hidden_dims:
-    - [256, 512, 1024]
+  node_hidden_dims: [256, 512, 1024]
   # General Configuration
   activation: "leaky_relu"
   dropout_rate:  0.01
@@ -56,18 +54,19 @@ model_kwargs:
   lambda_radiality: 1e-2
 
   # Optimizer
-  learning_rate: 1e-4
-  weight_decay: 1e-5
+  learning_rate: 0.0001
+  weight_decay: 0.00001
 
   # Loss & Optimization
   loss_scaling_strategy: "adaptive_magnitude"
   criterion_name: "WeightedBCELoss"
-
+criterion_name: "WeightedBCELoss"
 # Training Configuration
-batch_size: [64, 128, 256]
+batch_size: 128
 epochs: 200
 patience: 20
-
+weight_decay: 0.00001
+learning_rate: 0.0001
 # Output Configuration
 output_type: "mutliclass"
 num_classes: 2

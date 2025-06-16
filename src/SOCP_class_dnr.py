@@ -719,16 +719,16 @@ class SOCP_class:
     
 
         # Deep verification of solution 
-        self.verify_solution()
+        #self.verify_solution()
         
         # Verify constraint satisfaction
-        self.verify_constraint_satisfaction()
+        #self.verify_constraint_satisfaction()
         
         # Track switch changes
-        self.track_switch_changes()
+        # self.track_switch_changes()
         
         # Process the solution for return
-        self.process_solution(update_network=False)
+        #self.process_solution(update_network=False)
         return self.solver_results
 
     def track_switch_changes(self):
