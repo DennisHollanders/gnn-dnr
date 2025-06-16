@@ -160,37 +160,33 @@ class NetworkSwitchManager:
         
         # Create colormap for gradient (red to green: closed to open)
         import matplotlib.cm as cm
-        cmap = cm.RdYlGn_r  # Red-Yellow-Green reversed (red=closed, green=open)
+        cmap = cm.RdYlGn_r  
         
         for i, (states, label) in enumerate(zip(self.state_history, self.state_labels)):
             ax = axes[i]
-            
-            # Check if this is probability data (values between 0 and 1 but not exactly 0 or 1)
+            print("average of states:", np.mean(states))
+            print(f"length of states: {len(states)}")
+            print("label")
+            print("states", states)
+
             is_probability = label == "gnn_probs" or any(0 < s < 1 for s in states if isinstance(s, (int, float)))
             
             regular_edges = []
             switch_edges = []
             switch_values = []
 
-            # Build a mapping from line_id -> state using our canonical order
-            line_states = {lid: states[i] for i, lid in enumerate(self.line_order)}
-
             for u, v, data in G.edges(data=True):
-                line_id = data['line_id']
-                if data['is_switch']:
-                    switch_edges.append((u, v))
-                    switch_values.append(line_states.get(line_id, 0))
-                else:
-                    regular_edges.append((u, v))
+                switch_edges.append((u, v))
+                switch_values.append(states[i])
 
-            # Debug print
-            if switch_values:
-                avg_val = np.mean(switch_values)
-                n_closed = sum(1 for v in switch_values if v > 0.5)
-                n_open = len(switch_values) - n_closed
-                print(f"Plotting '{label}': {len(switch_values)} switches, avg={avg_val:.3f}, closed={n_closed}, open={n_open}")
-            # Draw the graph - edges first, then nodes
-            # Regular edges in grey (draw first, under everything)
+
+            switch_values = states
+            if states:
+                avg_val = np.mean(states)
+                n_closed = sum(1 for v in states if v > 0.5)
+                n_open = len(states) - n_closed
+                print(f"Plotting '{label}': {len(states)} switches, avg={avg_val:.3f}, closed={n_closed}, open={n_open}")
+
             if regular_edges:
                 nx.draw_networkx_edges(G, pos, edgelist=regular_edges, 
                                     edge_color="lightgrey", width=1.0, ax=ax)
@@ -251,96 +247,7 @@ class NetworkSwitchManager:
             plt.close(fig)
         else:
             plt.show()
-    
-    def plot_single_state(self, states=None, label="Current State", ax=None, show_labels=False, fixed_switches=None):
-        """Plot a single state of the network with gradient coloring"""
-        if states is None:
-            states = self.get_switch_states()
-        
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
-            show_plot = True
-        else:
-            show_plot = False
-        
-        G = self._build_graph_for_plotting()
-        pos = self._get_positions(G)
-        
-        # Create colormap for gradient (red to green: closed to open)
-        import matplotlib.cm as cm
-        cmap = cm.RdYlGn_r  # Red-Yellow-Green reversed (red=closed, green=open)
-        
-        # Separate regular edges and switch edges with their values
-        regular_edges = []
-        switch_edges = []
-        switch_values = []
-        
-        line_states = {}
-        sorted_switches = self.collapsed_switches.sort_values("element")
-        for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
-            line_id = switch_row['element']
-            line_states[line_id] = states[i] if i < len(states) else 0
-        
-        for u, v, data in G.edges(data=True):
-            line_id = data['line_id']
-            if data['is_switch']:
-                switch_edges.append((u, v))
-                switch_values.append(line_states.get(line_id, 0))
-            else:
-                regular_edges.append((u, v))
-        
-        # Draw the graph - edges first, then nodes
-        # Regular edges in grey (draw first, under everything)
-        if regular_edges:
-            nx.draw_networkx_edges(G, pos, edgelist=regular_edges, 
-                                 edge_color="lightgrey", width=1.0, ax=ax)
-        
-        # Draw switches with gradient colors (draw second, over regular edges)
-        if switch_edges and switch_values:
-            switch_values = np.array(switch_values)
-            
-            # Draw each switch edge individually with its color
-            for edge, value in zip(switch_edges, switch_values):
-                color = cmap(value)  # Get color from colormap
-                
-                # Check if this switch is fixed (for hard warmstart)
-                is_fixed = fixed_switches is not None and any(
-                    line_id in self.line_to_switches_map and 
-                    any(sw_idx in fixed_switches for sw_idx in self.line_to_switches_map[line_id])
-                    for line_id in [data['line_id'] for u, v, data in G.edges(data=True) if (u, v) == edge]
-                )
-                
-                if is_fixed:
-                    # Draw double line for fixed switches
-                    nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                         edge_color=[color], width=4.0, ax=ax, alpha=0.8)
-                    nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                         edge_color=['white'], width=2.0, ax=ax, alpha=0.8)
-                    nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                         edge_color=[color], width=1.0, ax=ax, alpha=0.8)
-                else:
-                    # Regular switch edge
-                    nx.draw_networkx_edges(G, pos, edgelist=[edge], 
-                                         edge_color=[color], width=2.5, ax=ax, alpha=0.8)
-        
-        # All nodes in grey (draw last, on top of edges)
-        nx.draw_networkx_nodes(G, pos, node_size=20, node_color="lightgrey", 
-                             edgecolors="grey", linewidths=0.3, ax=ax)
-        
-        # Optionally show node labels
-        if show_labels:
-            nx.draw_networkx_labels(G, pos, font_size=8, ax=ax)
-        
-        # Count switches
-        n_closed = sum(states)
-        n_open = len(states) - n_closed
-        
-        ax.set_title(f"{label}\n{n_closed:.1f} closed, {n_open:.1f} open")
-        ax.axis("off")
-        
-        if show_plot:
-            plt.tight_layout()
-            plt.show()
+
 
 
 def collapse_switches_to_one_per_line(net):
