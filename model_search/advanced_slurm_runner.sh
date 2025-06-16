@@ -135,12 +135,22 @@ for model in "${!MODELS[@]}"; do
     case $choice in
       only_gnn_predictions)
         predict="--predict"; optimize=""
-        warm="none"; round="round"; conf=0.5
+        warm="none"; conf=0.5
+        for round in "round" "PhyR"; do
+          name="${model}_only_gnn_${round}"
+          submit_job "$name" "$model" "$mp" "$cp" "$warm" "$round" "$conf" "$predict" "$optimize"
+          ((job_count++))
+        done
         ;;
 
       soft)
         predict="--predict"; optimize="--optimize"
-        warm="soft"; round="round"; conf=0.5
+        warm="soft"; conf=0.5
+        for round in "round" "PhyR"; do
+          name="${model}_soft_${round}"
+          submit_job "$name" "$model" "$mp" "$cp" "$warm" "$round" "$conf" "$predict" "$optimize"
+          ((job_count++))
+        done
         ;;
 
       float)
@@ -167,8 +177,13 @@ for model in "${!MODELS[@]}"; do
 
   echo "=> Submitted $job_count jobs for $model"
 done
+# one global “optimization with warmstart” job (just pick one model/config or leave blank)
+submit_job "optimization_with_warmstart" "ALL_MODELS" "" "" "soft" "round" 0.5 "" "--optimize"
+((job_count++))
 
-# Run Optimization Without Warmstart ONCE
+echo "All done. Total jobs: $job_count"
+
+
 opt_name="Optimization_Only"
 submit_job "$opt_name" "ALL_MODELS" "" "" "none" "round" 0.5 "" "--optimize"
 ((job_count++))
