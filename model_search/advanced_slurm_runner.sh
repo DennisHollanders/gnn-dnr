@@ -11,8 +11,6 @@
 BASE_DIR="$HOME/gnn-dnr"
 DATA_DIR="$BASE_DIR/data/split_datasets/test"
 LOG_DIR="$BASE_DIR/slurm_logs"
-
-# Make sure the log directory exists
 mkdir -p "$LOG_DIR"
 
 # Model configurations
@@ -21,30 +19,34 @@ declare -A MODELS=(
   ["GIN"]="$BASE_DIR/model_search/models/final_models/cosmic-field-12-Best.pt"
   ["GCN"]="$BASE_DIR/model_search/models/final_models/volcanic-moon-10-Best.pt"
 )
-
 declare -A CONFIGS=(
   ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------blooming-snow-15.yaml"
   ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------cosmic-field-12.yaml"
   ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------volcanic-moon-10.yaml"
 )
 
+# Grab one “first” model for the global warm-start job
+keys=("${!MODELS[@]}")
+GLOBAL_MODEL="${keys[0]}"
+GLOBAL_MP="${MODELS[$GLOBAL_MODEL]}"
+GLOBAL_CP="${CONFIGS[$GLOBAL_MODEL]}"
+
 # Experiment parameters
 DATASET_NAME="test"
 NUM_WORKERS=8
-BATCH_SIZE=32
 
 # SLURM parameters
 PARTITION="tue.default.q"
 TIME_LIMIT="1-00:00:00"
 MEMORY="16G"
-CPUS=16
+CPUS=8
 NODES=1
 NTASKS_PER_NODE=1
 
 SUBMIT_LOG="$LOG_DIR/all_submissions.log"
 
 # ----------------------------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPER FUNCTION
 # ----------------------------------------------------------------------------
 
 submit_job() {
@@ -72,7 +74,6 @@ submit_job() {
 #SBATCH --time=${TIME_LIMIT}
 #SBATCH --partition=${PARTITION}
 
-# Load modules
 module purge
 module load Python/3.11.3
 module load poetry/1.5.1-GCCcore-12.3.0
@@ -105,7 +106,6 @@ poetry run python -I model_search/predict_then_optimize.py \\
 echo "Finished: \$(date)"
 EOF
 
-    # Submit it
     if sbatch_out=$(sbatch "$job_script"); then
         local job_id=$(echo "$sbatch_out" | awk '{print $4}')
         echo "$(date '+%F %T') | SUBMITTED | $job_name | $job_id" >> "$SUBMIT_LOG"
@@ -135,12 +135,13 @@ for model in "${!MODELS[@]}"; do
     case $choice in
       only_gnn_predictions)
         predict="--predict"; optimize=""
-        warm="none"; conf=0.5
+        warm="only_gnn_predictions"; conf=0.5
         for round in "round" "PhyR"; do
           name="${model}_only_gnn_${round}"
           submit_job "$name" "$model" "$mp" "$cp" "$warm" "$round" "$conf" "$predict" "$optimize"
           ((job_count++))
         done
+        continue
         ;;
 
       soft)
@@ -151,6 +152,7 @@ for model in "${!MODELS[@]}"; do
           submit_job "$name" "$model" "$mp" "$cp" "$warm" "$round" "$conf" "$predict" "$optimize"
           ((job_count++))
         done
+        continue
         ;;
 
       float)
@@ -170,22 +172,17 @@ for model in "${!MODELS[@]}"; do
         ;;
     esac
 
+    # default submit for float
     name="${model}_${choice}"
     submit_job "$name" "$model" "$mp" "$cp" "$warm" "$round" "$conf" "$predict" "$optimize"
     ((job_count++))
   done
 
-  echo "=> Submitted $job_count jobs for $model"
+  echo "=> Submitted $job_count jobs so far"
 done
-# one global “optimization with warmstart” job (just pick one model/config or leave blank)
-submit_job "optimization_with_warmstart" "ALL_MODELS" "" "" "soft" "round" 0.5 "" "--optimize"
-((job_count++))
 
-echo "All done. Total jobs: $job_count"
-
-
-opt_name="Optimization_Only"
-submit_job "$opt_name" "ALL_MODELS" "" "" "none" "round" 0.5 "" "--optimize"
+# one global “optimization with warmstart” job (using first model/config)
+submit_job "optimization_with_warmstart" "$GLOBAL_MODEL" "$GLOBAL_MP" "$GLOBAL_CP" "soft" "round" 0.5 "" "--optimize"
 ((job_count++))
 
 echo "All done. Total jobs: $job_count"
