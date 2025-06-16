@@ -28,50 +28,21 @@ from data_generation.define_ground_truth import is_radial_and_connected
 from model_search.load_data2 import *
 
 class NetworkSwitchManager:
-    """Enhanced NetworkSwitchManager with state tracking and plotting capabilities"""
-    
     def __init__(self, net):
         self.net = net
         self.collapsed_switches, self.conflicts = collapse_switches_to_one_per_line(net)
+        self.line_order = sorted(
+            int(x) for x in self.collapsed_switches["element"].tolist()
+        )
         self.line_to_switches_map = self._build_line_to_switches_map()
-        
-        # State tracking for visualization
+
         self.state_history = []
         self.state_labels = []
-        
-        # Store initial state
-        self.initial_state = self.get_switch_states()
+
+        # Capture initial state immediately
+        self.initial_state = self._capture_current_state()
         self.add_state(self.initial_state, "initial")
-    # def debug_switch_states(self, label=""):
-    #     """Debug method to print detailed switch state information"""
-    #     print(f"\n=== DEBUG SWITCH STATES {label} ===")
-    #     print(f"Network has {len(self.net.switch)} total switches")
-    #     line_switches = self.net.switch[self.net.switch['et'] == 'l']
-    #     print(f"Line switches: {len(line_switches)}")
-        
-    #     # Show collapsed switches
-    #     print(f"\nCollapsed switches (one per line): {len(self.collapsed_switches)}")
-    #     for _, row in self.collapsed_switches.iterrows():
-    #         line_id = row['element']
-    #         all_switches = self.line_to_switches_map.get(line_id, [])
-    #         states = [self.net.switch.at[idx, 'closed'] for idx in all_switches]
-    #         print(f"  Line {line_id}: switches {all_switches} = {states}")
-        
-    #     # Show current state
-    #     current = self.get_switch_states()
-    #     print(f"\nCurrent state vector: {current}")
-    #     print(f"  Closed: {sum(current)}, Open: {len(current) - sum(current)}")
-        
-    # def debug_plot_data(self, states, label):
-    #     """Debug plotting data"""
-    #     print(f"\n=== DEBUG PLOT DATA for {label} ===")
-    #     print(f"States provided: {states[:10]}..." if len(states) > 10 else f"States: {states}")
-    #     print(f"Number of states: {len(states)}")
-    #     print(f"Min: {min(states)}, Max: {max(states)}")
-        
-    #     # Check line mapping
-    #     sorted_lines = sorted(self.collapsed_switches["element"].unique())
-    #     print(f"Lines being plotted: {sorted_lines[:10]}..." if len(sorted_lines) > 10 else f"Lines: {sorted_lines}") 
+
     def _build_line_to_switches_map(self):
         """Build mapping from line_id to all switch indices that control that line"""
         line_switches = self.net.switch[self.net.switch['et'] == 'l'].copy()
@@ -86,31 +57,28 @@ class NetworkSwitchManager:
     def _capture_current_state(self):
         """Capture the current state directly from the network"""
         states = []
-        sorted_lines = sorted(self.collapsed_switches["element"].unique())
-        
-        for line_id in sorted_lines:
-            # Get the first switch for this line (they should all have the same state)
-            switch_indices = self.line_to_switches_map.get(line_id, [])
-            if switch_indices:
-                # Read the actual current state from the network
-                current_state = self.net.switch.at[switch_indices[0], 'closed']
-                states.append(int(current_state))
+        for line_id in self.line_order:
+            idxs = self.line_to_switches_map.get(line_id, [])
+            if idxs:
+                states.append(int(self.net.switch.at[idxs[0], 'closed']))
             else:
-                states.append(0)  # Default to open if no switch found
-        
+                states.append(0)
         return states
+
     def get_initial_states(self):
         """Get the initial states that were captured at creation time"""
         return self.initial_state.copy()
+    
     def get_switch_states(self):
         """Get current switch states as list (one per line) - reads from actual network state"""
         return self._capture_current_state()
     
     def set_switch_states(self, states, label=None):
-        """Set switch states for all lines (updates ALL switches for each line)"""
+        """Set switch states for all lines and optionally track with label"""
         if len(states) != len(self.collapsed_switches):
             raise ValueError(f"Expected {len(self.collapsed_switches)} states, got {len(states)}")
             
+        # Then update the actual network
         sorted_switches = self.collapsed_switches.sort_values("element")
         for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
             line_id = switch_row['element']
@@ -120,30 +88,31 @@ class NetworkSwitchManager:
             switch_indices = self.line_to_switches_map.get(line_id, [])
             for switch_idx in switch_indices:
                 self.net.switch.at[switch_idx, 'closed'] = new_state
-        
-        # Track this state change
+
+        # First 
         if label:
             self.add_state(states, label)
     
     def add_state(self, states, label):
         """Add a state to the history for visualization"""
+        # Check for duplicate labels and skip if already exists
+        if label in self.state_labels:
+            print(f"Warning: State '{label}' already exists, skipping duplicate")
+            return
+            
         self.state_history.append(list(states))
         self.state_labels.append(label)
         
-        # # Debug output
-        # if label in ["initial", "gnn_round", "ground_truth", "gnn_only_final"]:
-        #     self.debug_switch_states(label)
-        #     self.debug_plot_data(states, label)
+        # Debug output only for important states
+        print(f"Added state '{label}': {sum(states)} closed, {len(states) - sum(states)} open switches")
     
     def get_ground_truth_states(self, opt_net):
         """Extract ground truth states from optimized network"""
         opt_manager = NetworkSwitchManager(opt_net)
         opt_collapsed = opt_manager.collapsed_switches
         
-        our_lines = sorted(self.collapsed_switches["element"].unique())
         gt_states = []
-        
-        for line_id in our_lines:
+        for line_id in self.line_order:
             if line_id in opt_collapsed["element"].values:
                 gt_state = int(opt_collapsed.loc[opt_collapsed["element"] == line_id, "closed"].iloc[0])
             else:
@@ -152,27 +121,18 @@ class NetworkSwitchManager:
         return gt_states
     
     def _build_graph_for_plotting(self):
-        """Build NetworkX graph for plotting - only show optimized switches"""
         G = nx.Graph()
-
-        # Add all bus nodes
         G.add_nodes_from(self.net.bus.index)
-        
-        # Only add edges for lines that are actually being optimized (collapsed switches)
-        optimized_lines = set(self.collapsed_switches["element"])
-        
-        # Add edges for optimized lines only
-        for idx, line in self.net.line.iterrows():
-            if int(idx) in optimized_lines:
-                # This line has a switch that we're optimizing
-                G.add_edge(int(line.from_bus), int(line.to_bus), 
-                          line_id=int(idx), is_switch=True)
+
+        optimized = set(self.line_order)              # <-- use same list
+        for idx, ln in self.net.line.iterrows():
+            lid = int(idx)
+            if lid in optimized:
+                G.add_edge(int(ln.from_bus), int(ln.to_bus),
+                        line_id=lid, is_switch=True)
             else:
-                print("should not be called")
-                # This line has no switch or is not being optimized
-                G.add_edge(int(line.from_bus), int(line.to_bus), 
-                          line_id=int(idx), is_switch=False)
-        
+                G.add_edge(int(ln.from_bus), int(ln.to_bus),
+                        line_id=lid, is_switch=False)
         return G
     
     def _get_positions(self, G):
@@ -229,7 +189,9 @@ class NetworkSwitchManager:
                     switch_values.append(line_states.get(line_id, 0))
                 else:
                     regular_edges.append((u, v))
-            print(f"Plotting {switches_plotted} switches for label '{label}'")
+            # Build a mapping from line_id -> state using our canonical order
+            line_states = { lid: states[i] for i, lid in enumerate(self.line_order) }
+            print(f"Plotting {switches_plotted} switches for label '{label}, with average value {np.mean(switch_values) if switch_values else 'N/A'}'")
             # Draw the graph - edges first, then nodes
             # Regular edges in grey (draw first, under everything)
             if regular_edges:
@@ -382,6 +344,8 @@ class NetworkSwitchManager:
         if show_plot:
             plt.tight_layout()
             plt.show()
+
+
 def collapse_switches_to_one_per_line(net):
     line_switches = net.switch[net.switch['et'] == 'l'].copy()
     conflicts = (
@@ -553,7 +517,7 @@ class WarmstartSOCP(SOCP_class):
 
 
 class ExplicitSaver:
-    """Updated ExplicitSaver to use enhanced NetworkSwitchManager"""
+    """Updated ExplicitSaver with fixed state tracking"""
     
     def __init__(self, root_folder: str, model_name: str, warmstart_mode: str, 
                  rounding_method: str, confidence_threshold: float = None):
@@ -582,19 +546,13 @@ class ExplicitSaver:
             folder.mkdir(parents=True, exist_ok=True)
         
         self.csv_data = []
-        self.first_graph_manager = None
+        self.graph_managers = {}
 
-    def extract_ground_truth(self, pp_networks: dict, graph_id: str, base_manager: NetworkSwitchManager) -> list:
-        """Extract ground truth using NetworkSwitchManager"""
+    def extract_ground_truth(self, pp_networks: dict, graph_id: str, switch_manager: NetworkSwitchManager) -> list:
+        """Extract ground truth using NetworkSwitchManager - NO STATE TRACKING HERE"""
         opt_net = pp_networks["mst_opt"][graph_id]
-        gt_states = base_manager.get_ground_truth_states(opt_net)
-        
-        # Add ground truth to first graph's history
-        if self.first_graph_manager is not None and graph_id == list(pp_networks["mst"].keys())[0]:
-            self.first_graph_manager.add_state(gt_states, "ground_truth")
-        
+        gt_states = switch_manager.get_ground_truth_states(opt_net)
         return gt_states
-
 
     def extract_initial_state(self, switch_manager: NetworkSwitchManager) -> list:
         """Extract initial state using NetworkSwitchManager"""
@@ -602,26 +560,14 @@ class ExplicitSaver:
 
 
     def apply_rounding(self, predictions: list, method: str, switch_manager: NetworkSwitchManager) -> list:
-            """Apply rounding using NetworkSwitchManager"""
-            if method == "round":
-                rounded = [1 if p > 0.5 else 0 for p in predictions]
-            elif method == "PhyR":
-                rounded = apply_physics_informed_rounding(predictions, switch_manager, device=self.device)
-            else:
-                raise ValueError(f"Unknown rounding method: {method}")
-            
-            # Add rounded predictions to first graph's history
-            if self.first_graph_manager is not None:
-                self.first_graph_manager.add_state(rounded, f"gnn_{method}")
-            
-            return rounded
-    def save_first_graph_visualization(self, graph_id: str):
-        """Save visualization of the first graph's state evolution"""
-        if self.first_graph_manager is not None:
-            vis_path = self.visualization_folder / f"{graph_id}_state_evolution.png"
-            self.first_graph_manager.plot_state_comparison(save_path=vis_path)
-            print(f"Saved state evolution visualization: {vis_path}")
-
+        """Apply rounding using NetworkSwitchManager - NO STATE TRACKING HERE"""
+        if method == "round":
+            rounded = [1 if p > 0.5 else 0 for p in predictions]
+        elif method == "PhyR":
+            rounded = apply_physics_informed_rounding(predictions, switch_manager, device=self.device)
+        else:
+            raise ValueError(f"Unknown rounding method: {method}")
+        return rounded
 
     def save_network_as_json(self,
                              net: pp.pandapowerNet,
@@ -629,6 +575,17 @@ class ExplicitSaver:
                              graph_id: str):
         path = folder / f"{graph_id}.json"
         pp.to_json(net, str(path))
+
+    def save_graph_visualization(self, graph_id: str, switch_manager: NetworkSwitchManager):
+        """Save visualization for a specific graph"""
+        vis_path = self.visualization_folder / f"{graph_id}_state_evolution.png"
+        switch_manager.plot_state_comparison(save_path=vis_path)
+        print(f"Saved state evolution visualization: {vis_path}")
+
+    def save_all_visualizations(self):
+        """Save visualizations for all collected graphs"""
+        for graph_id, manager in self.graph_managers.items():
+            self.save_graph_visualization(graph_id, manager)
 
 
     def add_csv_entry(self, graph_id: str, ground_truth: list, initial_state: list,
@@ -642,11 +599,11 @@ class ExplicitSaver:
         
         # Calculate total time based on warmstart mode
         if self.warmstart_mode == "optimization_without_warmstart":
-            total_time = solve_time  # Only optimization time
+            total_time = solve_time 
         elif self.warmstart_mode == "only_gnn_predictions":
-            total_time = gnn_time  # Only GNN time
+            total_time = gnn_time  
         else:
-            total_time = gnn_time + solve_time  # Both times
+            total_time = gnn_time + solve_time  
         
         self.csv_data.append({
             "graph_id": graph_id,
@@ -720,48 +677,36 @@ class Optimizer:
     def _optimize_single(self, args):
         idx, mode = args
         gid = self.graph_ids[idx]
-        is_first_graph = (idx == 0)
         gnn_time = self.gnn_times.get(gid, 0.0)
         try:
-            net       = self.pp_all["mst"][gid].deepcopy()
-            raw_preds = self.predictions[gid]
-
-       
-            base_net = self.pp_all["mst"][gid].deepcopy()
-            base_switch_manager = NetworkSwitchManager(base_net)
-            initial_state = base_switch_manager.get_initial_states()  
-            
-            ground_truth = self.saver.extract_ground_truth(self.pp_all, gid, base_switch_manager)
-            
-            # Now create working copy for modifications
+            # Create network and manager
             net = self.pp_all["mst"][gid].deepcopy()
             switch_manager = NetworkSwitchManager(net)
+            
+            # Store manager for visualization
+            self.saver.graph_managers[gid] = switch_manager
+            
+            # 1. Initial state is already captured in manager constructor
+            initial_state = switch_manager.get_initial_states()
+            
+            # 3. GNN probabilities
             raw_preds = self.predictions[gid]
+            switch_manager.add_state(raw_preds, "gnn_probs")
             
-            # Store first graph's manager for visualization
-            if is_first_graph:
-                self.saver.first_graph_manager = switch_manager
-                self.saver.first_graph_manager.add_state(raw_preds, "gnn_probs")
-                self.saver.first_graph_manager.add_state(ground_truth, "ground_truth")
-                
+            # 4. GNN rounded predictions
             rounded = self.saver.apply_rounding(raw_preds, self.saver.rounding_method, switch_manager)
-            switch_manager.set_switch_states(rounded, f"gnn_{self.saver.rounding_method}")
+            switch_manager.add_state(rounded, f"gnn_round")
             
-            # Get initial state for comparison
-            original_states = switch_manager.get_switch_states()
-            # --- Warmstart setup ---
-            fixed = {}
-            if mode == "soft":
-                switch_manager.set_switch_states(rounded, "soft_warmstart")
-                flipped_switches = sum(1 for orig, new in zip(original_states, rounded) if orig != new)
-                radial, connected = is_radial_and_connected(net, include_switches=True)
-                count_0 = rounded.count(0)
-                count_1 = rounded.count(1)
-                print(f"Soft warmstart {gid}: {flipped_switches} switches flipped, {count_0} zeros/{count_1} ones, radial={radial}, connected={connected}")
+            # Apply rounded predictions to network
+            switch_manager.set_switch_states(rounded)
 
+            # --- Warmstart setup ---
+            if mode == "soft":
+                # Network already has rounded states applied
+                radial, connected = is_radial_and_connected(net, include_switches=True)
+                print(f"Soft warmstart {gid}: {rounded.count(0)} zeros/{rounded.count(1)} ones, radial={radial}, connected={connected}")
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
                 solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid)
-
 
             elif mode == "float":
                 solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid, float_warmstart=raw_preds)
@@ -778,13 +723,14 @@ class Optimizer:
                 T     = self.confidence_threshold
                 half  = T / 2
                 up, lo = 0.5 + half, 0.5 - half
-
+                fixed = {}
                 fixed_0_count = 0
                 fixed_1_count = 0
-
-                for i, row in enumerate(switch_manager.collapsed_switches.sort_values("element").iterrows()):
+                sorted_switches = switch_manager.collapsed_switches.sort_values("element")
+                for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
                     if i >= len(raw_preds): break
                     p = raw_preds[i]
+                    line_id = switch_row['element']
                     if p >= up:
                         d = 1
                         fixed_1_count += 1
@@ -793,64 +739,58 @@ class Optimizer:
                         fixed_0_count += 1
                     else:
                         continue
-                    # Fix ALL switches for this line
-                    line_id = switch_row['element']
                     switch_indices = switch_manager.line_to_switches_map.get(line_id, [])
                     for switch_idx in switch_indices:
                         fixed[switch_idx] = d
                         net.switch.at[switch_idx, 'closed'] = bool(d)
 
-                switch_manager.add_state(rounded, "hard_warmstart")
+                switch_manager.set_switch_states(rounded, "hard_warmstart")
 
-                total_0, total_1 = rounded.count(0), rounded.count(1)
                 radial, connected = is_radial_and_connected(net, include_switches=True)
-                print(f"Hard warmstart {gid}: {total_0} zeros ({fixed_0_count} fixed)/{total_1} ones ({fixed_1_count} fixed), radial={radial}, connected={connected}")
+                print(f"Hard warmstart {gid}: {fixed_0_count} fixed to 0, {fixed_1_count} fixed to 1, radial={radial}, connected={connected}")
                 
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
                 solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid, fixed_switches=fixed)
 
 
             elif mode == "only_gnn_predictions":
-                switch_manager.set_switch_states(rounded, "gnn_only_final")
-                
+                # No optimization, just use GNN predictions
                 radial, connected = is_radial_and_connected(net, include_switches=True)
-                count_0, count_1 = rounded.count(0), rounded.count(1)
-                print(f"GNN-only {gid}: {count_0} zeros/{count_1} ones, radial={radial}, connected={connected}")
-                
+                print(f"GNN-only {gid}: {rounded.count(0)} zeros/{rounded.count(1)} ones, radial={radial}, connected={connected}")
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
                 solver = None
-            else:  # optimization without warmstart
+            else:  
+                switch_manager.set_switch_states(initial_state)
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
                 solver = SOCP_class(net=net, toggles=self.toggles, graph_id=gid)
 
             if solver is not None:
-                    solver.initialize()
-                    solver.solve(solver="gurobi_persistent", TimeLimit=300, MIPGap=1e-3)
-                    solve_time = solver.solve_time
-                    objective_value = float(pyo_val(solver.model.objective))
-                    
-                    # Extract solution and apply to network
-                    final_net = self.pp_all["mst"][gid].deepcopy()
-                    final_switch_manager = NetworkSwitchManager(final_net)
-                    
-                    sol = {l: round(pyo_val(solver.model.line_status[l])) for l in solver.model.lines}
-                    final_states = []
-                    for _, switch_row in final_switch_manager.collapsed_switches.sort_values("element").iterrows():
-                        v = sol.get(switch_row['element'], 0)
-                        final_states.append(int(v))
-                    
-                    # Apply solution to ALL switches in the network
-                    final_switch_manager.set_switch_states(final_states)
+                solver.initialize()
+                solver.solve(solver="gurobi_persistent", TimeLimit=300, MIPGap=1e-3)
+                solve_time = solver.solve_time
+                objective_value = float(pyo_val(solver.model.objective))
+                
+                # Extract solution and apply to network
+                final_net = self.pp_all["mst"][gid].deepcopy()
+                final_switch_manager = NetworkSwitchManager(final_net)
+                
+                sol = {l: round(pyo_val(solver.model.line_status[l])) for l in solver.model.lines}
+                final_states = []
+                for _, switch_row in final_switch_manager.collapsed_switches.sort_values("element").iterrows():
+                    v = sol.get(switch_row['element'], 0)
+                    final_states.append(int(v))
+                
+                # Apply solution to ALL switches in the network
+                final_switch_manager.set_switch_states(final_states)
 
-                    # Add final state to first graph's history
-                    if is_first_graph:
-                        switch_manager.add_state(final_states, "optimization_result")
+                switch_manager.set_switch_states(final_states, "optimization_result")
             else:
                 # GNN-only mode: no optimization
                 solve_time = 0.0
                 objective_value = float("nan")
                 final_net = net  # Already modified with GNN predictions
                 final_states = rounded
+                switch_manager.add_state(final_states, "gnn_only_final")
 
             # power‐flow losses
             try:
@@ -868,17 +808,16 @@ class Optimizer:
             except:
                 gt_loss = float("nan")
 
+            ground_truth = switch_manager.get_ground_truth_states(self.pp_all["mst_opt"][gid])
+            switch_manager.add_state(ground_truth, "ground_truth")
+
             radial, connected = is_radial_and_connected(final_net, include_switches=True)
-            
-            # Extract ground truth and initial state using switch managers
-            base_switch_manager = NetworkSwitchManager(self.pp_all["mst"][gid])
-            ground_truth = self.saver.extract_ground_truth(self.pp_all, gid, base_switch_manager)
-            initial_state = self.saver.extract_initial_state(base_switch_manager)
-            
             flips = sum(1 for g, f in zip(ground_truth, final_states) if g != f)
+            
+            print(f"\nGraph {gid} states collected: {switch_manager.state_labels}")
+            print(f"Final: radial={radial}, connected={connected}, switches changed={flips}")
 
-            print(f"Final states radial={radial}, connected={connected}, number of switches changed: {flips}")
-
+    
             self.saver.add_csv_entry(
                 graph_id=gid,
                 ground_truth=ground_truth,
@@ -898,9 +837,14 @@ class Optimizer:
                 pred_loss=pred_loss,
                 error_message=None
             )
-            if is_first_graph:
-                self.saver.save_first_graph_visualization(gid)
+            
+            
+
+            print("current switch states:", switch_manager.get_switch_states())
+            print("labels: ", switch_manager.state_labels)
+
             self.saver.save_network_as_json(final_net, self.saver.prediction_networks_folder, gid)
+        
             return gid, {'success': True}
 
         except Exception as e:
@@ -1009,13 +953,11 @@ if __name__ == "__main__":
     print(f"Job name extracted from model path: {job_name}")
 
     # Initialize explicit saver with confidence threshold
-    saver = ExplicitSaver(
-        root_folder=args.folder_names[0],
+    saver = ExplicitSaver(root_folder=args.folder_names[0],
         model_name=job_name,
         warmstart_mode=args.warmstart_mode,
         rounding_method=args.rounding_method,
-        confidence_threshold=args.confidence_threshold if args.warmstart_mode == "hard" else None
-    )
+        confidence_threshold=args.confidence_threshold if args.warmstart_mode == "hard" else None)
 
     predictions = None
     gnn_times = None
@@ -1050,6 +992,10 @@ if __name__ == "__main__":
         )
         final_results, csv_path = optimizer.run(num_workers=args.num_workers)
 
+        # Save visualizations for all graphs
+        print("\nSaving visualizations for all graphs...")
+        saver.save_all_visualizations()
+        print(f"Visualizations saved to: {saver.visualization_folder}")
 
         print(f"Optimization completed with {len(final_results)} results.")
         print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
