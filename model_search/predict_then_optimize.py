@@ -36,11 +36,17 @@ class NetworkSwitchManager:
             int(x) for x in self.collapsed_switches["element"].tolist()
         )
         self.line_to_switches_map = self._build_line_to_switches_map()
+        # keep collapse for mapping, but track *every* line
+        self.collapsed_switches, self.conflicts = collapse_switches_to_one_per_line(net)
+        # now manage all lines (not just ones with switches!)
+        self.line_order = sorted(int(lid) for lid in self.net.line.index)
+
 
         self.state_history = []
         self.state_labels = []
 
-        # Capture initial state immediately
+
+        self.initial_state = self._capture_current_state()
         self.initial_state = self._capture_current_state()
         self.add_state(self.initial_state, "initial")
 
@@ -61,9 +67,11 @@ class NetworkSwitchManager:
         for line_id in self.line_order:
             idxs = self.line_to_switches_map.get(line_id, [])
             if idxs:
+                # real switch: read its closed status
                 states.append(int(self.net.switch.at[idxs[0], 'closed']))
             else:
-                states.append(0)
+                # no switch on this line → treat as “closed” by default (1)
+                states.append(1)
         return states
 
     def get_initial_states(self):
@@ -424,10 +432,31 @@ def apply_physics_informed_rounding(switch_probs, switch_manager, device='cpu'):
         return [0] * len(switch_probs)
 
     edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous().to(device)
-    expected = len(switch_manager.collapsed_switches)
+    expected = expected = len(switch_manager.line_order)
     
     if len(switch_probs) != expected:
-        raise ValueError(f"Switch count mismatch: GNN predicted {len(switch_probs)}, network has {expected}")
+        # --- DEBUG INFO START ---
+        print("🔥  DEBUG: Switch count mismatch! 🔥")
+        print(f"  Graph ID:           ")
+        print(f"  GNN predicted len:  {len(switch_probs)}")
+        print(f"  Expected switches:  {expected}")
+        print("  → collapsed_switches (element, closed):")
+        print(switch_manager.collapsed_switches[['element','closed']].to_string(index=False))
+        print("  → all lines in net.line.index:")
+        print(list(switch_manager.net.line.index))
+        print("  → raw switch table (et=='l'):")
+        print(switch_manager.net.switch[switch_manager.net.switch.et=='l'].to_string())
+        print("  → line_to_switches_map:")
+
+        for line, idxs in switch_manager.line_to_switches_map.items():
+            print(f"     line {line}: switch rows {idxs}")
+        print("🔥  END DEBUG  🔥")
+        # now still raise so you get the full traceback
+        raise ValueError(
+            f"Switch count mismatch: GNN predicted {len(switch_probs)}, "
+            f"network has {expected}"
+        )
+
 
     phyr = PhysicsInformedRounding()
     edge_batch = torch.zeros(expected, dtype=torch.long, device=device)
@@ -491,6 +520,7 @@ class Predictor:
                 batch = batch.to(self.device)
                 out = self.model(batch)
                 logits = out.get("switch_logits")
+                print(logits.shape)
                 if logits is None:
                     raise RuntimeError("No logits found in model output")
                 if logits.dim() == 1 or (logits.dim() == 2 and logits.size(1) == 1):
@@ -817,7 +847,7 @@ class Optimizer:
                 final_net = self.pp_all["mst"][gid].deepcopy()
                 final_switch_manager = NetworkSwitchManager(final_net)
                 
-                sol = {l: round(pyo_val(solver.model.line_status[l])) for l in solver.model.lines}
+                sol = {l: round(pyo_val(solver.model.line_status [l])) for l in solver.model.lines}
                 final_states = []
                 for _, switch_row in final_switch_manager.collapsed_switches.sort_values("element").iterrows():
                     v = sol.get(switch_row['element'], 0)
@@ -881,14 +911,13 @@ class Optimizer:
                 error_message=None
             )
             
-            
-
             print("current switch states:", switch_manager.get_switch_states())
             print("labels: ", switch_manager.state_labels)
 
             self.saver.save_network_as_json(final_net, self.saver.prediction_networks_folder, gid)
         
-            return gid, {'success': True}
+            row = self.saver.csv_data[-1]   
+            return gid, {'success': True, 'row': row}
 
         except Exception as e:
             print(f"ERROR in graph {gid}: {str(e)}") 
@@ -911,7 +940,12 @@ class Optimizer:
                 pred_loss=float("nan"),
                 error_message=str(e)
             )
-            return gid, {'success': False, 'error': str(e)}
+            err_row = {
+                "graph_id": gid,
+                # fill in the same columns with defaults or empty lists…
+                "error": str(e)
+            }
+            return gid, {'success': False, 'error': str(e), 'row': err_row}
 
     def run(self, num_workers: int = None):
         if num_workers is None:
@@ -926,10 +960,24 @@ class Optimizer:
             with mp.Pool(num_workers) as pool:
                 for gid, res in pool.imap_unordered(self._optimize_single, args):
                     results[gid] = res
+                    if 'row' in res:
+                        self.saver.csv_data.append(res['row'])
+                    else:
+                        err_row = {
+                            "graph_id": gid,
+                            "error": res['error']
+                        }
+                        self.saver.csv_data.append(err_row)
+
+ 
         else:
-            for arg in args:
-                gid, res = self._optimize_single(arg)
+            for gid, res in map(self._optimize_single, args):
                 results[gid] = res
+                if 'row' in res:
+                    self.saver.csv_data.append(res['row'])
+                else:
+                    err_row = { "graph_id": gid, "error": res['error'] }
+                    self.saver.csv_data.append(err_row)
 
         csv_path = self.saver.save_csv()
         return results, csv_path
@@ -937,10 +985,10 @@ class Optimizer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict-then-Optimize Pipeline with Explicit Saving")
     parser.add_argument("--config_path", type=str,
-                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------jumping-wave-13.yaml",
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------devout-glitter-19.yaml",
                         help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\jumping-wave-13-Best.pt", 
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
                         #default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
@@ -959,7 +1007,7 @@ if __name__ == "__main__":
                         choices=["round", "PhyR"],
                         default="PhyR",
                         help="Rounding method for predictions")
-    parser.add_argument("--confidence_threshold", type=float, default=0.1,
+    parser.add_argument("--confidence_threshold", type=float, default=0.9,
                         help="Confidence threshold for hard warmstart")
     
     parser.add_argument("--num_workers", type=int, default=0,
@@ -1040,11 +1088,11 @@ if __name__ == "__main__":
         )
         final_results, csv_path = optimizer.run(num_workers=args.num_workers)
         
-        if args.visualize:
-            # Save visualizations for all graphs
-            print("\nSaving visualizations for all graphs...")
-            saver.save_all_visualizations()
-            print(f"Visualizations saved to: {saver.visualization_folder}")
+        # if args.visualize:
+        #     # Save visualizations for all graphs
+        #     print("\nSaving visualizations for all graphs...")
+        #     saver.save_all_visualizations()
+        #     print(f"Visualizations saved to: {saver.visualization_folder}")
 
         print(f"Optimization completed with {len(final_results)} results.")
         print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
