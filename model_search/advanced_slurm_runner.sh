@@ -37,7 +37,7 @@ BATCH_SIZE=32
 PARTITION="tue.default.q"
 TIME_LIMIT="1-00:00:00"
 MEMORY="16G"
-CPUS=4
+CPUS=16
 NODES=1
 NTASKS_PER_NODE=1
 
@@ -95,7 +95,6 @@ poetry run python -I model_search/predict_then_optimize.py \\
   --model_path      "${model_path}" \\
   --folder_names    "${DATA_DIR}" \\
   --dataset_names   "${DATASET_NAME}" \\
-  --batch_size      ${BATCH_SIZE} \\
   --warmstart_mode  "${warmstart_mode}" \\
   --rounding_method "${rounding_method}" \\
   --confidence_threshold ${confidence_threshold} \\
@@ -125,43 +124,55 @@ echo "Starting batch submission: $(date)"
 echo "Logging to: $LOG_DIR"
 touch "$SUBMIT_LOG"
 
+choices=("only_gnn_predictions" "soft" "float" "hard")
 job_count=0
 
-for model_name in "${!MODELS[@]}"; do
-    model_path="${MODELS[$model_name]}"
-    config_path="${CONFIGS[$model_name]}"
+for model in "${!MODELS[@]}"; do
+  mp="${MODELS[$model]}"
+  cp="${CONFIGS[$model]}"
 
-    # Direct Prediction
-    for rounding in "round" "PhyR"; do
-        job_name="${model_name}_DirectPred_${rounding}"
-        submit_job "$job_name" "$model_name" "$model_path" "$config_path" \
-                   "none" "$rounding" "0.5" "--predict" "--optimize"
-        ((job_count++))
-    done
+  for choice in "${choices[@]}"; do
+    case $choice in
+      only_gnn_predictions)
+        predict="--predict"; optimize=""
+        warm="none"; round="round"; conf=0.5
+        ;;
 
-    # Soft WarmStart (float + binary)
-    for mode in "float" "soft"; do
-      for rounding in "round" "PhyR"; do
-        job_name="${model_name}_SoftWarm_${mode}_${rounding}"
-        submit_job "$job_name" "$model_name" "$model_path" "$config_path" \
-                   "$mode" "$rounding" "0.5" "--predict" "--optimize"
-        ((job_count++))
-      done
-    done
+      soft)
+        predict="--predict"; optimize="--optimize"
+        warm="soft"; round="round"; conf=0.5
+        ;;
 
-    # Hard WarmStart (various confidences)
-    for confidence in 0.9 0.7 0.5 0.3 0.1; do
-      for rounding in "round" "PhyR"; do
-        job_name="${model_name}_HardWarm_${confidence}_${rounding}"
-        submit_job "$job_name" "$model_name" "$model_path" "$config_path" \
-                   "hard" "$rounding" "${confidence}" "--predict" "--optimize"
-        ((job_count++))
-      done
-    done
+      float)
+        predict="--predict"; optimize="--optimize"
+        warm="float"; round="round"; conf=0.5
+        ;;
 
-    echo "=> Submitted $job_count jobs for $model_name"
+      hard)
+        for conf in 0.9 0.7 0.5 0.3 0.1; do
+          for round in "round" "PhyR"; do
+            name="${model}_Hard_${conf}_${round}"
+            submit_job "$name" "$model" "$mp" "$cp" "hard" "$round" "$conf" "--predict" "--optimize"
+            ((job_count++))
+          done
+        done
+        continue
+        ;;
+    esac
+
+    name="${model}_${choice}"
+    submit_job "$name" "$model" "$mp" "$cp" "$warm" "$round" "$conf" "$predict" "$optimize"
+    ((job_count++))
+  done
+
+  echo "=> Submitted $job_count jobs for $model"
 done
 
-echo "All done. Total jobs submitted: $job_count"
-echo "Check status with: squeue -u \$USER or sacct -j <job_id>"
-echo "Logs & scripts in: $LOG_DIR"
+# Run Optimization Without Warmstart ONCE
+opt_name="Optimization_Only"
+submit_job "$opt_name" "ALL_MODELS" "" "" "none" "round" 0.5 "" "--optimize"
+((job_count++))
+
+echo "All done. Total jobs: $job_count"
+echo "Check with: squeue -u \$USER or sacct -j <job_id>"
+echo "Scripts & logs: $LOG_DIR"
