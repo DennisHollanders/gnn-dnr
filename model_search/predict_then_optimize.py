@@ -501,10 +501,7 @@ class Predictor:
                     raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
                 probs = probs.cpu().numpy().tolist()
                 gnn_time = time.time() - start
-
-                # pick the true graph_id from the batch (fallback to graph_ids[i])
-                gid =  batch.graph_id.item()
-
+                gid =  batch.graph_id[0]
                 preds[gid] = probs
                 self.gnn_times[gid] = gnn_time
             return preds, self.gnn_times
@@ -699,17 +696,19 @@ class Optimizer:
         }
 
         self.pp_all = load_pp_networks(self.folder_name)
-        self.graph_ids = self.pp_all["mst"].keys
+        self.graph_ids = list(self.pp_all["mst"].keys())
 
         # align predictions/network IDs
-        preds = self.predictions.keys()
-        nets  = self.graph_ids
-        for i in range(50): 
-            print(f"Prediction {i}: {preds[i]} with {len(self.predictions[preds[i]])} switches and nets {nets[i]} with {len(self.pp_all['mst'][nets[i]].switch)} switches")
-        # if preds != nets:
-        #     common = sorted(preds & nets)
-        #     print(f"Processing only {len(common)} matching graphs")
-        #     self.graph_ids = common
+        # preds = self.predictions.keys()
+        # nets  = self.graph_ids
+        # if set(preds) != set(nets):
+        #     missing_preds = set(nets) - set(preds)
+        #     missing_nets  = set(preds) - set(nets)
+        #     if missing_preds:
+        #         print(f"Warning: Predictions missing for graphs: {missing_preds}")
+        #     if missing_nets:
+        #         print(f"Warning: Networks missing for predictions: {missing_nets}")
+        #     self.graph_ids = [gid for gid in self.graph_ids if gid in self.predictions]
 
 
     def _optimize_single(self, args):
@@ -941,11 +940,11 @@ if __name__ == "__main__":
                         default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------jumping-wave-13.yaml",
                         help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\jumping-wave-13-Best.pt", 
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\jumping-wave-13-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
-                        default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
-                        #default = [r"data/split_datasets/test"],
+                        #default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
+                        default = [r"data/split_datasets/test"],
                         help="Folder containing 'mst' and 'mst_opt' subfolders")
     parser.add_argument("--dataset_names", type=str, nargs="+",
                         default=["test"],
