@@ -488,9 +488,9 @@ if __name__ == "__main__":
                                                                           ]
                                                                           , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
-                r"data\split_datasets\train",
-                r"data\split_datasets\validation",
-                r"data\split_datasets\test",
+                r"data\split_datasets_without_synthetic\train",
+                r"data\split_datasets_without_synthetic\validation",
+                r"data\split_datasets_without_synthetic\test",
                 #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
     parser.add_argument("--dataset_type", type=str, default="default", 

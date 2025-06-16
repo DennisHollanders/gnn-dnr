@@ -17,7 +17,8 @@ import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from pandapower.powerflow import LoadflowNotConverged
-
+import json 
+from pandapower import from_json_dict
 # Add necessary source paths
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 load_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model_search"))
@@ -25,7 +26,6 @@ if src_path not in sys.path:
     sys.path.append(src_path)
 if load_data_path not in sys.path:
     sys.path.append(load_data_path)
-
 
 from SOCP_class_dnr import SOCP_class
 from optimization_logging import setup_logging, get_logger
@@ -52,67 +52,89 @@ def get_n_workers():
     print(f"Number of workers: {workers}")
     return workers
 
-def load_graph_data_old(base_directory):
-    logger.info("Loading stored data from %s", base_directory)
+# def load_graph_data_old(base_directory):
+#     logger.info("Loading stored data from %s", base_directory)
 
-    # Load features
-    features = {}
-    features_dir = os.path.join(base_directory, "graph_features")
-    if os.path.isdir(features_dir):
-        for fn in os.listdir(features_dir):
-            if not fn.endswith(".pkl"): 
-                continue
-            key = fn[:-4]
-            path = os.path.join(features_dir, fn)
-            logger.debug("  → loading feature %s", key)
-            with open(path, "rb") as f:
-                features[key] = pkl.load(f)
-    else:
-        logger.warning("No graph_features folder at %s", features_dir)
-    logger.info("Loaded %d feature sets", len(features))
+#     # Load features
+#     features = {}
+#     features_dir = os.path.join(base_directory, "graph_features")
+#     if os.path.isdir(features_dir):
+#         for fn in os.listdir(features_dir):
+#             if not fn.endswith(".pkl"): 
+#                 continue
+#             key = fn[:-4]
+#             path = os.path.join(features_dir, fn)
+#             logger.debug("  → loading feature %s", key)
+#             with open(path, "rb") as f:
+#                 features[key] = pkl.load(f)
+#     else:
+#         logger.warning("No graph_features folder at %s", features_dir)
+#     logger.info("Loaded %d feature sets", len(features))
 
-    # Load NetworkX
-    nx_graphs = {}
-    nx_dir = os.path.join(base_directory, "networkx_graphs")
-    if os.path.isdir(nx_dir):
-        for fn in os.listdir(nx_dir):
-            if not fn.endswith(".pkl"): 
-                continue
-            key = fn[:-4]
-            path = os.path.join(nx_dir, fn)
+#     # Load NetworkX
+#     nx_graphs = {}
+#     nx_dir = os.path.join(base_directory, "networkx_graphs")
+#     if os.path.isdir(nx_dir):
+#         for fn in os.listdir(nx_dir):
+#             if not fn.endswith(".pkl"): 
+#                 continue
+#             key = fn[:-4]
+#             path = os.path.join(nx_dir, fn)
+#             try:
+#                 with open(path, "rb") as f:
+#                     nx_graphs[key] = pkl.load(f)
+#             except Exception as e:
+#                 logger.error("Failed loading NX graph %s: %s", key, e)
+#     else:
+#         logger.warning("No networkx_graphs folder at %s", nx_dir)
+#     logger.info("Loaded %d NetworkX graphs", len(nx_graphs))
+
+#     # Load pandapower
+#     pp_networks = {}
+#     pp_dir = os.path.join(base_directory, "pandapower_networks")
+#     if os.path.isdir(pp_dir):
+#         for fn in os.listdir(pp_dir):
+#             if not fn.endswith(".json"): 
+#                 continue
+#             key = fn[:-5]
+#             path = os.path.join(pp_dir, fn)
+#             try:
+#                 with open(path) as f:
+#                     raw = f.read()
+#                 try:
+#                     pp_networks[key] = pp.from_json_string(raw)
+#                 except Exception:
+#                     pp_networks[key] = json.loads(raw)
+#                 logger.debug("  → loaded pandapower network %s", key)
+#             except Exception as e:
+#                 logger.error("Failed loading pandapower %s: %s", key, e)
+#     else:
+#         logger.warning("No pandapower_networks folder at %s", pp_dir)
+#     logger.info("Loaded %d Pandapower networks", len(pp_networks))
+
+#     return nx_graphs, pp_networks, features
+def load_pp_networks(base_directory):
+    nets = {}
+    folder = os.path.join(base_directory, "original", "pandapower_networks")
+    for fn in tqdm(os.listdir(folder), desc=f"Loading original networks from {folder}"):
+        if not fn.endswith(".json"):
+            continue
+        path = os.path.join(folder, fn)
+        try:
+            net = pp.from_json(path)
+        except:
+            with open(path) as f:
+                raw = f.read()
+            if raw.startswith('"') and raw.endswith('"'):
+                raw = json.loads(raw)
             try:
-                with open(path, "rb") as f:
-                    nx_graphs[key] = pkl.load(f)
-            except Exception as e:
-                logger.error("Failed loading NX graph %s: %s", key, e)
-    else:
-        logger.warning("No networkx_graphs folder at %s", nx_dir)
-    logger.info("Loaded %d NetworkX graphs", len(nx_graphs))
-
-    # Load pandapower
-    pp_networks = {}
-    pp_dir = os.path.join(base_directory, "pandapower_networks")
-    if os.path.isdir(pp_dir):
-        for fn in os.listdir(pp_dir):
-            if not fn.endswith(".json"): 
-                continue
-            key = fn[:-5]
-            path = os.path.join(pp_dir, fn)
-            try:
-                with open(path) as f:
-                    raw = f.read()
-                try:
-                    pp_networks[key] = pp.from_json_string(raw)
-                except Exception:
-                    pp_networks[key] = json.loads(raw)
-                logger.debug("  → loaded pandapower network %s", key)
-            except Exception as e:
-                logger.error("Failed loading pandapower %s: %s", key, e)
-    else:
-        logger.warning("No pandapower_networks folder at %s", pp_dir)
-    logger.info("Loaded %d Pandapower networks", len(pp_networks))
-
-    return nx_graphs, pp_networks, features
+                net = pp.from_json_string(raw)
+            except:
+                net = from_json_dict(json.loads(raw))
+        if net.bus.empty:
+            continue
+        nets[fn] = net
+    return nets
 
 def build_nx_graph(net, include_switches=False, include_trafos=False):
     G = nx.Graph()
@@ -849,14 +871,7 @@ def apply_socp(net, graph_id, toggles=None, logger=None, active_bus_mask=None, l
     t0 = time.time()
     optimizer.solve()
     opt_time = time.time() - t0
-    
-    # Run verification
-    # if debug:
-    #     logger.info("Running detailed constraint verification...")
-    #     optimizer.verify_power_balance_constraints()
-    #     optimizer.verify_voltage_drop_constraints()
-    #     optimizer.verify_socp_cone_constraints()
-    #     optimizer.verify_line_flow_bounds()
+
     logger.info(f"net line losses before optimized calculated same as obj:{net}")
     # Update the network with optimization results
     net_opt = optimizer.update_network()
@@ -911,7 +926,7 @@ def process_single_graph(graph_id, net_json, folder_path, toggles=None, vis_dir=
     logger.info(f"Processing graph {graph_id}")
     
     # 1 load and run network -------------------------------------------------------------
-    net_orig = pp.from_json_string(net_json)
+    net_orig = net_json
     try: 
         pp.runpp(net_orig, enforce_q_lims=False)
         if not net_orig.converged:
@@ -1027,7 +1042,7 @@ def apply_optimization(folder_path, toggles=None, debug=False, serialize=False):
     if not serialize:
         init_worker_logging()
 
-    _, pp_networks, features = load_graph_data_old(folder_path)
+    pp_networks = load_pp_networks(folder_path)
     items = [(gid, net) for gid, net in pp_networks.items()]
     #print(items)
     metrics = []
@@ -1130,11 +1145,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
                         default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test",
-                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test\original",
-                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test/original",
-                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\_synthetic-train-data_22052025_range-130-100_10\original",
-                        #default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_14\test",
-                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test_val_real__range-30-230_nTest-10_nVal-10_1252025_2\test",
+
                         type=str, help='Dataset folder path')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')
     parser.add_argument('--serialize', type=bool, default=False, help='Serialize the optimization results usefull for debugging')

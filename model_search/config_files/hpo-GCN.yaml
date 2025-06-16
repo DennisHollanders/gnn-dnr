@@ -114,4 +114,4 @@ search_space:
 # use_residual: [true, false]
 # criterion_name: ["CrossEntropyLoss", "WeightedBCELoss", "FocalLoss"]
 # normalization_type: ["simple", "injection_scale", "adaptive"]
-# loss_scaling_strategy: ["fixed", "adaptive_ratio", "adaptive_magnitude"]
+# loss_scaling_strategy: ["fixed", "adaptive_ratio", "adaptive_magnitude"]q

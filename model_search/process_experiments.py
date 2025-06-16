@@ -631,13 +631,16 @@ if __name__ == "__main__":
         predictions_folder = sys.argv[1]
     else:
         # Default path for testing
-        predictions_folder = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test\predictions"
+        predictions_folder = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\predictions"
     
     print(f"Using predictions folder: {predictions_folder}")
     
     # Map your actual model names to the desired display names
     model_mapping = {
-        "jumping-wave-12": "GIN",       # Your actual model names from predict_then_optimize.py
+        "blooming-snow-15": "GAT",       # Your actual model names from predict_then_optimize.py
+        "cosmic-field-12": "GIN",     # Your actual model names from predict_then_optimize.py
+        "volcanic-moon-10": "GCN",       # Your actual model names from predict_then_optimize.py
+
        # "AdvancedMLP": "GAT",     # Alternative mapping if model name is different
        # "GIN_Model": "GIN",       # Add your actual GIN model name
        # "GCN_Model": "GCN",       # Add your actual GCN model name

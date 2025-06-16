@@ -25,9 +25,9 @@ export PYTHONPATH="$HOME/gnn-dnr:$HOME/gnn-dnr/model_search:$PYTHONPATH"
 
 # --- run one experiment via module invocation ---
 poetry run python -I model_search/predict_then_optimize.py \
-  --config_path  "/vast.mnt/home/20174047/gnn-dnr/model_search/config_files/config-GIN.yaml" \
-  --model_path   "/vast.mnt/home/20174047/gnn-dnr/model_search/models/GIN/best_model.pt" \
-  --folder_names "/vast.mnt/home/20174047/gnn-dnr/data/source_datasets/test_val_real__range-30-150_nTest-10_nVal-10_2732025_32/test" \
+  --config_path  "/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/AdvancedMLP------volcanic-moon-10.yaml" \
+  --model_path   "/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/volcanic-moon-10-Best.pt" \
+  --folder_names "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test/" \
   --dataset_names "test" \
   --warmstart_mode       "hard" \
   --rounding_method      "round" \

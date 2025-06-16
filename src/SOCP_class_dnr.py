@@ -42,10 +42,11 @@ class SOCP_class:
                  load_shed_penalty: float = 100,
                  toggles: Optional[Dict[str, bool]] = None,
                  debug_level= 0,
+                 fixed_switches =None,
                  active_bus_mask: Optional[pd.Series] = None) -> None:
         self.voltage_bigM_factor =1
         self.bigM_factor = 1
-
+        self.fixed_switches = fixed_switches
         
 
         self.net = net
