@@ -32,4 +32,4 @@ cd $HOME/gnn-dnr || exit 1 # Add error check for cd
 
 echo "Running script using 'poetry run'..."
 
-poetry run python -I model_search/main.py --config config-cvxcluster.yaml
+poetry run python -I model_search/main.py --config config-mlp-cluster.yaml
