@@ -566,23 +566,38 @@ class Predictor:
                 self.gnn_times[gid] = gnn_time
             return preds, self.gnn_times
 
+
+
 class WarmstartSOCP(SOCP_class):
     def __init__(self, net, graph_id="", **kwargs):
+        # Extract our custom parameters before calling super().__init__()
+        self.fixed_switches = kwargs.pop('fixed_switches', {})
+        self.float_warmstart = kwargs.pop('float_warmstart', None)
+        
+        # Ensure fixed_switches is always a dict, never None
+        if self.fixed_switches is None:
+            self.fixed_switches = {}
+        
+        # Now call parent constructor with remaining kwargs
         super().__init__(net=net, graph_id=graph_id, **kwargs)
-        self.fixed_switches = kwargs.get('fixed_switches', {})
-        self.float_warmstart = kwargs.get('float_warmstart')
 
     def initialize(self):
         super().initialize()
-        for idx, val in self.fixed_switches.items():
-            self.switch_df.loc[idx, 'closed'] = bool(val)
+        # Apply fixed switches if any
+        if self.fixed_switches:  # Check if dict is not empty
+            for idx, val in self.fixed_switches.items():
+                if idx in self.switch_df.index:  # Check if index exists
+                    self.switch_df.loc[idx, 'closed'] = bool(val)
     
     def create_model(self):
         model = super().create_model()
-        for idx, val in self.fixed_switches.items():
-            row = self.switch_df.loc[idx]
-            if row.et == 'l' and row.element in model.lines:
-                model.line_status[row.element].fix(val)
+        # Fix switches in the optimization model
+        if self.fixed_switches:  # Check if dict is not empty
+            for idx, val in self.fixed_switches.items():
+                if idx in self.switch_df.index:  # Check if index exists
+                    row = self.switch_df.loc[idx]
+                    if row.et == 'l' and row.element in model.lines:
+                        model.line_status[row.element].fix(val)
         return model
     
     def solve(self, solver="gurobi_persistent", **opts):
@@ -592,22 +607,107 @@ class WarmstartSOCP(SOCP_class):
 
     def _solve_with_float_warmstart(self, solver, **opts):
         from pyomo.opt import SolverFactory
+        
+        # Create model if it doesn't exist
         if self.model is None:
             self.create_model()
+        
         m = self.model
-        if hasattr(m, 'model_switches'):
-            for i, s in enumerate(m.model_switches):
-                if i < len(self.float_warmstart):
-                    m.switch_status[s].set_value(
-                        float(self.float_warmstart[i]))
+        
+        # Create solver instance first
         opt = SolverFactory(solver)
-        if hasattr(opt, 'set_instance'):
+        
+        # For Gurobi persistent solver, we can set warmstart values directly
+        if solver == "gurobi_persistent" and self.float_warmstart is not None:
+            # Set instance first
+            if hasattr(opt, 'set_instance'):
+                opt.set_instance(m)
+            
+            # Get sorted switches to match the order in float_warmstart - use UNIQUE lines only
+            sorted_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element')
+            # Remove duplicates by element (line_id) - keep first occurrence
+            unique_switches = sorted_switches.drop_duplicates(subset='element', keep='first')
+            
+            warmstart_count = 0
+            gurobi_hints_set = 0
+            
+            for i, (_, switch_row) in enumerate(unique_switches.iterrows()):
+                if i < len(self.float_warmstart):
+                    line_id = switch_row['element']
+                    if hasattr(m, 'line_status') and line_id in m.line_status:
+                        warmstart_value = float(self.float_warmstart[i])
+                        # Ensure value is between 0 and 1
+                        warmstart_value = max(0.0, min(1.0, warmstart_value))
+                        
+                        # For Gurobi, use round to nearest integer for binary vars
+                        binary_value = 1 if warmstart_value >= 0.5 else 0
+                        
+                        # Set the binary value on the variable (no warnings now)
+                        m.line_status[line_id].set_value(binary_value, skip_validation=True)
+                        warmstart_count += 1
+                        
+                        # Try to set Gurobi hint using the Pyomo variable object directly
+                        if hasattr(opt, '_solver_model'):
+                            try:
+                                # Get the Gurobi variable using Pyomo's mapping
+                                pyomo_var = m.line_status[line_id]
+                                if hasattr(opt, '_pyomo_var_to_solver_var_map'):
+                                    gurobi_var = opt._pyomo_var_to_solver_var_map.get(pyomo_var)
+                                    if gurobi_var is not None:
+                                        gurobi_var.VarHintVal = warmstart_value
+                                        gurobi_hints_set += 1
+                                elif hasattr(opt, '_solver_model') and hasattr(opt._solver_model, 'getVars'):
+                                    # Alternative: find variable by matching bounds/name pattern
+                                    for gvar in opt._solver_model.getVars():
+                                        if f"line_status[{line_id}]" in str(gvar.VarName):
+                                            gvar.VarHintVal = warmstart_value
+                                            gurobi_hints_set += 1
+                                            break
+                            except Exception as hint_error:
+                                # Silently continue - hints are optional
+                                pass
+                        
+                        if i < 5 or i % 20 == 0:  # Reduce logging
+                            print(f"Set warmstart for line {line_id}: binary={binary_value}, hint={warmstart_value:.3f}")
+            
+            print(f"Float warmstart summary: {warmstart_count} binary values set, {gurobi_hints_set} Gurobi hints set")
+        
+        elif self.float_warmstart is not None:
+            # For other solvers, just round to binary values
+            unique_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
+            
+            warmstart_count = 0
+            for i, (_, switch_row) in enumerate(unique_switches.iterrows()):
+                if i < len(self.float_warmstart):
+                    line_id = switch_row['element']
+                    if hasattr(m, 'line_status') and line_id in m.line_status:
+                        warmstart_value = float(self.float_warmstart[i])
+                        # Round to binary for non-Gurobi solvers
+                        binary_value = 1 if warmstart_value >= 0.5 else 0
+                        m.line_status[line_id].set_value(binary_value, skip_validation=True)
+                        warmstart_count += 1
+                        if i < 5:  # Limited logging
+                            print(f"Set binary warmstart for line {line_id}: {binary_value}")
+            
+            print(f"Binary warmstart summary: {warmstart_count} values set")
+        
+        # Set solver options
+        if hasattr(opt, 'options'):
+            opt.options.update(opts)
+        
+        # Set instance if not already done
+        if hasattr(opt, 'set_instance') and not hasattr(opt, '_solver_model'):
             opt.set_instance(m)
-        opt.options.update(opts)
-        res = opt.solve(tee=False, load_solutions=True)
-        self.solve_time = 0.0
+        
+        print(f"Solving with float warmstart using {len(self.float_warmstart) if self.float_warmstart else 0} warmstart values")
+        
+        # Solve the model
+        res = opt.solve(m, tee=False, load_solutions=True)
+        
+        # Store solve time
+        self.solve_time = getattr(res.solver, 'time', 0.0)
+        
         return res
-
 
 class ExplicitSaver:
     """Updated ExplicitSaver with fixed state tracking"""

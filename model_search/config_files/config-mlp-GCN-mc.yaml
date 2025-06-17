@@ -22,7 +22,7 @@ model_kwargs:
   # GIN Configuration
   gnn_type: "GCN"
   gnn_layers: 2
-  gnn_hidden_dim_multiple: 360
+  gnn_hidden_dim_multiple: 256
 
   # Edge MLP
   use_edge_mlp: true

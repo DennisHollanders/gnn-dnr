@@ -20,7 +20,7 @@ model_module: "AdvancedMLP"
 model_kwargs:
   # GAT Configuration
   gnn_type: GAT
-  gnn_layers: 4
+  gnn_layers: 2
   gnn_hidden_dim: 256 
   gat_heads: 4
   gat_dropout: 0.005
@@ -32,7 +32,7 @@ model_kwargs:
 
   # Node MLP
   use_node_mlp: true
-  node_hidden_dims: [256, 512, 1024]
+  node_hidden_dims: [256, 512, 512]
   # General Configuration
   activation: "leaky_relu"
   dropout_rate:  0.01
@@ -44,18 +44,18 @@ model_kwargs:
 
   # Switch Head
   switch_head_type: "mlp"
-  switch_head_layers: 4
+  switch_head_layers: 3
 
   # Physics losses
   use_gated_mp: true
   use_phyr: false
   lambda_connectivity: 1e-1
-  lambda_phy_loss: 0.5
+  lambda_phy_loss: 0.7
   lambda_radiality: 1e-2
 
   # Optimizer
-  learning_rate: 0.0001
-  weight_decay: 0.00001
+  learning_rate: 0.00035760499745340354
+  weight_decay: 3.1083921460064515e-05
 
   # Loss & Optimization
   loss_scaling_strategy: "adaptive_magnitude"
@@ -65,8 +65,8 @@ criterion_name: "WeightedBCELoss"
 batch_size: 128
 epochs: 200
 patience: 20
-weight_decay: 0.00001
-learning_rate: 0.0001
+learning_rate: 0.00035760499745340354
+weight_decay: 3.1083921460064515e-05
 # Output Configuration
 output_type: "mutliclass"
 num_classes: 2
