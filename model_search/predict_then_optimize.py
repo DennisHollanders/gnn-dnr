@@ -28,27 +28,58 @@ from model_search.models.AdvancedMLP.AdvancedMLP import PhysicsInformedRounding
 from data_generation.define_ground_truth import is_radial_and_connected
 from model_search.load_data2 import *
 
+
 class NetworkSwitchManager:
     def __init__(self, net):
         self.net = net
-        self.collapsed_switches, self.conflicts = collapse_switches_to_one_per_line(net)
-        self.line_order = sorted(
-            int(x) for x in self.collapsed_switches["element"].tolist()
-        )
-        self.line_to_switches_map = self._build_line_to_switches_map()
-        # keep collapse for mapping, but track *every* line
-        self.collapsed_switches, self.conflicts = collapse_switches_to_one_per_line(net)
-        # now manage all lines (not just ones with switches!)
+        self.collapsed_switches, self.conflicts = self._create_all_line_switches(net)
         self.line_order = sorted(int(lid) for lid in self.net.line.index)
-
+        self.line_to_switches_map = self._build_line_to_switches_map()
 
         self.state_history = []
         self.state_labels = []
 
-
-        self.initial_state = self._capture_current_state()
         self.initial_state = self._capture_current_state()
         self.add_state(self.initial_state, "initial")
+
+    def _create_all_line_switches(self, net):
+        """Create a switch representation for ALL lines, matching data loader behavior"""
+        # Get actual switches
+        line_switches = net.switch[net.switch['et'] == 'l'].copy()
+        conflicts = (
+            line_switches.groupby("element")["closed"]
+            .nunique()
+            .loc[lambda x: x > 1]
+            .index
+            .tolist()
+        )
+        if conflicts:
+            print(f"Warning: Lines with conflicting switch states: {conflicts}")
+        
+        actual_switches = (
+            line_switches.sort_index()
+            .drop_duplicates(subset="element", keep="first")
+        )
+        
+        all_line_switches = []
+        for line_id in sorted(net.line.index):
+            if line_id in actual_switches["element"].values:
+                switch_row = actual_switches[actual_switches["element"] == line_id].iloc[0]
+                all_line_switches.append({
+                    "element": line_id,
+                    "closed": switch_row["closed"],
+                    "has_physical_switch": True
+                })
+            else:
+                all_line_switches.append({
+                    "element": line_id,
+                    "closed": True, 
+                    "has_physical_switch": False
+                })
+        
+   
+        all_switches_df = pd.DataFrame(all_line_switches)
+        return all_switches_df, conflicts
 
     def _build_line_to_switches_map(self):
         """Build mapping from line_id to all switch indices that control that line"""
@@ -87,18 +118,18 @@ class NetworkSwitchManager:
         if len(states) != len(self.collapsed_switches):
             raise ValueError(f"Expected {len(self.collapsed_switches)} states, got {len(states)}")
             
-        # Then update the actual network
+        # Update the actual network
         sorted_switches = self.collapsed_switches.sort_values("element")
         for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
             line_id = switch_row['element']
             new_state = bool(states[i])
             
-            # Update ALL switches that control this line
-            switch_indices = self.line_to_switches_map.get(line_id, [])
-            for switch_idx in switch_indices:
-                self.net.switch.at[switch_idx, 'closed'] = new_state
-
-        # First 
+            # Only update if this line has physical switches
+            if switch_row.get('has_physical_switch', True):
+                # Update ALL switches that control this line
+                switch_indices = self.line_to_switches_map.get(line_id, [])
+                for switch_idx in switch_indices:
+                    self.net.switch.at[switch_idx, 'closed'] = new_state
         if label:
             self.add_state(states, label)
     
@@ -125,7 +156,7 @@ class NetworkSwitchManager:
             if line_id in opt_collapsed["element"].values:
                 gt_state = int(opt_collapsed.loc[opt_collapsed["element"] == line_id, "closed"].iloc[0])
             else:
-                gt_state = 0
+                gt_state = 1  # Default to closed for lines without switches
             gt_states.append(gt_state)
         return gt_states
     
@@ -133,7 +164,7 @@ class NetworkSwitchManager:
         G = nx.Graph()
         G.add_nodes_from(self.net.bus.index)
 
-        optimized = set(self.line_order)              # <-- use same list
+        optimized = set(self.line_order)
         for idx, ln in self.net.line.iterrows():
             lid = int(idx)
             if lid in optimized:
@@ -398,6 +429,7 @@ class NetworkSwitchManager:
 
 
 def collapse_switches_to_one_per_line(net):
+    """Legacy function for compatibility - now handled in NetworkSwitchManager"""
     line_switches = net.switch[net.switch['et'] == 'l'].copy()
     conflicts = (
         line_switches.groupby("element")["closed"]
@@ -416,11 +448,11 @@ def collapse_switches_to_one_per_line(net):
 
 
 def apply_physics_informed_rounding(switch_probs, switch_manager, device='cpu'):
-    """Updated to use NetworkSwitchManager"""
+    """Updated to use NetworkSwitchManager with all-lines approach"""
     if not isinstance(switch_probs, torch.Tensor):
         switch_probs = torch.tensor(switch_probs, dtype=torch.float32, device=device)
 
-    # Build edge index from collapsed switches
+    # Build edge index from ALL lines (matching new approach)
     edge_list = []
     for _, switch_row in switch_manager.collapsed_switches.iterrows():
         line_idx = switch_row['element']
@@ -432,32 +464,19 @@ def apply_physics_informed_rounding(switch_probs, switch_manager, device='cpu'):
         return [0] * len(switch_probs)
 
     edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous().to(device)
-    expected = expected = len(switch_manager.line_order)
+    expected = len(switch_manager.collapsed_switches)
     
+    # Now the lengths should match!
     if len(switch_probs) != expected:
-        # --- DEBUG INFO START ---
-        print("🔥  DEBUG: Switch count mismatch! 🔥")
-        print(f"  Graph ID:           ")
+        print("🔥  DEBUG: Switch count still mismatched! 🔥")
         print(f"  GNN predicted len:  {len(switch_probs)}")
         print(f"  Expected switches:  {expected}")
-        print("  → collapsed_switches (element, closed):")
-        print(switch_manager.collapsed_switches[['element','closed']].to_string(index=False))
-        print("  → all lines in net.line.index:")
-        print(list(switch_manager.net.line.index))
-        print("  → raw switch table (et=='l'):")
-        print(switch_manager.net.switch[switch_manager.net.switch.et=='l'].to_string())
-        print("  → line_to_switches_map:")
-
-        for line, idxs in switch_manager.line_to_switches_map.items():
-            print(f"     line {line}: switch rows {idxs}")
-        print("🔥  END DEBUG  🔥")
-        # now still raise so you get the full traceback
         raise ValueError(
             f"Switch count mismatch: GNN predicted {len(switch_probs)}, "
             f"network has {expected}"
         )
 
-
+    from model_search.models.AdvancedMLP.AdvancedMLP import PhysicsInformedRounding
     phyr = PhysicsInformedRounding()
     edge_batch = torch.zeros(expected, dtype=torch.long, device=device)
     num_nodes = torch.tensor([edge_index.max().item() + 1], dtype=torch.long, device=device)
@@ -478,6 +497,8 @@ class Predictor:
         sample = sample_loader.dataset[0]
         node_dim = sample.x.shape[1]
         edge_dim = sample.edge_attr.shape[1]
+        self.class_0_predictions = []
+        self.class_1_predictions = []
 
         module = importlib.import_module(
             f"models.{self.eval_args.model_module}.{self.eval_args.model_module}"
@@ -520,19 +541,28 @@ class Predictor:
                 batch = batch.to(self.device)
                 out = self.model(batch)
                 logits = out.get("switch_logits")
-                print(logits.shape)
-                if logits is None:
-                    raise RuntimeError("No logits found in model output")
                 if logits.dim() == 1 or (logits.dim() == 2 and logits.size(1) == 1):
-                    probs = torch.sigmoid(logits).squeeze(-1)
+                    prob_closed = torch.sigmoid(logits).squeeze(-1)
+                    prob_open = 1.0 - prob_closed
+                    probs = torch.stack([prob_open, prob_closed], dim=-1)  
+                    print(f"Converted binary logits to 2-class probabilities")
                 elif logits.dim() >= 2 and logits.size(-1) == 2:
-                    probs = torch.softmax(logits, dim=-1)[..., 1]
+                    # 2
+                    probs = torch.softmax(logits, dim=-1)  
+                    print(f"Applied softmax to 2-class logits")
                 else:
                     raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
-                probs = probs.cpu().numpy().tolist()
+                
+
                 gnn_time = time.time() - start
+                probs_list = probs.cpu().numpy().tolist()
+                self.class_0_predictions.extend([p[0] for p in probs_list])
+                self.class_1_predictions.extend([p[1] for p in probs_list])
+
+                probs = probs.cpu().numpy().tolist()
+                
                 gid =  batch.graph_id[0]
-                preds[gid] = probs
+                preds[gid] = probs_list
                 self.gnn_times[gid] = gnn_time
             return preds, self.gnn_times
 
@@ -622,12 +652,15 @@ class ExplicitSaver:
         return switch_manager.get_switch_states()
 
 
-    def apply_rounding(self, predictions: list, method: str, switch_manager: NetworkSwitchManager) -> list:
-        """Apply rounding using NetworkSwitchManager - NO STATE TRACKING HERE"""
+    def apply_rounding(self, predictions_2class: list, method: str, switch_manager: NetworkSwitchManager) -> list:
+        """Apply rounding using NetworkSwitchManager with 2-class probabilities"""
         if method == "round":
-            rounded = [1 if p > 0.5 else 0 for p in predictions]
+            # Use argmax: choose class with higher probability
+            rounded = [1 if pair[1] > pair[0] else 0 for pair in predictions_2class]
         elif method == "PhyR":
-            rounded = apply_physics_informed_rounding(predictions, switch_manager, device=self.device)
+            # Extract closed probabilities for PhyR
+            closed_probs = [pair[1] for pair in predictions_2class]
+            rounded = apply_physics_informed_rounding(closed_probs, switch_manager, device=self.device)
         else:
             raise ValueError(f"Unknown rounding method: {method}")
         return rounded
@@ -763,11 +796,13 @@ class Optimizer:
             initial_state = switch_manager.get_initial_states()
             
             # 3. GNN probabilities
-            raw_preds = self.predictions[gid]
-            switch_manager.add_state(raw_preds, "gnn_probs")
+            raw_preds_2class = self.predictions[gid]  # Now 2-class probabilities
+            # Extract closed probabilities for visualization
+            closed_probs = [pair[1] for pair in raw_preds_2class]
+            switch_manager.add_state(closed_probs, "gnn_probs")
             
             # 4. GNN rounded predictions
-            rounded = self.saver.apply_rounding(raw_preds, self.saver.rounding_method, switch_manager)
+            rounded = self.saver.apply_rounding(raw_preds_2class, self.saver.rounding_method, switch_manager)
             switch_manager.add_state(rounded, f"gnn_round")
             
             # Apply rounded predictions to network
@@ -782,43 +817,50 @@ class Optimizer:
                 solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid)
 
             elif mode == "float":
-                solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid, float_warmstart=raw_preds)
-                # also record discrete version
+                # Extract closed probabilities for float warmstart
+                closed_probs = [pair[1] for pair in raw_preds_2class]
+                solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid, float_warmstart=closed_probs)
+                
+                # Also record discrete version for saving
                 net2 = net.deepcopy()
                 switch_manager2 = NetworkSwitchManager(net2)
                 switch_manager2.set_switch_states(rounded, "float_warmstart_discrete")
                 self.saver.save_network_as_json(net2, self.saver.warmstart_networks_folder, gid)
-                print(f"Float warmstart {gid}: using raw predictions as float warmstart ")
+                
+                print(f"Float warmstart {gid}: using raw predictions as float warmstart")
                 print(f"Amount of switches rounded to 0/1: {rounded.count(0)}/{rounded.count(1)}")
-                print(f"Average value of switches rounded to 0 : {np.mean([p for p in raw_preds if p < 0.5]):.2f} , 1: {np.mean([p for p in raw_preds if p >= 0.5]):.2f}")
+                avg_0 = np.mean([p for p in closed_probs if p < 0.5]) if any(p < 0.5 for p in closed_probs) else 0
+                avg_1 = np.mean([p for p in closed_probs if p >= 0.5]) if any(p >= 0.5 for p in closed_probs) else 0
+                print(f"Average value of switches rounded to 0: {avg_0:.2f}, 1: {avg_1:.2f}")
             
             elif mode == "hard":
-                T     = self.confidence_threshold
-                half  = T / 2
-                up, lo = 0.5 + half, 0.5 - half
+                T = self.confidence_threshold
                 fixed = {}
                 fixed_0_count = 0
                 fixed_1_count = 0
                 sorted_switches = switch_manager.collapsed_switches.sort_values("element")
                 for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
-                    if i >= len(raw_preds): break
-                    p = raw_preds[i]
+                    if i >= len(raw_preds_2class): break
+                    prob_open, prob_closed = raw_preds_2class[i]
                     line_id = switch_row['element']
-                    if p >= up:
-                        d = 1
-                        fixed_1_count += 1
-                    elif p <= lo:
+                    
+                    # Fix to open if high confidence in open
+                    if prob_open >= T:
                         d = 0
                         fixed_0_count += 1
+                    # Fix to closed if high confidence in closed  
+                    elif prob_closed >= T:
+                        d = 1
+                        fixed_1_count += 1
                     else:
                         continue
+                        
                     switch_indices = switch_manager.line_to_switches_map.get(line_id, [])
                     for switch_idx in switch_indices:
                         fixed[switch_idx] = d
                         net.switch.at[switch_idx, 'closed'] = bool(d)
 
                 switch_manager.set_switch_states(rounded, "hard_warmstart")
-
                 radial, connected = is_radial_and_connected(net, include_switches=True)
                 print(f"Hard warmstart {gid}: {fixed_0_count} fixed to 0, {fixed_1_count} fixed to 1, radial={radial}, connected={connected}")
                 
@@ -894,12 +936,12 @@ class Optimizer:
             self.saver.add_csv_entry(
                 graph_id=gid,
                 ground_truth=ground_truth,
-                initial_state=initial_state,  # Use the captured initial state
-                gnn_probs=raw_preds,
+                initial_state=initial_state,
+                gnn_probs=closed_probs,  # Use extracted closed probabilities
                 gnn_prediction=rounded,
                 warmstart_config=rounded,
                 final_optima=final_states,
-                gnn_time=gnn_time,  # Add this
+                gnn_time=gnn_time,
                 solve_time=solve_time,
                 objective=objective_value,
                 radial=radial,
@@ -925,7 +967,7 @@ class Optimizer:
                 graph_id=gid,
                 ground_truth=[],
                 initial_state=[],
-                gnn_probs=self.predictions.get(gid, []),
+                gnn_probs=closed_probs,
                 gnn_prediction=[],
                 warmstart_config=[],
                 final_optima=[],
@@ -991,8 +1033,8 @@ if __name__ == "__main__":
                         default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
-                        #default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
-                        default = [r"data/split_datasets/test"],
+                        default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
+                        #default = [r"data/split_datasets/test"],
                         help="Folder containing 'mst' and 'mst_opt' subfolders")
     parser.add_argument("--dataset_names", type=str, nargs="+",
                         default=["test"],
@@ -1001,13 +1043,13 @@ if __name__ == "__main__":
     # Warmstart arguments
     parser.add_argument("--warmstart_mode", type=str,
                         choices=["only_gnn_predictions", "soft", "float", "hard", "optimization_without_warmstart"],
-                        default="hard",
+                        default="float",
                         help="Warmstart strategy")
     parser.add_argument("--rounding_method", type=str,
                         choices=["round", "PhyR"],
                         default="PhyR",
                         help="Rounding method for predictions")
-    parser.add_argument("--confidence_threshold", type=float, default=0.9,
+    parser.add_argument("--confidence_threshold", type=float, default=0.99,
                         help="Confidence threshold for hard warmstart")
     
     parser.add_argument("--num_workers", type=int, default=0,
@@ -1073,6 +1115,25 @@ if __name__ == "__main__":
         print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
         print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
 
+        # Average class 0 and 1 probabilities
+        class_0_avg = np.mean(predictor.class_0_predictions)
+        class_1_avg = np.mean(predictor.class_1_predictions)
+        print(f"Average class 0 probability: {class_0_avg:.4f}")
+        print(f"Average class 1 probability: {class_1_avg:.4f}")
+        # create histogram of predition distributions 
+
+        fig = plt.figure(figsize=(10, 5))
+        plt.hist(predictor.class_0_predictions, bins=50, alpha=0.5, label='Class 0', color='blue')
+        plt.hist(predictor.class_1_predictions, bins=50, alpha=0.5, label='Class 1', color='red')
+        plt.title('GNN Predictions Distribution')
+        plt.xlabel('Probability')
+        plt.ylabel('Frequency')
+        plt.legend()
+        fig_path = saver.predictions_folder / f"gnn_predictions_distribution.png"
+        fig.savefig(fig_path)
+        print(f"Prediction distribution histogram saved to: {fig_path}")
+
+              
         
     if args.optimize and predictions is not None:
         print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")

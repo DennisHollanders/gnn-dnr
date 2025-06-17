@@ -16,12 +16,12 @@ mkdir -p "$LOG_DIR"
 # Model configurations
 declare -A MODELS=(
   ["GAT"]="$BASE_DIR/model_search/models/final_models/blooming-snow-15-Best.pt"
-  ["GIN"]="$BASE_DIR/model_search/models/final_models/cosmic-field-12-Best.pt"
+  ["GIN"]="$BASE_DIR/model_search/models/final_models/devout-glitter-19-Best.pt"
   ["GCN"]="$BASE_DIR/model_search/models/final_models/volcanic-moon-10-Best.pt"
 )
 declare -A CONFIGS=(
   ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------blooming-snow-15.yaml"
-  ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------cosmic-field-12.yaml"
+  ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------devout-glitter-19.yaml"
   ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------volcanic-moon-10.yaml"
 )
 
@@ -161,7 +161,7 @@ for model in "${!MODELS[@]}"; do
         ;;
 
       hard)
-        for conf in 0.9 0.7 0.5 0.3 0.1; do
+        for conf in 0.999 0.975 0.95 0.925 0.9; do
           for round in "round" "PhyR"; do
             name="${model}_Hard_${conf}_${round}"
             submit_job "$name" "$model" "$mp" "$cp" "hard" "$round" "$conf" "--predict" "--optimize"

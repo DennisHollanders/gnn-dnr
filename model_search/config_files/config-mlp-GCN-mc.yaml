@@ -21,7 +21,7 @@ model_module: "AdvancedMLP"
 model_kwargs:
   # GIN Configuration
   gnn_type: "GCN"
-  gnn_layers: 1
+  gnn_layers: 2
   gnn_hidden_dim_multiple: 360
 
   # Edge MLP
@@ -57,12 +57,12 @@ model_kwargs:
 
   # Loss & Optimization
   loss_scaling_strategy: "fixed"
-  criterion_name: "FocalLoss"
+  criterion_name: "WeightedBCELoss"
   
   weight_decay: 3.1083921460064515e-05
 learning_rate: 0.00035760499745340354
 weight_decay: 3.1083921460064515e-05
-criterion_name: "FocalLoss"
+criterion_name: "WeightedBCELoss"
 # Training Configuration
 batch_size: 128
 epochs: 200
