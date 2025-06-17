@@ -161,7 +161,7 @@ for model in "${!MODELS[@]}"; do
         ;;
 
       hard)
-        for conf in 0.999 0.975 0.95 0.925 0.9; do
+        for conf in 0.999 0.99 0.975 0.95; do
           for round in "round" "PhyR"; do
             name="${model}_Hard_${conf}_${round}"
             submit_job "$name" "$model" "$mp" "$cp" "hard" "$round" "$conf" "--predict" "--optimize"
