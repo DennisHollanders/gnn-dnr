@@ -22,7 +22,7 @@ declare -A MODELS=(
 declare -A CONFIGS=(
   ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------whole-papar-13.yaml"
   ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------devout-glitter-19.yaml"
-  ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------anicent-bush-22.yaml"
+  ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------ancient-bush-22.yaml"
 )
 
 # Grab one “first” model for the global warm-start job
