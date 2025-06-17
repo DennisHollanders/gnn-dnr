@@ -20,7 +20,7 @@ declare -A MODELS=(
   ["GCN"]="$BASE_DIR/model_search/models/final_models/ancient-bush-22-Best.pt"
 )
 declare -A CONFIGS=(
-  ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------whole-papar-13.yaml"
+  ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------whole-paper-13.yaml"
   ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------devout-glitter-19.yaml"
   ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------ancient-bush-22.yaml"
 )
@@ -37,9 +37,9 @@ NUM_WORKERS=8
 
 # SLURM parameters
 PARTITION="tue.default.q"
-TIME_LIMIT="1-00:00:00"
+TIME_LIMIT="0-8:00:00"
 MEMORY="16G"
-CPUS=8
+CPUS=16
 NODES=1
 NTASKS_PER_NODE=1
 

@@ -43,7 +43,7 @@ class SimpleHPO:
         self.config_path = config_path
         self.study_name = study_name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
         
         self.search_space = self.config.pop('search_space', {})

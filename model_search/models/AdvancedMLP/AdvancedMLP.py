@@ -990,7 +990,7 @@ class AdvancedMLP(nn.Module):
         # Add multiclass probabilities if available
         if switch_probs_full is not None:
             outputs["switch_probabilities"] = switch_probs_full
-            print(f"Added switch_probabilities with shape: {switch_probs_full.shape}")
+        #    print(f"Added switch_probabilities with shape: {switch_probs_full.shape}")
         
         # Apply PhysicsTopK if enabled
         if self.use_phyr:
