@@ -17,12 +17,12 @@ mkdir -p "$LOG_DIR"
 declare -A MODELS=(
   ["GAT"]="$BASE_DIR/model_search/models/final_models/blooming-snow-15-Best.pt"
   ["GIN"]="$BASE_DIR/model_search/models/final_models/devout-glitter-19-Best.pt"
-  ["GCN"]="$BASE_DIR/model_search/models/final_models/stellar-sun-20-Best.pt"
+  ["GCN"]="$BASE_DIR/model_search/models/final_models/volcanic-moon-10-Best.pt"
 )
 declare -A CONFIGS=(
   ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------blooming-snow-15.yaml"
   ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------devout-glitter-19.yaml"
-  ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------stellar-sun-20.yaml"
+  ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------volcanic-moon-10.yaml"
 )
 
 # Grab one “first” model for the global warm-start job
