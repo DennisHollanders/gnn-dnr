@@ -545,11 +545,9 @@ class Predictor:
                     prob_closed = torch.sigmoid(logits).squeeze(-1)
                     prob_open = 1.0 - prob_closed
                     probs = torch.stack([prob_open, prob_closed], dim=-1)  
-                    print(f"Converted binary logits to 2-class probabilities")
                 elif logits.dim() >= 2 and logits.size(-1) == 2:
                     # 2
                     probs = torch.softmax(logits, dim=-1)  
-                    print(f"Applied softmax to 2-class logits")
                 else:
                     raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
                 
@@ -607,25 +605,19 @@ class WarmstartSOCP(SOCP_class):
 
     def _solve_with_float_warmstart(self, solver, **opts):
         from pyomo.opt import SolverFactory
-        
-        # Create model if it doesn't exist
+    
         if self.model is None:
             self.create_model()
         
         m = self.model
-        
-        # Create solver instance first
+
         opt = SolverFactory(solver)
-        
-        # For Gurobi persistent solver, we can set warmstart values directly
+
         if solver == "gurobi_persistent" and self.float_warmstart is not None:
-            # Set instance first
             if hasattr(opt, 'set_instance'):
                 opt.set_instance(m)
             
-            # Get sorted switches to match the order in float_warmstart - use UNIQUE lines only
             sorted_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element')
-            # Remove duplicates by element (line_id) - keep first occurrence
             unique_switches = sorted_switches.drop_duplicates(subset='element', keep='first')
             
             warmstart_count = 0
@@ -636,20 +628,16 @@ class WarmstartSOCP(SOCP_class):
                     line_id = switch_row['element']
                     if hasattr(m, 'line_status') and line_id in m.line_status:
                         warmstart_value = float(self.float_warmstart[i])
-                        # Ensure value is between 0 and 1
                         warmstart_value = max(0.0, min(1.0, warmstart_value))
-                        
+        
                         # For Gurobi, use round to nearest integer for binary vars
                         binary_value = 1 if warmstart_value >= 0.5 else 0
                         
-                        # Set the binary value on the variable (no warnings now)
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
                         
-                        # Try to set Gurobi hint using the Pyomo variable object directly
                         if hasattr(opt, '_solver_model'):
                             try:
-                                # Get the Gurobi variable using Pyomo's mapping
                                 pyomo_var = m.line_status[line_id]
                                 if hasattr(opt, '_pyomo_var_to_solver_var_map'):
                                     gurobi_var = opt._pyomo_var_to_solver_var_map.get(pyomo_var)
@@ -657,23 +645,20 @@ class WarmstartSOCP(SOCP_class):
                                         gurobi_var.VarHintVal = warmstart_value
                                         gurobi_hints_set += 1
                                 elif hasattr(opt, '_solver_model') and hasattr(opt._solver_model, 'getVars'):
-                                    # Alternative: find variable by matching bounds/name pattern
                                     for gvar in opt._solver_model.getVars():
                                         if f"line_status[{line_id}]" in str(gvar.VarName):
                                             gvar.VarHintVal = warmstart_value
                                             gurobi_hints_set += 1
                                             break
                             except Exception as hint_error:
-                                # Silently continue - hints are optional
                                 pass
                         
-                        if i < 5 or i % 20 == 0:  # Reduce logging
+                        if i < 5 or i % 20 == 0:
                             print(f"Set warmstart for line {line_id}: binary={binary_value}, hint={warmstart_value:.3f}")
             
             print(f"Float warmstart summary: {warmstart_count} binary values set, {gurobi_hints_set} Gurobi hints set")
         
         elif self.float_warmstart is not None:
-            # For other solvers, just round to binary values
             unique_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
             
             warmstart_count = 0
@@ -682,11 +667,10 @@ class WarmstartSOCP(SOCP_class):
                     line_id = switch_row['element']
                     if hasattr(m, 'line_status') and line_id in m.line_status:
                         warmstart_value = float(self.float_warmstart[i])
-                        # Round to binary for non-Gurobi solvers
                         binary_value = 1 if warmstart_value >= 0.5 else 0
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
-                        if i < 5:  # Limited logging
+                        if i < 5: 
                             print(f"Set binary warmstart for line {line_id}: {binary_value}")
             
             print(f"Binary warmstart summary: {warmstart_count} values set")
@@ -700,13 +684,8 @@ class WarmstartSOCP(SOCP_class):
             opt.set_instance(m)
         
         print(f"Solving with float warmstart using {len(self.float_warmstart) if self.float_warmstart else 0} warmstart values")
-        
-        # Solve the model
         res = opt.solve(m, tee=False, load_solutions=True)
-        
-        # Store solve time
         self.solve_time = getattr(res.solver, 'time', 0.0)
-        
         return res
 
 class ExplicitSaver:
@@ -943,12 +922,10 @@ class Optimizer:
                     if i >= len(raw_preds_2class): break
                     prob_open, prob_closed = raw_preds_2class[i]
                     line_id = switch_row['element']
-                    
-                    # Fix to open if high confidence in open
+
                     if prob_open >= T:
                         d = 0
                         fixed_0_count += 1
-                    # Fix to closed if high confidence in closed  
                     elif prob_closed >= T:
                         d = 1
                         fixed_1_count += 1
@@ -981,7 +958,7 @@ class Optimizer:
 
             if solver is not None:
                 solver.initialize()
-                solver.solve(solver="gurobi_persistent", TimeLimit=300, MIPGap=1e-3)
+                solver.solve(solver="gurobi_persistent", TimeLimit=6000, MIPGap=1e-2, threads=8)
                 solve_time = solver.solve_time
                 objective_value = float(pyo_val(solver.model.objective))
                 
@@ -1084,7 +1061,6 @@ class Optimizer:
             )
             err_row = {
                 "graph_id": gid,
-                # fill in the same columns with defaults or empty lists…
                 "error": str(e)
             }
             return gid, {'success': False, 'error': str(e), 'row': err_row}
@@ -1133,7 +1109,7 @@ if __name__ == "__main__":
                         default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
-                        default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test_test"],
+                        default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test"],
                         #default = [r"data/split_datasets/test"],
                         help="Folder containing 'mst' and 'mst_opt' subfolders")
     parser.add_argument("--dataset_names", type=str, nargs="+",
@@ -1177,14 +1153,13 @@ if __name__ == "__main__":
         shuffle=False,
         batch_size=1)
     test_loader = loaders.get("test", None)
-    for batch in test_loader:
-        print(f"first batch:    {batch[0]}")
+
     # Verify alignment
     if len(test_loader.dataset) != len(graph_ids):
         print(f"Warning: Dataset size ({len(test_loader.dataset)}) != number of graphs ({len(graph_ids)})")
     
-    print(f"Test loader created with {len(test_loader.dataset)} samples")
-    print(f"Graph IDs: {graph_ids[:5]}..." if len(graph_ids) > 5 else f"Graph IDs: {graph_ids}")
+    # print(f"Test loader created with {len(test_loader.dataset)} samples")
+    # print(f"Graph IDs: {graph_ids[:5]}..." if len(graph_ids) > 5 else f"Graph IDs: {graph_ids}")
 
     # Extract job name from model_path
     job_name = Path(args.model_path).stem
@@ -1210,30 +1185,61 @@ if __name__ == "__main__":
         )
         predictions, gnn_times = predictor.run(test_loader, graph_ids=graph_ids)
 
-        print(f"Prediction keys: {sorted(predictions.keys())}")
-        print(f"Graph IDs: {sorted(graph_ids)}")
-        print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
-        print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
+        # print(f"Prediction keys: {sorted(predictions.keys())}")
+        # print(f"Graph IDs: {sorted(graph_ids)}")
+        # print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
+        # print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
+        # # Convert to numpy arrays
+        # class_0_preds = np.array(predictor.class_0_predictions)
+        # class_1_preds = np.array(predictor.class_1_predictions)
 
-        # Average class 0 and 1 probabilities
-        class_0_avg = np.mean(predictor.class_0_predictions)
-        class_1_avg = np.mean(predictor.class_1_predictions)
-        print(f"Average class 0 probability: {class_0_avg:.4f}")
-        print(f"Average class 1 probability: {class_1_avg:.4f}")
-        # create histogram of predition distributions 
+        # class_0_high_conf = class_0_preds[class_0_preds > 0.5]
+        # class_1_high_conf = class_1_preds[class_1_preds > 0.5]
 
-        fig = plt.figure(figsize=(10, 5))
-        plt.hist(predictor.class_0_predictions, bins=50, alpha=0.5, label='Class 0', color='blue')
-        plt.hist(predictor.class_1_predictions, bins=50, alpha=0.5, label='Class 1', color='red')
-        plt.title('GNN Predictions Distribution')
-        plt.xlabel('Probability')
-        plt.ylabel('Frequency')
-        plt.legend()
-        fig_path = saver.predictions_folder / f"gnn_predictions_distribution.png"
-        fig.savefig(fig_path)
-        print(f"Prediction distribution histogram saved to: {fig_path}")
+        # conf0 = class_0_preds[class_0_preds > 0.5]
+        # conf1 = class_1_preds[class_1_preds > 0.5]
 
-              
+        # # create 50 bins in [0.5, 1.0]
+        # bins = np.linspace(0.5, 1.0, 51)
+
+        # plt.rcParams.update({
+        # 'font.size':         14,
+        # 'axes.titlesize':    16,
+        # 'axes.labelsize':    14,
+        # 'xtick.labelsize':   12,
+        # 'ytick.labelsize':   12,
+        # 'legend.fontsize':   12,
+        # 'figure.titlesize':  16,
+        # 'colorbar.labelsize':12,
+        #     })
+
+        # # ── Your existing code ──────────────────────────────────────
+        # fig, ax0 = plt.subplots(figsize=(10, 5))
+        # ax1 = ax0.twinx()
+
+        # # histograms
+        # ax0.hist(conf0, bins=bins, alpha=0.5, edgecolor='red', label='Class 0')
+        # ax1.hist(conf1, bins=bins, alpha=0.5, edgecolor='blue', label='Class 1')
+
+        # # ── Option B: per‐call overrides ─────────────────────────────
+        # ax0.set_xlabel('Confidence',                   fontsize=14)
+        # ax0.set_ylabel('Frequency (Class 0)', color='red', fontsize=14)
+        # ax1.set_ylabel('Frequency (Class 1)', color='blue', fontsize=14)
+
+        # ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=16)
+        # ax0.tick_params(axis='both', labelsize=12)
+
+        # # custom legend font size
+        # h0, l0 = ax0.get_legend_handles_labels()
+        # h1, l1 = ax1.get_legend_handles_labels()
+        # leg = ax0.legend(h0 + h1, l0 + l1, loc='upper center')
+        # for text in leg.get_texts():
+        #     text.set_fontsize(12)
+
+        # plt.tight_layout()
+        # #plt.show()
+        # plt.savefig(saver.predictions_folder / f"confidence_histograms.png")
+                            
         
     if args.optimize and predictions is not None:
         print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")

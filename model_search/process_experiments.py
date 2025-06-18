@@ -2,15 +2,15 @@ import pandas as pd
 import json
 import numpy as np
 from pathlib import Path
-from sklearn.metrics import f1_score, recall_score, precision_score
+from sklearn.metrics import f1_score, recall_score, precision_score, balanced_accuracy_score, matthews_corrcoef
 import pandapower as pp
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")
 import os 
 import sys 
-# Import functions from define_ground_truth.py
 
+# Import functions from define_ground_truth.py
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -25,251 +25,331 @@ from data_generation.define_ground_truth import (
     visualize_network_states
 )
 
-def analyze_csv_results(csv_file):
-    df = pd.read_csv(csv_file)
+def calculate_specificity_sensitivity(y_true, y_pred):
+    """Calculate specificity and sensitivity"""
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
     
-    # Parse filename to extract configuration
-    filename = csv_file.stem  # results-{model}-{rounding}-{warmstart}
-    parts = filename.replace("results-", "").split("-")
+    # True Positives, False Positives, True Negatives, False Negatives
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    tn = np.sum((y_true == 0) & (y_pred == 0))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
     
-    print(f"  Parsing filename: {filename}")
-    print(f"  Filename parts: {parts}")
+    # Sensitivity (True Positive Rate / Recall)
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     
-    # Handle more complex model names (e.g., "None-Best", "AdvancedMLP", etc.)
-    if len(parts) >= 3:
-        # Last two parts should be rounding and warmstart
-        warmstart_mode = parts[-1]
-        rounding_method = parts[-2]
-        # Everything else is the model name
-        model_name = "-".join(parts[:-2])
-    else:
-        # Fallback parsing
-        model_name = "unknown"
-        rounding_method = "unknown" 
-        warmstart_mode = "unknown"
+    # Specificity (True Negative Rate)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     
-    print(f"  Parsed: model={model_name}, rounding={rounding_method}, warmstart={warmstart_mode}")
-    
-    # Initialize metrics
-    all_f1 = []
-    all_recall = []
-    all_precision = []
-    all_delta = []
-    all_solve_times = []
-    
-    infeasible_count = 0
-    radial_wrong_count = 0
-    non_radial_count = 0
-    
-    print(f"  Processing {len(df)} rows...")
-    
-    for idx, row in df.iterrows():
-        try:
-            # Parse JSON fields
-            ground_truth = json.loads(row['ground_truth'])
-            gnn_prediction = json.loads(row['gnn_prediction']) 
-            final_optima = json.loads(row['final_optima'])
-            
-            print(f"    Row {idx}: GT={len(ground_truth)}, GNN={len(gnn_prediction)}, Final={len(final_optima)}")
-            
-            # Handle length mismatches
-            if len(ground_truth) != len(gnn_prediction):
-                print(f"    Warning: Length mismatch - GT:{len(ground_truth)} vs GNN:{len(gnn_prediction)}")
-                
-                # Try to align arrays - assume GNN prediction corresponds to a subset of switches
-                # This might happen if not all lines have switches, or preprocessing filtered some switches
-                if len(gnn_prediction) < len(ground_truth):
-                    print(f"    Truncating ground truth to match GNN prediction length")
-                    ground_truth = ground_truth[:len(gnn_prediction)]
-                elif len(ground_truth) < len(gnn_prediction):
-                    print(f"    Truncating GNN prediction to match ground truth length")
-                    gnn_prediction = gnn_prediction[:len(ground_truth)]
-            
-            if len(ground_truth) != len(final_optima):
-                print(f"    Warning: Length mismatch - GT:{len(ground_truth)} vs Final:{len(final_optima)}")
-                
-                if len(final_optima) < len(ground_truth):
-                    print(f"    Truncating ground truth to match final optima length")
-                    ground_truth = ground_truth[:len(final_optima)]
-                elif len(ground_truth) < len(final_optima):
-                    print(f"    Truncating final optima to match ground truth length")
-                    final_optima = final_optima[:len(ground_truth)]
-            
-            # Final validation
-            if len(ground_truth) != len(gnn_prediction) or len(ground_truth) != len(final_optima):
-                print(f"    Skipping row {idx} due to unresolvable length mismatch")
-                infeasible_count += 1
-                continue
-                
-            # Calculate prediction metrics (GNN vs ground truth)
-            f1 = f1_score(ground_truth, gnn_prediction, average='binary', zero_division=0)
-            recall = recall_score(ground_truth, gnn_prediction, average='binary', zero_division=0)
-            precision = precision_score(ground_truth, gnn_prediction, average='binary', zero_division=0)
-            
-            all_f1.append(f1)
-            all_recall.append(recall)
-            all_precision.append(precision)
-            
-            # Calculate solution difference (δ solution = switches different from ground truth)
-            delta = sum(1 for gt, opt in zip(ground_truth, final_optima) if gt != opt)
-            all_delta.append(delta)
-            
-            # Add solve time if available (would need to be added to CSV by predict_then_optimize.py)
-            # For now, use placeholder
-            all_solve_times.append(0.0)
-            
-            print(f"    Row {idx}: F1={f1:.3f}, Delta={delta}")
-            
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            print(f"    Error processing row {idx}: {e}")
-            infeasible_count += 1
-            continue
-    
-    # Calculate radiality metrics from network files if available
-    predictions_path = csv_file.parent
-    folder_pattern = filename.replace('results-', '')
-    
-    # Look for corresponding prediction folders
-    prediction_folders = list(predictions_path.glob(f"prediction-{folder_pattern}*"))
-    
-    if prediction_folders:
-        prediction_folder = prediction_folders[0]
-        prediction_networks_folder = prediction_folder / "pandapower_networks"
+    return specificity, sensitivity
+
+def calculate_f1_majority(y_true, y_pred):
+    """Calculate F1 score for majority class (class 0)"""
+    return f1_score(y_true, y_pred, pos_label=0, average='binary', zero_division=0)
+
+def check_network_radiality(predictions_folder, filename_pattern, experiment_id):
+    """Check if a specific network configuration is radial"""
+    try:
+        # Look for corresponding prediction folders
+        predictions_path = Path(predictions_folder)
+        prediction_folders = list(predictions_path.glob(f"prediction-{filename_pattern}*"))
         
-        if prediction_networks_folder.exists():
-            for json_file in prediction_networks_folder.glob("*.json"):
-                try:
+        if prediction_folders:
+            prediction_folder = prediction_folders[0]
+            prediction_networks_folder = prediction_folder / "pandapower_networks"
+            
+            if prediction_networks_folder.exists():
+                # Look for network file corresponding to experiment_id
+                json_files = list(prediction_networks_folder.glob("*.json"))
+                if experiment_id < len(json_files):
+                    json_file = json_files[experiment_id]
+                    
                     # Load final prediction network
                     final_net = pp.from_json(str(json_file))
                     
                     # Check if final network is radial and connected
-                    final_radial, final_connected = is_radial_and_connected(final_net, include_switches=True)
+                    is_radial, is_connected = is_radial_and_connected(final_net, include_switches=True)
+                    return is_radial, is_connected
+    except Exception as e:
+        print(f"Error checking network radiality: {e}")
+        
+    return None, None
+
+def process_all_experiments_detailed(predictions_folder, model_name_mapping=None, output_path=None, debug_mode=False):
+    """Process all CSV files and create one row per experiment"""
+    predictions_path = Path(predictions_folder)
+    
+    # Find all CSV files
+    csv_files = list(predictions_path.glob("results-*.csv"))
+    print(f"Found {len(csv_files)} CSV files to process")
+    
+    # Debug mode - process only first CSV
+    if debug_mode:
+        csv_files = csv_files[:1]
+        print(f"DEBUG MODE: Processing only first CSV file")
+    
+    all_rows = []
+    
+    for csv_file in csv_files:
+        print(f"\nProcessing {csv_file.name}...")
+        
+        try:
+            df = pd.read_csv(csv_file)
+            
+            # Parse filename to extract configuration
+            filename = csv_file.stem  # results-{model}-{rounding}-{warmstart}
+            parts = filename.replace("results-", "").split("-")
+            
+            # Handle complex model names
+            if len(parts) >= 3:
+                warmstart_mode = parts[-1]
+                rounding_method = parts[-2]
+                model_name = "-".join(parts[:-2])
+            else:
+                model_name = "unknown"
+                rounding_method = "unknown" 
+                warmstart_mode = "unknown"
+            
+            # Extract GNN type
+            gnn_type = "unknown"
+            if "GAT" in model_name.upper():
+                gnn_type = "GAT"
+            elif "GIN" in model_name.upper():
+                gnn_type = "GIN"
+            elif "GCN" in model_name.upper():
+                gnn_type = "GCN"
+            else:
+                gnn_type = model_name
+            
+            # Apply model name mapping if provided
+            display_name = model_name
+            if model_name_mapping and model_name in model_name_mapping:
+                display_name = model_name_mapping[model_name]
+            
+            filename_pattern = filename.replace('results-', '')
+            
+            # Process each experiment (row) in the CSV
+            for idx, row in df.iterrows():
+                try:
+                    # Parse JSON fields
+                    ground_truth = json.loads(row['ground_truth'])
+                    final_optima = json.loads(row['final_optima'])
                     
-                    if not final_radial or not final_connected:
-                        non_radial_count += 1
-                        
-                        # Additional check: if this should have been radial (simplified heuristic)
-                        # You might want to implement more sophisticated logic here
-                        if not final_radial:
-                            radial_wrong_count += 1
-                            
+                    # Check if there's an error column indicating infeasibility
+                    is_infeasible = False
+                    infeasible_type = None
+                    error_msg = ""
+                    
+                    # Check error column - if True or any non-empty value, it's infeasible
+                    if 'error' in row:
+                        error_val = row['error']
+                        # Check for True, 'True', 'true', or any non-empty string
+                        if (isinstance(error_val, bool) and error_val) or \
+                           (isinstance(error_val, str) and error_val.lower() == 'true') or \
+                           (pd.notna(error_val) and str(error_val).strip() and str(error_val).strip().lower() != 'false'):
+                            is_infeasible = True
+                            infeasible_type = 'error'
+                            error_msg = str(error_val)
+                    
+                    # Check solve time for timeout (>299 seconds indicates timeout/infeasibility)
+                    solve_time = row.get('solve_time', 0.0)
+                    if pd.isna(solve_time):
+                        solve_time = 0.0
+                    elif solve_time > 299:
+                        is_infeasible = True
+                        if infeasible_type == 'error':
+                            # Both error and timeout
+                            infeasible_type = 'both'
+                            error_msg += f" (solve_time: {solve_time}s)"
+                        else:
+                            infeasible_type = 'time_limit'
+                            error_msg = f"Timeout - solve_time: {solve_time}s"
+                    
+                    # Handle length mismatches
+                    if len(ground_truth) != len(final_optima):
+                        min_len = min(len(ground_truth), len(final_optima))
+                        if min_len > 0:
+                            ground_truth = ground_truth[:min_len]
+                            final_optima = final_optima[:min_len]
+                        else:
+                            is_infeasible = True
+                            error_msg = "Length mismatch - no valid predictions"
+                    
+                    # Compare configurations directly
+                    is_correct = ground_truth == final_optima if not is_infeasible else False
+                    
+                    # Calculate metrics for this experiment
+                    if not is_infeasible and len(ground_truth) > 0:
+                        mcc = matthews_corrcoef(ground_truth, final_optima) if len(set(ground_truth)) > 1 else 0.0
+                        f1_majority = calculate_f1_majority(ground_truth, final_optima)
+                        balanced_acc = balanced_accuracy_score(ground_truth, final_optima)
+                        spec, sens = calculate_specificity_sensitivity(ground_truth, final_optima)
+                    else:
+                        mcc = f1_majority = balanced_acc = spec = sens = 0.0
+                    
+                    # Solve time is already retrieved above
+                    
+                    # Get loss information
+                    loss_ground_truth = row.get('loss_ground_truth', np.nan)
+                    loss_final = row.get('loss_final', np.nan)
+                    loss_difference = abs(loss_final - loss_ground_truth) if not np.isnan(loss_final) and not np.isnan(loss_ground_truth) else np.nan
+                    
+                    # Check radiality if prediction is wrong
+                    is_radial = is_connected = None
+                    if not is_correct and not is_infeasible:
+                        is_radial, is_connected = check_network_radiality(
+                            predictions_folder, filename_pattern, idx
+                        )
+                    
+                    # Create detailed row
+                    experiment_row = {
+                        'experiment_id': idx,
+                        'csv_file': csv_file.name,
+                        'model_name': model_name,
+                        'display_name': display_name,
+                        'gnn_type': gnn_type,
+                        'rounding_method': rounding_method,
+                        'warmstart_mode': warmstart_mode,
+                        'ground_truth': str(ground_truth),
+                        'final_optima': str(final_optima),
+                        'is_correct': is_correct,
+                        'is_infeasible': is_infeasible,
+                        'infeasible_type': infeasible_type,
+                        'error_message': error_msg,
+                        'num_switches': len(ground_truth),
+                        'mcc_score': mcc,
+                        'f1_majority_score': f1_majority,
+                        'balanced_accuracy': balanced_acc,
+                        'specificity': spec,
+                        'sensitivity': sens,
+                        'solve_time': solve_time,
+                        'loss_ground_truth': loss_ground_truth,
+                        'loss_final': loss_final,
+                        'loss_difference': loss_difference,
+                        'is_radial': is_radial,
+                        'is_connected': is_connected,
+                        'radial_category': 'correct' if is_correct else ('infeasible_error' if infeasible_type == 'error' else ('infeasible_time' if infeasible_type == 'time_limit' else ('infeasible_both' if infeasible_type == 'both' else ('radial_wrong' if is_radial and is_connected else 'non_radial_wrong'))))
+                    }
+                    
+                    all_rows.append(experiment_row)
+                    
                 except Exception as e:
-                    print(f"Error analyzing network {json_file}: {e}")
-                    infeasible_count += 1
+                    print(f"    Error processing experiment {idx}: {e}")
                     continue
+            
+            print(f"  Processed {len(df)} experiments from {csv_file.name}")
+            
+        except Exception as e:
+            print(f"Error processing {csv_file.name}: {e}")
+            continue
     
-    # Calculate accuracy with length mismatch handling
-    accuracy_scores = []
-    for _, row in df.iterrows():
-        if _is_valid_json_row(row):
-            try:
-                gt = json.loads(row['ground_truth'])
-                fo = json.loads(row['final_optima'])
-                # Handle length mismatch
-                min_len = min(len(gt), len(fo))
-                if min_len > 0:
-                    acc = f1_score(gt[:min_len], fo[:min_len], average='binary', zero_division=0)
-                    accuracy_scores.append(acc)
-            except:
-                continue
+    if not all_rows:
+        print("No valid results found!")
+        return None
     
-    # Compile results
-    metrics = {
-        'model': model_name,
-        'warmstart_mode': warmstart_mode, 
-        'rounding_method': rounding_method,
-        'filename': csv_file.name,
+    # Convert to DataFrame
+    detailed_df = pd.DataFrame(all_rows)
+    
+    # Save detailed results
+    detailed_csv = predictions_path / "detailed_experiment_results.csv"
+    detailed_df.to_csv(detailed_csv, index=False)
+    print(f"\nDetailed results saved to: {detailed_csv}")
+    
+    # Create summary by configuration
+    summary_results = []
+    for config, group in detailed_df.groupby(['model_name', 'rounding_method', 'warmstart_mode']):
+        model_name, rounding, warmstart = config
         
-        # Performance metrics
-        'avg_f1': np.mean(all_f1) if all_f1 else 0.0,
-        'avg_recall': np.mean(all_recall) if all_recall else 0.0,
-        'avg_precision': np.mean(all_precision) if all_precision else 0.0,
-        'avg_delta': np.mean(all_delta) if all_delta else 0.0,
-        'avg_solve_time': np.mean(all_solve_times) if all_solve_times else 0.0,
+        # Calculate aggregated metrics
+        all_gt = []
+        all_pred = []
+        for _, exp in group.iterrows():
+            if not exp['is_infeasible']:
+                gt = eval(exp['ground_truth'])
+                pred = eval(exp['final_optima'])
+                all_gt.extend(gt)
+                all_pred.extend(pred)
         
-        # Error counts
-        'infeasible': infeasible_count,
-        'radial_wrong': radial_wrong_count,
-        'non_radial': non_radial_count,
+        if all_gt:
+            overall_mcc = matthews_corrcoef(all_gt, all_pred) if len(set(all_gt)) > 1 else 0.0
+            overall_f1_majority = calculate_f1_majority(all_gt, all_pred)
+            overall_balanced_acc = balanced_accuracy_score(all_gt, all_pred)
+            overall_spec, overall_sens = calculate_specificity_sensitivity(all_gt, all_pred)
+        else:
+            overall_mcc = overall_f1_majority = overall_balanced_acc = overall_spec = overall_sens = 0.0
         
-        # Additional metrics
-        'total_graphs': len(df),
-        'successful_optimizations': len(all_f1),
-        'accuracy': np.mean(accuracy_scores) if accuracy_scores else 0.0,
-        'avg_loss_improvement': 0.0  # Placeholder - would need loss data
-    }
+        # Count categories
+        correct_count = sum(group['is_correct'])
+        infeasible_error_count = sum((group['infeasible_type'] == 'error'))
+        infeasible_time_count = sum((group['infeasible_type'] == 'time_limit'))
+        infeasible_both_count = sum((group['infeasible_type'] == 'both'))
+        infeasible_total = sum(group['is_infeasible'])
+        radial_wrong = sum((group['radial_category'] == 'radial_wrong'))
+        non_radial_wrong = sum((group['radial_category'] == 'non_radial_wrong'))
+        
+        # Time calculations
+        feasible_times = group[~group['is_infeasible']]['solve_time']
+        time_feasible = feasible_times.mean() if len(feasible_times) > 0 else 0.0
+        
+        # For infeasible, assume max time
+        max_time = 300.0
+        all_times = group['solve_time'].fillna(max_time)
+        all_times[group['is_infeasible']] = max_time
+        time_including_infeasible = all_times.mean()
+        
+        # Loss difference
+        valid_losses = group['loss_difference'].dropna()
+        avg_loss_diff = valid_losses.mean() if len(valid_losses) > 0 else 0.0
+        
+        summary_row = {
+            'Name of model': model_name_mapping.get(model_name, model_name) if model_name_mapping else model_name,
+            'GNN type': group.iloc[0]['gnn_type'],
+            'experiments': f"{model_name}-{rounding}-{warmstart}",
+            'MCC score': overall_mcc,
+            'F1-majority score': overall_f1_majority,
+            'Balanced Accuracy': overall_balanced_acc,
+            'Specificity': overall_spec,
+            'Sensitivity': overall_sens,
+            'Time [s] (feasible only)': time_feasible,
+            'Time [s] (including infeasible)': time_including_infeasible,
+            'Difference in loss between optima': avg_loss_diff,
+            'number of graphs: predicted correctly': correct_count,
+            'number of graphs: Radial wrong': radial_wrong,
+            'number of graphs: Non-Radial wrong': non_radial_wrong,
+            'number of graphs: Infeasible (error)': infeasible_error_count,
+            'number of graphs: Infeasible (time)': infeasible_time_count,
+            'number of graphs: Infeasible (both)': infeasible_both_count,
+            'number of graphs: Infeasible (total)': infeasible_total,
+            'total_experiments': len(group)
+        }
+        summary_results.append(summary_row)
     
-    print(f"  Results: F1={metrics['avg_f1']:.3f}, Accuracy={metrics['accuracy']:.3f}, Delta={metrics['avg_delta']:.1f}")
-    print(f"  Processed {metrics['successful_optimizations']}/{metrics['total_graphs']} graphs successfully")
+    summary_df = pd.DataFrame(summary_results)
     
-    return metrics
+    # Save summary
+    summary_csv = predictions_path / "experiment_summary_results.csv"
+    summary_df.to_csv(summary_csv, index=False)
+    print(f"Summary results saved to: {summary_csv}")
+    
+    # Create LaTeX table
+    if output_path:
+        latex_table = create_latex_table_new_format(summary_df)
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, 'w') as f:
+            f.write(latex_table)
+        print(f"LaTeX table saved to: {output_file}")
+    
+    print(f"\nProcessing complete! Generated {len(detailed_df)} detailed experiment rows.")
+    print(f"Summary contains {len(summary_df)} configuration rows.")
+    
+    return detailed_df, summary_df
 
-def _is_valid_json_row(row):
-    """Helper function to check if a row has valid JSON data"""
-    try:
-        ground_truth = json.loads(row['ground_truth'])
-        final_optima = json.loads(row['final_optima'])
-        # Allow for length mismatches, we'll handle them in processing
-        return True
-    except:
-        return False
-
-def visualize_prediction_pipeline(graph_id, mst_net, mst_opt_net, gnn_predictions, 
-                                final_prediction_net, rounding_method, output_dir=None):
-    """
-    Create visualization of the prediction pipeline for a single graph
-    
-    Args:
-        graph_id: Graph identifier
-        mst_net: Original MST network
-        mst_opt_net: Optimized MST network (ground truth)
-        gnn_predictions: List of GNN prediction probabilities
-        final_prediction_net: Final predicted network after optimization
-        rounding_method: Rounding method used
-        output_dir: Directory to save plots
-    """
-    if output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create rounded predictions for visualization
-    if rounding_method == "round":
-        rounded_predictions = [1 if pred > 0.5 else 0 for pred in gnn_predictions]
-    elif rounding_method == "PhyR":
-        # Placeholder for PhyR - implement your physics-informed rounding
-        rounded_predictions = [1 if pred > 0.5 else 0 for pred in gnn_predictions]
-    else:
-        rounded_predictions = [1 if pred > 0.5 else 0 for pred in gnn_predictions]
-    
-    # Create network with GNN predictions applied
-    gnn_prediction_net = mst_net.deepcopy()
-    for i, pred in enumerate(rounded_predictions):
-        if i < len(gnn_prediction_net.switch):
-            gnn_prediction_net.switch.at[i, 'closed'] = bool(pred)
-    
-    # Prepare snapshots for visualization
-    snapshots = {
-        "original": mst_net,
-        "gnn_prediction": gnn_prediction_net,
-        "optimized_prediction": final_prediction_net,
-        "ground_truth": mst_opt_net
-    }
-    
-    # Use the visualization function from define_ground_truth.py
-    visualize_network_states(snapshots, graph_id, output_dir=output_dir, debug=False)
-
-def create_latex_table(results_df):
-    """
-    Create LaTeX table from results DataFrame
-    
-    Args:
-        results_df: DataFrame with experimental results
-    
-    Returns:
-        String containing LaTeX table
-    """
-    # Group results by model
-    models = ['GAT', 'GIN', 'GCN']  # Adjust based on your actual model names
+def create_latex_table_new_format(results_df):
+    """Create LaTeX table with the new format"""
+    if results_df.empty:
+        return "No results to display"
     
     # Start LaTeX table
     latex_lines = [
@@ -278,349 +358,38 @@ def create_latex_table(results_df):
         "  \\small",
         "  \\renewcommand{\\arraystretch}{1.2}",
         "  \\resizebox{\\textwidth}{!}{%",
-        "    \\arrayrulecolor{black}%",
-        "    \\begin{tabular}{lllcccccccc}",
+        "    \\begin{tabular}{llccccccccccccc}",
         "      \\toprule",
-        "      Model & Method & Variant & Time [s] & F1 & Recall & Precision",
-        "            & $\\delta$ solution & Radial wrong & Non-radial & Infeasible \\\\",
+        "      Model & GNN & MCC & F1-maj & Bal.Acc & Spec & Sens & Time(F) & Time(I) & Loss & Correct & Radial & Non-Rad & Inf(E) & Inf(T) \\\\",
         "      \\midrule"
     ]
     
-    for model_idx, model in enumerate(models):
-        if model_idx > 0:
-            latex_lines.append("      \\arrayrulecolor{black}\\midrule")
-            
-        model_results = results_df[results_df['model'].str.contains(model, case=False, na=False)]
-        
-        if model_results.empty:
-            # Add empty rows for missing model
-            latex_lines.extend(_get_empty_model_rows(model))
-            continue
-        
-        latex_lines.append(f"      \\multirow{{11}}{{*}}{{{model}}}")
-        
-        # DirectPrediction rows
-        direct_round = model_results[
-            (model_results['warmstart_mode'] == 'none') & 
-            (model_results['rounding_method'] == 'round')
-        ]
-        direct_phyr = model_results[
-            (model_results['warmstart_mode'] == 'none') & 
-            (model_results['rounding_method'] == 'PhyR')
-        ]
-        
-        latex_lines.append("        & \\multirow{2}{*}{DirectPrediction}")
-        latex_lines.append(_format_result_row("Rounding", direct_round, first_in_group=False))
-        latex_lines.append(_format_result_row("PhyR", direct_phyr, first_in_group=False))
-        
-        # SoftWarmStart rows  
-        latex_lines.append("      \\arrayrulecolor{gray!60}\\cdashline{2-11}")
-        
-        soft_float = model_results[
-            (model_results['warmstart_mode'] == 'float') & 
-            (model_results['rounding_method'] == 'round')
-        ]
-        soft_round = model_results[
-            (model_results['warmstart_mode'] == 'soft') & 
-            (model_results['rounding_method'] == 'round')
-        ]
-        soft_phyr = model_results[
-            (model_results['warmstart_mode'] == 'soft') & 
-            (model_results['rounding_method'] == 'PhyR')
-        ]
-        
-        latex_lines.append("        & \\multirow{3}{*}{SoftWarmStart}")
-        latex_lines.append(_format_result_row("Floats", soft_float, first_in_group=False))
-        latex_lines.append(_format_result_row("Binary Rounding", soft_round, first_in_group=False))
-        latex_lines.append(_format_result_row("Binary PhyR", soft_phyr, first_in_group=False))
-        
-        # HardWarmStart rows
-        latex_lines.append("      \\cdashline{2-11}")
-        
-        hard_results = model_results[model_results['warmstart_mode'] == 'hard']
-        confidence_levels = ['0.9', '0.7', '0.5', '0.3', '0.1']
-        
-        latex_lines.append("        & \\multirow{5}{*}{HardWarmStart}")
-        for i, conf in enumerate(confidence_levels):
-            # Note: You might need to parse confidence from filename or add it to CSV
-            conf_results = hard_results  # Simplified - you may need better logic here
-            latex_lines.append(_format_result_row(conf, conf_results if i == 0 else pd.DataFrame(), 
-                                                first_in_group=False))
-        
-        # DFL row (placeholder)
-        latex_lines.append("      \\cdashline{2-11}")
-        latex_lines.append("        & DFL                         & --                &  &  &  &  &  &  &  &  \\\\")
+    for idx, row in results_df.iterrows():
+        latex_lines.append(
+            f"      {row['Name of model']} & {row['GNN type']} & "
+            f"{row['MCC score']:.3f} & {row['F1-majority score']:.3f} & "
+            f"{row['Balanced Accuracy']:.3f} & {row['Specificity']:.3f} & "
+            f"{row['Sensitivity']:.3f} & {row['Time [s] (feasible only)']:.1f} & "
+            f"{row['Time [s] (including infeasible)']:.1f} & "
+            f"{row['Difference in loss between optima']:.2f} & "
+            f"{row['number of graphs: predicted correctly']} & "
+            f"{row['number of graphs: Radial wrong']} & "
+            f"{row['number of graphs: Non-Radial wrong']} & "
+            f"{row['number of graphs: Infeasible (error)']} & "
+            f"{row['number of graphs: Infeasible (time)']} \\\\"
+        )
     
     # Close table
     latex_lines.extend([
         "      \\bottomrule",
         "    \\end{tabular}%",
         "  }",
-        "  \\caption{Model Metrics and Error Distribution Comparison}",
-        "  \\label{tab:full-result}",
+        "  \\caption{Experiment Results Summary (Inf(E) = Infeasible due to error, Inf(T) = Infeasible due to time limit)}",
+        "  \\label{tab:experiment-results}",
         "\\end{table*}"
     ])
     
     return "\n".join(latex_lines)
-
-def _format_result_row(variant, results_df, first_in_group=True):
-    """Format a single result row for LaTeX table"""
-    if results_df.empty:
-        return f"        &                             & {variant:<15} &  &  &  &  &  &  &  &  \\\\"
-    
-    row = results_df.iloc[0]  # Take first matching result
-    
-    return (f"        &                             & {variant:<15} "
-            f"& {row['avg_solve_time']:.1f} "
-            f"& {row['avg_f1']:.3f} "
-            f"& {row['avg_recall']:.3f} "
-            f"& {row['avg_precision']:.3f} "
-            f"& {row['avg_delta']:.1f} "
-            f"& {row['radial_wrong']} "
-            f"& {row['non_radial']} "
-            f"& {row['infeasible']} \\\\")
-
-def _get_empty_model_rows(model):
-    """Get empty rows for a model with no results"""
-    return [
-        f"      \\multirow{{11}}{{*}}{{{model}}}",
-        "        & \\multirow{2}{*}{DirectPrediction}",
-        "        &                             & Rounding          &  &  &  &  &  &  &  &  \\\\",
-        "        &                             & PhyR               &  &  &  &  &  &  &  &  \\\\",
-        "      \\arrayrulecolor{gray!60}\\cdashline{2-11}",
-        "        & \\multirow{3}{*}{SoftWarmStart}",
-        "        &                             & Floats            &  &  &  &  &  &  &  &  \\\\",
-        "        &                             & Binary Rounding   &  &  &  &  &  &  &  &  \\\\", 
-        "        &                             & Binary PhyR       &  &  &  &  &  &  &  &  \\\\",
-        "      \\cdashline{2-11}",
-        "        & \\multirow{5}{*}{HardWarmStart}",
-        "        &                             & 0.9               &  &  &  &  &  &  &  &  \\\\",
-        "        &                             & 0.7               &  &  &  &  &  &  &  &  \\\\",
-        "        &                             & 0.5               &  &  &  &  &  &  &  &  \\\\",
-        "        &                             & 0.3               &  &  &  &  &  &  &  &  \\\\",
-        "        &                             & 0.1               &  &  &  &  &  &  &  &  \\\\",
-        "      \\cdashline{2-11}",
-        "        & DFL                         & --                &  &  &  &  &  &  &  &  \\\\"
-    ]
-
-def analyze_network_solutions(predictions_folder, model_name_mapping):
-    """
-    Analyze all CSV files in predictions folder and extract radiality information
-    
-    Args:
-        predictions_folder: Path to predictions folder
-        model_name_mapping: Dict mapping model names to display names (GAT, GIN, GCN)
-    
-    Returns:
-        Enhanced metrics with radiality analysis
-    """
-    predictions_path = Path(predictions_folder)
-    all_results = {}
-    
-    # Find all CSV files
-    csv_files = list(predictions_path.glob("results-*.csv"))
-    print(f"Found {len(csv_files)} CSV files to process")
-    
-    for csv_file in csv_files:
-        print(f"Processing {csv_file.name}...")
-        
-        try:
-            # Analyze CSV
-            metrics = analyze_csv_results(csv_file)
-            
-            # Parse filename to extract model, rounding method, and warmstart mode
-            filename = csv_file.stem
-            parts = filename.replace("results-", "").split("-")
-            
-            if len(parts) >= 3:
-                model_key = parts[0]
-                rounding_method = parts[1]
-                warmstart_mode = parts[2]
-                
-                # Map model name
-                model_display = model_name_mapping.get(model_key, model_key)
-                
-                key = (model_display, warmstart_mode, rounding_method)
-                all_results[key] = metrics
-                
-                print(f"  -> {model_display} | {warmstart_mode} | {rounding_method}")
-                
-        except Exception as e:
-            print(f"Error processing {csv_file.name}: {e}")
-            continue
-    
-    return all_results
-
-def create_visualizations_from_csv(predictions_folder, csv_file, model_name_mapping, 
-                                 output_dir=None, max_graphs=5):
-    """
-    Create visualization plots for selected graphs from CSV results
-    
-    Args:
-        predictions_folder: Path to predictions folder
-        csv_file: CSV file with results
-        model_name_mapping: Mapping of model names
-        output_dir: Output directory for plots
-        max_graphs: Maximum number of graphs to visualize per configuration
-    """
-    if output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    predictions_path = Path(predictions_folder)
-    df = pd.read_csv(csv_file)
-    
-    # Parse filename to get configuration
-    filename = csv_file.stem
-    folder_pattern = filename.replace('results-', '')
-    parts = folder_pattern.split('-')
-    
-    if len(parts) >= 3:
-        model_key = parts[0]
-        rounding_method = parts[1]
-        warmstart_mode = parts[2]
-        
-        model_display = model_name_mapping.get(model_key, model_key)
-        
-        # Find corresponding folders
-        prediction_folders = list(predictions_path.glob(f"prediction-{folder_pattern}*"))
-        warmstart_folders = list(predictions_path.glob(f"warm-start-{folder_pattern}*"))
-        
-        if prediction_folders and warmstart_folders:
-            prediction_folder = prediction_folders[0]
-            warmstart_folder = warmstart_folders[0]
-            
-            # Get source data folder (assuming it's parent of predictions)
-            source_folder = predictions_path.parent
-            mst_folder = source_folder / "mst" / "pandapower_networks"
-            mst_opt_folder = source_folder / "mst_opt" / "pandapower_networks"
-            
-            if mst_folder.exists() and mst_opt_folder.exists():
-                # Select a few graphs to visualize
-                selected_graphs = df.head(max_graphs)['graph_id'].tolist()
-                
-                print(f"Creating visualizations for {len(selected_graphs)} graphs...")
-                
-                for graph_id in selected_graphs:
-                    try:
-                        # Load all networks
-                        mst_net = pp.from_json(str(mst_folder / f"{graph_id}.json"))
-                        mst_opt_net = pp.from_json(str(mst_opt_folder / f"{graph_id}.json"))
-                        final_net = pp.from_json(str(prediction_folder / "pandapower_networks" / f"{graph_id}.json"))
-                        
-                        # Get GNN predictions from CSV
-                        row = df[df['graph_id'] == graph_id].iloc[0]
-                        gnn_predictions = json.loads(row['gnn_prediction'])
-                        
-                        # Create visualization
-                        viz_output = output_dir / f"{model_display}_{warmstart_mode}_{rounding_method}" if output_dir else None
-                        if viz_output:
-                            viz_output.mkdir(parents=True, exist_ok=True)
-                        
-                        visualize_prediction_pipeline(
-                            graph_id=f"{graph_id}_{model_display}_{warmstart_mode}_{rounding_method}",
-                            mst_net=mst_net,
-                            mst_opt_net=mst_opt_net,
-                            gnn_predictions=gnn_predictions,
-                            final_prediction_net=final_net,
-                            rounding_method=rounding_method,
-                            output_dir=viz_output
-                        )
-                        
-                        print(f"  -> Visualized {graph_id}")
-                        
-                    except Exception as e:
-                        print(f"Error visualizing graph {graph_id}: {e}")
-                        continue
-
-def save_latex_ready_table(predictions_folder, model_name_mapping, output_path=None, 
-                          create_plots=True, plot_output_dir=None, max_plots_per_config=3):
-    """
-    Process all CSV files and create LaTeX-ready table with optional plotting
-    
-    Args:
-        predictions_folder: Path to folder containing prediction results
-        model_name_mapping: Dictionary mapping model keys to display names
-        output_path: Path to save the LaTeX table (optional)
-        create_plots: Whether to create visualization plots
-        plot_output_dir: Directory to save plots
-        max_plots_per_config: Maximum number of plots per configuration
-    """
-    predictions_path = Path(predictions_folder)
-    
-    if create_plots:
-        if plot_output_dir is None:
-            plot_output_dir = "prediction_pipeline_plots"
-        plot_output_dir = Path(plot_output_dir)
-        plot_output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"Analyzing results in {predictions_path}")
-    
-    # Analyze all results
-    all_results = analyze_network_solutions(predictions_folder, model_name_mapping)
-    
-    if not all_results:
-        print("No valid results found!")
-        return None
-    
-    # Convert to DataFrame for easier manipulation
-    results_list = []
-    for (model, warmstart, rounding), metrics in all_results.items():
-        metrics_copy = metrics.copy()
-        metrics_copy.update({
-            'model': model,
-            'warmstart_mode': warmstart, 
-            'rounding_method': rounding
-        })
-        results_list.append(metrics_copy)
-    
-    df = pd.DataFrame(results_list)
-    
-    # Create plots if requested
-    if create_plots:
-        print(f"\nCreating visualization plots...")
-        for csv_file in predictions_path.glob("results-*.csv"):
-            try:
-                create_visualizations_from_csv(
-                    predictions_folder, csv_file, model_name_mapping,
-                    output_dir=plot_output_dir, max_graphs=max_plots_per_config
-                )
-            except Exception as e:
-                print(f"Error creating plots for {csv_file.name}: {e}")
-    
-    # Display results summary
-    print("\n" + "="*100)
-    print("EXPERIMENTAL RESULTS SUMMARY")
-    print("="*100)
-    
-    print(f"\nProcessed {len(results_list)} configurations:")
-    for _, row in df.iterrows():
-        print(f"  {row['model']} | {row['warmstart_mode']} | {row['rounding_method']} | "
-              f"F1: {row['avg_f1']:.3f} | Δ: {row['avg_delta']:.1f}")
-    
-    # Create and save LaTeX table
-    latex_table = create_latex_table(df)
-    
-    if output_path:
-        output_file = Path(output_path)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_file, 'w') as f:
-            f.write(latex_table)
-        print(f"\nLaTeX table saved to: {output_file}")
-    
-    # Also save results as CSV for further analysis
-    csv_output = predictions_path / "processed_results_summary.csv"
-    df.to_csv(csv_output, index=False)
-    print(f"Results summary saved to: {csv_output}")
-    
-    print("\nLaTeX Table Preview:")
-    print("="*50)
-    print(latex_table)
-    
-    if create_plots:
-        print(f"\nVisualization plots saved to: {plot_output_dir}")
-    
-    return df
 
 # Example usage
 if __name__ == "__main__":
@@ -637,29 +406,20 @@ if __name__ == "__main__":
     
     # Map your actual model names to the desired display names
     model_mapping = {
-        "blooming-snow-15": "GAT",       # Your actual model names from predict_then_optimize.py
-        "cosmic-field-12": "GIN",     # Your actual model names from predict_then_optimize.py
-        "volcanic-moon-10": "GCN",       # Your actual model names from predict_then_optimize.py
-
-       # "AdvancedMLP": "GAT",     # Alternative mapping if model name is different
-       # "GIN_Model": "GIN",       # Add your actual GIN model name
-       # "GCN_Model": "GCN",       # Add your actual GCN model name
-        # Add more mappings as needed
+        "whole-paper-13": "GAT",       
+        "devout-glitter-19": "GIN",     
+        "ancient-bush-22": "GCN",       
     }
     
     # Process all results and generate table
-    results_df = save_latex_ready_table(
+    detailed_df, summary_df = process_all_experiments_detailed(
         predictions_folder=predictions_folder,
         model_name_mapping=model_mapping,
-        output_path="experimental_results_table.tex",
-        create_plots=True,
-        plot_output_dir="prediction_visualizations",
-        max_plots_per_config=2  # Reduced for testing
+        output_path="experiment_results_table.tex",
+        debug_mode=False  # Set to False to process all CSV files
     )
     
-    if results_df is not None:
-        print(f"\nProcessing complete! Generated {len(results_df)} result entries.")
-        print("\nSample results:")
-        print(results_df[['model', 'warmstart_mode', 'rounding_method', 'avg_f1', 'avg_delta']].head())
-    else:
-        print("No results generated. Please check your data and paths.")
+    if summary_df is not None:
+        print(f"\nSummary by GNN type:")
+        summary = summary_df.groupby('GNN type')[['MCC score', 'F1-majority score', 'Balanced Accuracy']].mean()
+        print(summary)
