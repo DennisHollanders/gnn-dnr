@@ -82,7 +82,7 @@ search_space:
   # 5. Node MLP hidden dimension
   node_mlp_dim:
     search_type: "categorical"
-    choices: [64, 128, 256, 384]
+    choices: [64, 128, 256, 384, 512]
 
   # 6. Number of edge MLP layers
   edge_mlp_layers:
@@ -93,7 +93,7 @@ search_space:
   # 7. Edge MLP hidden dimension
   edge_mlp_dim:
     search_type: "categorical"
-    choices: [32, 64, 128, 256]
+    choices: [32, 64, 128, 256,384,512]
 
   # 8. Switch head type
   switch_head_type:

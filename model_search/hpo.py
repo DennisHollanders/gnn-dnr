@@ -207,8 +207,8 @@ class SimpleHPO:
         
         # Generate valid powers of 2 within the specified range
         dim_min = spec.get('dim_min', 32)
-        dim_max = spec.get('dim_max', 256)
-        
+        dim_max = spec.get('dim_max', 1024)
+
         # Find powers of 2 within range
         valid_powers = []
         power = 1
@@ -219,7 +219,7 @@ class SimpleHPO:
         
         # Fallback if no valid powers found
         if not valid_powers:
-            valid_powers = [32, 64, 128, 256]  
+            valid_powers = [32, 64, 128, 256, 512, 1024]  
             valid_powers = [p for p in valid_powers if dim_min <= p <= dim_max]
             if not valid_powers:
                 valid_powers = [dim_min] 
@@ -241,7 +241,8 @@ class SimpleHPO:
             gnn_hidden_dim = p.get('gnn_hidden_dim')
             gat_heads = p.get('gat_heads')
             if gnn_hidden_dim is not None and gat_heads is not None:
-                cons.append(float(gnn_hidden_dim % gat_heads))
+                remainder = gnn_hidden_dim % gat_heads
+                cons.append(float(remainder)) 
         
         # Constraint 2: Switch attention heads divisibility
         switch_head_type = p.get('switch_head_type', '')
@@ -258,14 +259,6 @@ class SimpleHPO:
             cons.append(1.0)  
         else:
             cons.append(0.0) 
-        
-        # Constraint 4: PhyR requires k_ratio
-        use_phyr = p.get('use_phyr', False)
-        phyr_k_ratio = p.get('phyr_k_ratio')
-        if use_phyr and phyr_k_ratio is None:
-            cons.append(1.0)  
-        else:
-            cons.append(0.0)  
         
         return tuple(cons)
     
@@ -686,6 +679,24 @@ class SimpleHPO:
                        'loss_scaling_strategy']:
                 if key in config:
                     model_kwargs[key] = config[key]
+
+            if 'node_mlp_layers' in config and 'node_mlp_dim' in config:
+                config['node_hidden_dims'] = [config['node_mlp_dim']] * config['node_mlp_layers']
+                # Remove the old parameters to avoid confusion
+                config.pop('node_mlp_layers', None)
+                config.pop('node_mlp_dim', None)
+        
+            # Convert edge MLP parameters to expected format
+            if 'edge_mlp_layers' in config and 'edge_mlp_dim' in config:
+                config['edge_hidden_dims'] = [config['edge_mlp_dim']] * config['edge_mlp_layers']
+                # Remove the old parameters to avoid confusion
+                config.pop('edge_mlp_layers', None)
+                config.pop('edge_mlp_dim', None)
+        
+            model_kwargs = {
+                'node_input_dim': self.data_sample.x.shape[1],
+                'edge_input_dim': self.data_sample.edge_attr.shape[1],
+            }
             
             model = model_class(**model_kwargs).to(self.device)
 
@@ -696,6 +707,8 @@ class SimpleHPO:
                 criterion = getattr(nn, criterion_name)()
             
             return model, train_loader, val_loader, criterion
+        
+
             
         except Exception as e:
             logger.error(f"Setup failed: {e}")

@@ -195,12 +195,29 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                     loss_final = row.get('loss_final', np.nan)
                     loss_difference = abs(loss_final - loss_ground_truth) if not np.isnan(loss_final) and not np.isnan(loss_ground_truth) else np.nan
                     
-                    # Check radiality if prediction is wrong
+                    # Check radiality if prediction is wrong AND not infeasible
                     is_radial = is_connected = None
                     if not is_correct and not is_infeasible:
                         is_radial, is_connected = check_network_radiality(
                             predictions_folder, filename_pattern, idx
                         )
+                    
+                    # Determine category - each graph goes in exactly one category
+                    if is_correct:
+                        category = 'correct'
+                    elif is_infeasible:
+                        if infeasible_type == 'error':
+                            category = 'infeasible_error'
+                        elif infeasible_type == 'time_limit':
+                            category = 'infeasible_time'
+                        else:  # both
+                            category = 'infeasible_error'  # Count in error category if both
+                    else:
+                        # Not correct and not infeasible - check radiality
+                        if is_radial and is_connected:
+                            category = 'radial_wrong'
+                        else:
+                            category = 'non_radial_wrong'
                     
                     # Create detailed row
                     experiment_row = {
@@ -229,7 +246,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                         'loss_difference': loss_difference,
                         'is_radial': is_radial,
                         'is_connected': is_connected,
-                        'radial_category': 'correct' if is_correct else ('infeasible_error' if infeasible_type == 'error' else ('infeasible_time' if infeasible_type == 'time_limit' else ('infeasible_both' if infeasible_type == 'both' else ('radial_wrong' if is_radial and is_connected else 'non_radial_wrong'))))
+                        'category': category
                     }
                     
                     all_rows.append(experiment_row)
@@ -279,14 +296,19 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
         else:
             overall_mcc = overall_f1_majority = overall_balanced_acc = overall_spec = overall_sens = 0.0
         
-        # Count categories
-        correct_count = sum(group['is_correct'])
-        infeasible_error_count = sum((group['infeasible_type'] == 'error'))
-        infeasible_time_count = sum((group['infeasible_type'] == 'time_limit'))
-        infeasible_both_count = sum((group['infeasible_type'] == 'both'))
-        infeasible_total = sum(group['is_infeasible'])
-        radial_wrong = sum((group['radial_category'] == 'radial_wrong'))
-        non_radial_wrong = sum((group['radial_category'] == 'non_radial_wrong'))
+        # Count categories - each graph in exactly one category
+        correct_count = sum(group['category'] == 'correct')
+        radial_wrong = sum(group['category'] == 'radial_wrong')
+        non_radial_wrong = sum(group['category'] == 'non_radial_wrong')
+        infeasible_error_count = sum(group['category'] == 'infeasible_error')
+        infeasible_time_count = sum(group['category'] == 'infeasible_time')
+        
+        # Total infeasible (for backward compatibility)
+        infeasible_total = infeasible_error_count + infeasible_time_count
+        
+        # Verify each graph is counted exactly once
+        total_categorized = correct_count + radial_wrong + non_radial_wrong + infeasible_error_count + infeasible_time_count
+        assert total_categorized == len(group), f"Category count mismatch: {total_categorized} != {len(group)}"
         
         # Time calculations
         feasible_times = group[~group['is_infeasible']]['solve_time']
@@ -319,7 +341,6 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
             'number of graphs: Non-Radial wrong': non_radial_wrong,
             'number of graphs: Infeasible (error)': infeasible_error_count,
             'number of graphs: Infeasible (time)': infeasible_time_count,
-            'number of graphs: Infeasible (both)': infeasible_both_count,
             'number of graphs: Infeasible (total)': infeasible_total,
             'total_experiments': len(group)
         }

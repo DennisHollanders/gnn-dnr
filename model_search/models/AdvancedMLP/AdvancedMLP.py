@@ -95,18 +95,6 @@ class PhysicsInformedRounding(nn.Module):
         
     def forward(self, switch_probs: torch.Tensor, edge_index: torch.Tensor, 
                 edge_batch: torch.Tensor, num_nodes_per_graph: torch.Tensor = None):
-        """
-        Apply physics-informed rounding using Kruskal-inspired algorithm.
-        
-        Args:
-            switch_probs: [E] Switch closing probabilities
-            edge_index: [2, E] Edge connectivity  
-            edge_batch: [E] Graph assignment for each edge
-            num_nodes_per_graph: [G] Number of nodes per graph (optional)
-        
-        Returns:
-            Binary switch decisions maintaining radiality constraint
-        """
         device = switch_probs.device
         
         # Ensure correct dtypes

@@ -1,195 +1,106 @@
+# ====================================================================
+# hpo-GAT-stage1.yaml
+# Stage 1: Architecture Search (12 dimensions)
+# ====================================================================
 
 # Basic model configuration
 model_module: "AdvancedMLP"
-dataset_names: ["train",
-                  "validation",
-                  "test"]
+dataset_names: ["train", "validation", "test"]
 folder_names: 
   - "data\\split_datasets\\train"
   - "data\\split_datasets\\validation"
   - "data\\split_datasets\\test"
-  
 dataset_type: "default"
 batching_type: "dynamic"
 
+# Fixed parameters for Stage 1
+fixed_params:
+  # Core GNN settings
+  gnn_type: "GAT"  
+  use_node_mlp: true
+  use_edge_mlp: true
 
-# Core GNN settings
-gnn_type: "GAT"  
-use_node_mlp: true
-use_edge_mlp: true
+  # Data settings
+  batch_size: 32
+  max_nodes: 1000
+  max_edges: 5000
+  train_ratio: 0.85
+  num_workers: 0
+  seed: 42
 
-# Data settings
-batch_size: 32
-max_nodes: 1000
-max_edges: 5000
-num_workers: 0
-seed: 42
+  # Training settings
+  epochs: 200
+  patience: 15
+  learning_rate: 2.5e-05
+  weight_decay: 0.00005
 
-# Training settings
-epochs: 200
-patience: 15
+  # Fixed architecture choices for Stage 1
+  activation: "relu"
+  use_batch_norm: true
+  use_residual: false
+  normalization_type: "simple"
+  use_gated_mp: false
+  use_phyr: false
+  pooling: "add"
 
-# W&B settings
-wandb_project: "GAT_HPO"
+  # Output settings 
+  output_type: "multiclass"         
+  num_classes: 2
+  wandb_project: "GAT_HPO_Stage1"
 
-# Search space - 26 dimensions
+# Stage 1 Search Space 
 search_space:
-  # 1. Learning rate 
-  learning_rate:
-    search_type: "float"
-    min: 0.00001
-    max: 0.01
-    log: true
-    
-  # 2. Weight decay 
-  weight_decay:
-    search_type: "float"
-    min: 0.000001
-    max: 0.001
-    log: true
-    
-  # 3. Dropout rate
-  dropout_rate:
-    search_type: "float"
-    min: 0.0
-    max: 0.7
-    
-  # 4. GNN layers
+  # 1. GNN layers
   gnn_layers:
     search_type: "int"
     min: 1
-    max: 6
-    
-  # 5. GAT attention heads 
+    max: 4
+
+  # 2. GAT attention heads 
   gat_heads:
     search_type: "categorical"
     choices: [1, 2, 4, 8]  
-    
-  # 6. GNN hidden dimension 
+
+  # 3. GNN hidden dimension 
   gnn_hidden_dim:
     search_type: "categorical"
-    choices: [64, 96, 128, 160, 192, 224, 256, 288, 320, 384, 448, 512]
-    
-  # 7. GAT dropout 
+    choices: [64, 128, 192, 256, 320, 384, 512]
+
+  # 4. GAT dropout 
   gat_dropout:
     search_type: "float"
     min: 0.0
-    max: 0.6
-    
-  # 8. GAT version (
-  gat_v2:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 9. GAT edge dimension 
-  gat_edge_dim:
+    max: 0.5
+
+  # 7. Node MLP layers
+  node_mlp_layers:
     search_type: "int"
-    min: 8
-    max: 64
-    step: 8
-    
-  # 10. Node MLP hidden dimensions 
-  node_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 32
-    dim_max: 512
-    dim_step: 32
-    
-  # 11. Edge MLP hidden dimensions 
-  edge_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 32
-    dim_max: 512
-    dim_step: 32
-    
-  # 12. Activation function
-  activation:
+    min: 1
+    max: 3
+
+  # 8. Node MLP dimension
+  node_mlp_dim:
     search_type: "categorical"
-    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", ]
-    
-  # 13. Use batch normalization
-  use_batch_norm:
+    choices: [64, 128, 256, 384, 512]
+
+  # 9. Edge MLP layers
+  edge_mlp_layers:
+    search_type: "int"
+    min: 1
+    max: 3
+
+  # 10. Edge MLP dimension
+  edge_mlp_dim:
     search_type: "categorical"
-    choices: [true, false]
-    
-  # 14. Use residual connections
-  use_residual:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 15. Use skip connections
-  use_skip_connections:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 16. Switch head type
+    choices: [32, 64, 128, 256,384,512]
+
+  # 11. Switch head type
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "attention","graph_attention"]
-    
-  # 17. Switch head layers
+    choices: ["mlp", "attention", "graph_attention"]
+
+  # 12. Switch head layers
   switch_head_layers:
     search_type: "int"
     min: 1
     max: 4
-    
-  # 18. Switch attention heads 
-  switch_attention_heads:
-    search_type: "categorical"
-    choices: [1, 2, 4, 8]
-    
-  # 19. Criterion/Loss function
-  criterion_name:
-    search_type: "categorical"
-    choices: ["MSELoss", "CrossEntropyLoss",  "WeightedBCELoss","FocalLoss" ]
-    
-  # 20. Normalization type
-  normalization_type:
-      search_type: "categorical"
-      choices: ["none","simple", "injection_scale","adaptive", "per_node"]
-    
-  # 21. Loss scaling strategy
-  loss_scaling_strategy:
-    search_type: "categorical"
-    choices: ["fixed", "adaptive_ratio", "adaptive_magnitude", "uncertainty_weighted"]
-    
-  # 22. Use gated message passing
-  use_gated_mp:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 23. Use PhyR 
-  use_phyr:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 24. PhyR k ratio 
-  phyr_k_ratio:
-    search_type: "float"
-    min: 0.1
-    max: 0.5
-    
-  # 25. Physics loss weight
-  lambda_phy_loss:
-    search_type: "float"
-    min: 0.01
-    max: 1.0
-    log: true
-    
-  # 26. Connectivity loss weight
-  lambda_connectivity:
-    search_type: "float"
-    min: 0.001
-    max: 0.5
-    log: true
-    
-  # 27. Radiality loss weight
-  lambda_radiality:
-    search_type: "float"
-    min: 0.001
-    max: 0.5
-    log: true

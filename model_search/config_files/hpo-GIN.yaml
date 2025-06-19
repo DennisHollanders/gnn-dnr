@@ -1,20 +1,19 @@
-# GIN HPO Configuration
-# Estimated trials needed: 26 dimensions × 10 = 260 trials
+# ====================================================================
+# hpo-GIN-stage1.yaml
+# Stage 1: Architecture Search (10 dimensions)
+# ====================================================================
 
 # Basic model configuration
 model_module: "AdvancedMLP"
-dataset_names: ["train",
-                  "validation",
-                  "test"]
+dataset_names: ["train", "validation", "test"]
 folder_names:
   - "data\\split_datasets\\train"
   - "data\\split_datasets\\validation"
   - "data\\split_datasets\\test"
-  
 dataset_type: "default"
 batching_type: "dynamic"
 
-# Fixed parameters 
+# Fixed parameters for Stage 1
 fixed_params:
   # Core GNN settings
   gnn_type: "GIN"  
@@ -32,169 +31,71 @@ fixed_params:
   # Training settings
   epochs: 200
   patience: 100
+  learning_rate: 2.5e-05
+  weight_decay: 0.00005
+
+  # Fixed architecture choices for Stage 1
+  activation: "relu"
+  use_batch_norm: true
+  use_residual: false
+  normalization_type: "simple"
+  use_gated_mp: false
+  use_phyr: false
+  pooling: "add"
   
   # Output settings 
-  output_type: "binary"  # or "multiclass" - both use 2 classes
+  output_type: "binary"
   num_classes: 2  
-  
-  # W&B settings
-  wandb_project: "GIN_HPO"
-  
-# Search space - 26 dimensions
+  wandb_project: "GIN_HPO_Stage1"
+
+# Stage 1 Search Space - 10 dimensions for architecture
 search_space:
-  # 1. Learning rate 
-  learning_rate:
-    search_type: "float"
-    min: 0.00001
-    max: 0.01
-    log: true
-    
-  # 2. Weight decay 
-  weight_decay:
-    search_type: "float"
-    min: 0.000001
-    max: 0.001
-    log: true
-    
-  # 3. Dropout rate
-  dropout_rate:
-    search_type: "float"
-    min: 0.0
-    max: 0.7
-    
-  # 4. GNN layers
+  # 1. GNN layers
   gnn_layers:
     search_type: "int"
     min: 1
-    max: 6
-    
-  # 5. GNN hidden dimension
+    max: 4
+
+  # 2. GNN hidden dimension
   gnn_hidden_dim:
-    search_type: "int"
-    min: 32
-    max: 512
-    step: 32
-    
-  # 6. GIN epsilon 
+    search_type: "categorical"
+    choices: [64, 128, 192, 256, 320, 384, 512]
+
+  # 3. GIN epsilon 
   gin_eps:
     search_type: "float"
     min: 0.0
     max: 0.1
-    
-  # 7. GIN train epsilon 
-  gin_train_eps:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 8. GIN MLP layers 
-  gin_mlp_layers:
+
+  # 6. Node MLP layers
+  node_mlp_layers:
     search_type: "int"
     min: 1
     max: 3
-    
-  # 9. Node MLP hidden dimensions 
-  node_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 32
-    dim_max: 512
-    dim_step: 32
-    
-  # 10. Edge MLP hidden dimensions 
-  edge_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 32
-    dim_max: 512
-    dim_step: 32
-    
-  # 11. Activation function
-  activation:
+
+  # 7. Node MLP dimension
+  node_mlp_dim:
     search_type: "categorical"
-    choices: ["relu", "gelu", "tanh", "elu", "leaky_relu", "sigmoid"]
-    
-  # 12. Use batch normalization
-  use_batch_norm:
+    choices: [64, 128, 256, 384,512]
+
+  # 8. Edge MLP layers
+  edge_mlp_layers:
+    search_type: "int"
+    min: 1
+    max: 3
+
+  # 9. Edge MLP dimension
+  edge_mlp_dim:
     search_type: "categorical"
-    choices: [true, false]
-    
-  # 13. Use residual connections
-  use_residual:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 14. Use skip connections
-  use_skip_connections:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 15. Switch head type
+    choices: [32, 64, 128, 256,384,512]
+
+  # 10. Switch head type
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "attention","graph_attention"]
-    
-  # 16. Switch head layers
+    choices: ["mlp", "attention", "graph_attention"]
+
   switch_head_layers:
     search_type: "int"
-    min: 2
+    min: 1
     max: 5
-    
-  # 17. Criterion/Loss function
-  criterion_name:
-    search_type: "categorical"
-    choices: ["MSELoss", "CrossEntropyLoss",  "WeightedBCELoss","FocalLoss" ]
-    
-  # 18. Normalization type
-  normalization_type:
-    search_type: "categorical"
-    choices: ["none","simple", "injection_scale","adaptive", "per_node"]
-    
-    
-  # 19. Loss scaling strategy
-  loss_scaling_strategy:
-    search_type: "categorical"
-    choices: ["fixed", "adaptive_ratio", "adaptive_magnitude", "uncertainty_weighted"]
-    
-  # 20. Use gated message passing
-  use_gated_mp:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 21. Use PhyR 
-  use_phyr:
-    search_type: "categorical"
-    choices: [true, false]
-    
-  # 22. PhyR k ratio 
-  phyr_k_ratio:
-    search_type: "float"
-    min: 0.1
-    max: 0.5
-    
-  # 23. Physics loss weight
-  lambda_phy_loss:
-    search_type: "float"
-    min: 0.01
-    max: 1.0
-    log: true
-    
-  # 24. Connectivity loss weight
-  lambda_connectivity:
-    search_type: "float"
-    min: 0.001
-    max: 0.5
-    log: true
-    
-  # 25. Radiality loss weight
-  lambda_radiality:
-    search_type: "float"
-    min: 0.001
-    max: 0.5
-    log: true
-    
-  # 26. Graph pooling method
-  pooling:
-    search_type: "categorical"
-    choices: ["mean", "max", "add"]
+  
