@@ -15,8 +15,8 @@ batching_type: "dynamic"
 
 # Data settings
 batch_size: 128
-max_nodes: 1000
-max_edges: 5000
+max_nodes: 10000
+max_edges: 50000
 
 # Fixed parameters for Stage 2
 fixed_params:
@@ -27,8 +27,8 @@ fixed_params:
 
   # Data settings
   batch_size: 128
-  max_nodes: 1000
-  max_edges: 5000
+  max_nodes: 10000
+  max_edges: 50000
   train_ratio: 0.85
   num_workers: 0
   seed: 0

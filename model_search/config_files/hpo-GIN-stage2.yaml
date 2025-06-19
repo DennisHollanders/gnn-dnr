@@ -12,7 +12,9 @@ folder_names:
   - "data\\split_datasets\\test"
 dataset_type: "default"
 batching_type: "dynamic"
-
+batch_size: 128
+max_nodes: 10000
+max_edges: 50000
 # Fixed parameters for Stage 2
 fixed_params:
   # Core GNN settings
@@ -21,9 +23,9 @@ fixed_params:
   use_edge_mlp: true
   
   # Data settings
-  batch_size: 32
-  max_nodes: 1000
-  max_edges: 5000
+  batch_size: 128
+  max_nodes: 10000
+  max_edges: 50000
   train_ratio: 0.85
   num_workers: 0
   seed: 42
