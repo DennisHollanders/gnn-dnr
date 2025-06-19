@@ -145,27 +145,38 @@ def process_single_graph(gid, pp_all, dataset_type):
     data_x.node_y_voltage = data_y.x[:, 2]    # vm_pu
     data_x.graph_id = gid
     if dataset_type == "cvx":
-        cvx_feat =cxv_features(pp_all[phase][gid] )
-        # Store CVX features as additional attributes in the Data object
-        data_x.cvx_N = torch.tensor(cvx_feat['N'], dtype=torch.int32).unsqueeze(0)
-        data_x.cvx_E = torch.tensor(cvx_feat['E'], dtype=torch.int32).unsqueeze(0)
-        data_x.cvx_from_idx = cvx_feat['from_idx'].unsqueeze(0)
-        data_x.cvx_to_idx = cvx_feat['to_idx'].unsqueeze(0)
-        data_x.cvx_r_pu = cvx_feat['r_pu'].unsqueeze(0)
-        data_x.cvx_x_pu = cvx_feat['x_pu'].unsqueeze(0)
-        data_x.cvx_p_inj = cvx_feat['p_inj'].unsqueeze(0)
-        data_x.cvx_q_inj = cvx_feat['q_inj'].unsqueeze(0)
-        data_x.cvx_bigM_flow = cvx_feat['bigM_flow'].unsqueeze(0)
-        data_x.cvx_bigM_v = torch.tensor(cvx_feat['bigM_v'], dtype=torch.float32).unsqueeze(0)
-        data_x.cvx_sub_idx = cvx_feat['sub_idx'].unsqueeze(0)
-        data_x.cvx_y0 = cvx_feat['y0'].unsqueeze(0)
-
-    # sanity checks:
-    if data_x.num_nodes != data_y.num_nodes:
-        raise ValueError(f"{gid}: node count mismatch X={data_x.num_nodes} vs Y={data_y.num_nodes}")
-    if data_x.edge_index.size(1) != data_y.edge_index.size(1):
-        raise ValueError(f"{gid}: edge count mismatch X={data_x.edge_index.size(1)} vs Y={data_y.edge_index.size(1)}")
-    return data_x
+        try:
+            cvx_feat = cxv_features(pp_all[phase][gid])
+            
+            # ENSURE CONSISTENT SHAPES FROM THE START
+            N, E = cvx_feat['N'], cvx_feat['E']
+            
+            # All scalars as [1] tensors
+            data_x.cvx_N = torch.tensor([N], dtype=torch.long)
+            data_x.cvx_E = torch.tensor([E], dtype=torch.long) 
+            data_x.cvx_bigM_v = torch.tensor([float(cvx_feat['bigM_v'])], dtype=torch.float32)
+            
+            # All 1D features as [1, length] tensors
+            data_x.cvx_from_idx = cvx_feat['from_idx'].unsqueeze(0)
+            data_x.cvx_to_idx = cvx_feat['to_idx'].unsqueeze(0)
+            data_x.cvx_r_pu = cvx_feat['r_pu'].unsqueeze(0)
+            data_x.cvx_x_pu = cvx_feat['x_pu'].unsqueeze(0)
+            data_x.cvx_p_inj = cvx_feat['p_inj'].unsqueeze(0)
+            data_x.cvx_q_inj = cvx_feat['q_inj'].unsqueeze(0)
+            data_x.cvx_bigM_flow = cvx_feat['bigM_flow'].unsqueeze(0)
+            data_x.cvx_y0 = cvx_feat['y0'].unsqueeze(0)
+            
+            # Handle sub_idx carefully - it can be empty!
+            sub_idx = cvx_feat['sub_idx']
+            if len(sub_idx) == 0:
+                # Create empty tensor with proper batch dim
+                data_x.cvx_sub_idx = torch.empty((1, 0), dtype=torch.long)
+            else:
+                data_x.cvx_sub_idx = sub_idx.unsqueeze(0)
+                
+        except Exception as e:
+            logger.error(f"CVX processing failed for {gid}: {e}")
+            return None
 
 def create_pyg_dataset(
     base_directory,
@@ -450,8 +461,8 @@ def create_data_loaders(
                 data.cvx_A_to = A_to.unsqueeze(0)
 
                 # --- Finally, overwrite old size and index tensors ---
-                data.cvx_N = torch.tensor([Ni], dtype=torch.long)
-                data.cvx_E = torch.tensor([Ei], dtype=torch.long)
+                data.cvx_N = torch.tensor([max_N], dtype=torch.long)
+                data.cvx_E = torch.tensor([max_E], dtype=torch.long)
                 data.cvx_from_idx = from_idx_padded
                 data.cvx_to_idx = to_idx_padded
                 data.cvx_sub_idx = torch.tensor(sub_indices, dtype=torch.long).unsqueeze(0)
@@ -497,8 +508,8 @@ if __name__ == "__main__":
                 #r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test"
                 #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
-    parser.add_argument("--dataset_type", type=str, default="default", 
-                        choices=["default", "graphyr", "pinn","default"],
+    parser.add_argument("--dataset_type", type=str, default="cvx", 
+                        choices=["default", "cvx"],
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="dynamic",
                         choices =["standard", "dynamic", "neighbor"],)

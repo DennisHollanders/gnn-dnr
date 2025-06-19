@@ -6,13 +6,19 @@ dataset_names: ["train",
                   "validation",
                   "test"]
 folder_names: 
-  - "data\\split_datasets\\train"
-  - "data\\split_datasets\\validation"
-  - "data\\split_datasets\\test"
+  -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
+  -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
+  -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
+# - "data\\split_datasets\\train"
+# - "data\\split_datasets\\validation"
+# - "data\\split_datasets\\test"
 # Model
 model_module: "cvx"
 
 criterion_name: "WeightedBCELoss"
+track_gradients: true 
+detailed_tracking: true
+gradient_check_epochs: [0,1,2,5,10]
 
 model_kwargs:
   hidden_dims: [1024,512,256,128,64,]
