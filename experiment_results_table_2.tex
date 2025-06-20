@@ -1,0 +1,54 @@
+\begin{table*}[p]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.2}
+  \resizebox{\textwidth}{!}{%
+    \begin{tabular}{llccccccccccccc}
+      \toprule
+      Model & GNN & MCC & F1-maj & Bal.Acc & Spec & Sens & Time(F) & Time(I) & Loss & Correct & Radial & Non-Rad & Inf(E) & Inf(T) \\
+      \midrule
+      ancient-bush-22-Best & ancient-bush-22-Best & 0.575 & 0.595 & 0.786 & 0.592 & 0.980 & 0.0 & 0.0 & 0.00 & 11 & 128 & 0 & 0 & 0 \\
+      ancient-bush-22-Best & ancient-bush-22-Best & 0.687 & 0.700 & 0.846 & 0.705 & 0.987 & 132.9 & 237.5 & 0.00 & 18 & 33 & 1 & 0 & 87 \\
+      ancient-bush-22-Best & ancient-bush-22-Best & 0.651 & 0.668 & 0.831 & 0.680 & 0.982 & 0.0 & 0.0 & 0.00 & 42 & 81 & 16 & 0 & 0 \\
+      ancient-bush-22-Best & ancient-bush-22-Best & 0.499 & 0.457 & 0.656 & 0.314 & 0.997 & 0.0 & 0.0 & 0.00 & 10 & 2 & 127 & 0 & 0 \\
+      ancient-bush-22-Best & ancient-bush-22-Best & 0.757 & 0.766 & 0.881 & 0.771 & 0.991 & 131.1 & 256.3 & 0.00 & 16 & 19 & 1 & 0 & 103 \\
+      ancient-bush-22-Best-PhyR & ancient-bush-22-Best-PhyR & 0.695 & 0.708 & 0.849 & 0.711 & 0.987 & 138.9 & 230.5 & 0.00 & 21 & 38 & 1 & 0 & 79 \\
+      ancient-bush-22-Best-PhyR & ancient-bush-22-Best-PhyR & 0.701 & 0.714 & 0.852 & 0.716 & 0.987 & 132.2 & 227.6 & 0.00 & 21 & 37 & 2 & 0 & 79 \\
+      ancient-bush-22-Best-PhyR & ancient-bush-22-Best-PhyR & 0.700 & 0.713 & 0.851 & 0.715 & 0.987 & 133.4 & 223.3 & 0.00 & 23 & 40 & 1 & 0 & 75 \\
+      ancient-bush-22-Best-PhyR & ancient-bush-22-Best-PhyR & 0.707 & 0.719 & 0.855 & 0.722 & 0.987 & 135.3 & 228.9 & 0.00 & 22 & 35 & 3 & 0 & 79 \\
+      ancient-bush-22-Best-round & ancient-bush-22-Best-round & 0.764 & 0.773 & 0.884 & 0.777 & 0.990 & 144.7 & 250.8 & 0.00 & 20 & 23 & 1 & 0 & 95 \\
+      ancient-bush-22-Best-round & ancient-bush-22-Best-round & 0.746 & 0.756 & 0.875 & 0.760 & 0.990 & 153.1 & 254.6 & 0.00 & 18 & 25 & 0 & 0 & 96 \\
+      ancient-bush-22-Best-round & ancient-bush-22-Best-round & 0.758 & 0.768 & 0.881 & 0.772 & 0.990 & 152.7 & 249.1 & 0.00 & 21 & 26 & 1 & 0 & 91 \\
+      ancient-bush-22-Best-round & ancient-bush-22-Best-round & 0.759 & 0.769 & 0.882 & 0.773 & 0.990 & 150.4 & 254.8 & 0.00 & 18 & 24 & 0 & 0 & 97 \\
+      devout-glitter-19-Best & devout-glitter-19-Best & 0.550 & 0.571 & 0.773 & 0.569 & 0.978 & 0.0 & 0.0 & 0.00 & 11 & 128 & 0 & 0 & 0 \\
+      devout-glitter-19-Best & devout-glitter-19-Best & 0.730 & 0.741 & 0.867 & 0.745 & 0.989 & 133.2 & 236.4 & 0.00 & 20 & 32 & 1 & 0 & 86 \\
+      devout-glitter-19-Best & devout-glitter-19-Best & 0.647 & 0.664 & 0.829 & 0.677 & 0.981 & 0.0 & 0.0 & 0.00 & 39 & 83 & 17 & 0 & 0 \\
+      devout-glitter-19-Best & devout-glitter-19-Best & 0.482 & 0.443 & 0.651 & 0.305 & 0.996 & 0.0 & 0.0 & 0.00 & 10 & 0 & 129 & 0 & 0 \\
+      devout-glitter-19-Best & devout-glitter-19-Best & 0.696 & 0.708 & 0.848 & 0.708 & 0.988 & 165.2 & 257.3 & 0.00 & 17 & 25 & 2 & 0 & 95 \\
+      devout-glitter-19-Best-PhyR & devout-glitter-19-Best-PhyR & 0.722 & 0.734 & 0.862 & 0.736 & 0.988 & 137.0 & 232.0 & 0.00 & 21 & 35 & 2 & 0 & 81 \\
+      devout-glitter-19-Best-PhyR & devout-glitter-19-Best-PhyR & 0.726 & 0.737 & 0.865 & 0.740 & 0.989 & 134.9 & 243.0 & 0.00 & 18 & 30 & 0 & 0 & 91 \\
+      devout-glitter-19-Best-PhyR & devout-glitter-19-Best-PhyR & 0.748 & 0.759 & 0.876 & 0.762 & 0.989 & 137.2 & 237.9 & 0.00 & 20 & 33 & 0 & 0 & 86 \\
+      devout-glitter-19-Best-PhyR & devout-glitter-19-Best-PhyR & 0.748 & 0.759 & 0.876 & 0.762 & 0.989 & 136.5 & 237.7 & 0.00 & 20 & 32 & 1 & 0 & 86 \\
+      devout-glitter-19-Best-round & devout-glitter-19-Best-round & 0.700 & 0.712 & 0.850 & 0.712 & 0.988 & 156.5 & 248.4 & 0.00 & 18 & 29 & 3 & 0 & 89 \\
+      devout-glitter-19-Best-round & devout-glitter-19-Best-round & 0.696 & 0.708 & 0.848 & 0.708 & 0.988 & 158.6 & 253.2 & 0.00 & 17 & 27 & 2 & 0 & 93 \\
+      devout-glitter-19-Best-round & devout-glitter-19-Best-round & 0.696 & 0.708 & 0.848 & 0.708 & 0.988 & 158.5 & 253.2 & 0.00 & 17 & 27 & 2 & 0 & 93 \\
+      devout-glitter-19-Best-round & devout-glitter-19-Best-round & 0.690 & 0.702 & 0.845 & 0.702 & 0.988 & 156.5 & 253.5 & 0.00 & 17 & 26 & 2 & 0 & 94 \\
+      whole-paper-13-Best & whole-paper-13-Best & 0.583 & 0.603 & 0.790 & 0.600 & 0.980 & 0.0 & 0.0 & 0.00 & 12 & 127 & 0 & 0 & 0 \\
+      whole-paper-13-Best & whole-paper-13-Best & 0.731 & 0.742 & 0.867 & 0.745 & 0.989 & 135.4 & 238.4 & 0.00 & 21 & 30 & 1 & 0 & 87 \\
+      whole-paper-13-Best & whole-paper-13-Best & 0.651 & 0.668 & 0.831 & 0.681 & 0.982 & 0.0 & 0.0 & 0.00 & 42 & 79 & 18 & 0 & 0 \\
+      whole-paper-13-Best & whole-paper-13-Best & 0.516 & 0.489 & 0.674 & 0.353 & 0.995 & 0.0 & 0.0 & 0.00 & 10 & 2 & 127 & 0 & 0 \\
+      whole-paper-13-Best & whole-paper-13-Best & 0.778 & 0.786 & 0.889 & 0.786 & 0.993 & 116.7 & 263.1 & 0.00 & 15 & 13 & 0 & 0 & 111 \\
+      whole-paper-13-Best-PhyR & whole-paper-13-Best-PhyR & 0.739 & 0.749 & 0.871 & 0.753 & 0.990 & 145.1 & 253.2 & 0.00 & 19 & 22 & 1 & 0 & 97 \\
+      whole-paper-13-Best-PhyR & whole-paper-13-Best-PhyR & 0.754 & 0.764 & 0.879 & 0.767 & 0.990 & 140.8 & 241.6 & 0.00 & 22 & 26 & 3 & 0 & 88 \\
+      whole-paper-13-Best-PhyR & whole-paper-13-Best-PhyR & 0.753 & 0.763 & 0.878 & 0.767 & 0.990 & 140.9 & 242.8 & 0.00 & 22 & 26 & 2 & 0 & 89 \\
+      whole-paper-13-Best-PhyR & whole-paper-13-Best-PhyR & 0.754 & 0.764 & 0.879 & 0.767 & 0.990 & 144.0 & 242.8 & 0.00 & 22 & 27 & 2 & 0 & 88 \\
+      whole-paper-13-Best-round & whole-paper-13-Best-round & 0.706 & 0.717 & 0.853 & 0.717 & 0.989 & 141.3 & 262.3 & 0.00 & 14 & 19 & 0 & 0 & 106 \\
+      whole-paper-13-Best-round & whole-paper-13-Best-round & 0.707 & 0.718 & 0.853 & 0.718 & 0.988 & 155.8 & 255.4 & 0.00 & 17 & 26 & 0 & 0 & 96 \\
+      whole-paper-13-Best-round & whole-paper-13-Best-round & 0.714 & 0.725 & 0.857 & 0.725 & 0.989 & 152.9 & 256.6 & 0.00 & 16 & 24 & 1 & 0 & 98 \\
+      whole-paper-13-Best-round & whole-paper-13-Best-round & 0.714 & 0.725 & 0.857 & 0.725 & 0.989 & 152.3 & 256.4 & 0.00 & 16 & 24 & 1 & 0 & 98 \\
+      \bottomrule
+    \end{tabular}%
+  }
+  \caption{Experiment Results Summary (Inf(E) = Infeasible due to error, Inf(T) = Infeasible due to time limit)}
+  \label{tab:experiment-results}
+\end{table*}

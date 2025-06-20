@@ -16,6 +16,9 @@ batch_size: 128
 max_nodes: 10000
 max_edges: 50000
 num_workers: 0
+criterion_name: "WeightedBCELoss"
+
+
 # Fixed parameters for Stage 1
 fixed_params:
   # Core GNN settings

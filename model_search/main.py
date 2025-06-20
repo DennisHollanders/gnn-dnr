@@ -211,30 +211,30 @@ def main():
         else:
             criterion = getattr(nn, args.criterion_name)()
 
-    if hasattr(args, 'track_gradients') and args.track_gradients:
-        track_gradients = args.track_gradients
-        detailed_tracking = args.detailed_tracking 
-        gradient_check_epochs = args.gradient_check_epochs
-    else: 
-        track_gradients = False
+    # if hasattr(args, 'track_gradients') and args.track_gradients:
+    #     track_gradients = args.track_gradients
+    #     detailed_tracking = args.detailed_tracking 
+    #     gradient_check_epochs = args.gradient_check_epochs
+    # else: 
+    #     track_gradients = False
     data = next(iter(train_loader))
     
-    print(f"Before batching fix:")
-    print(f"  Graph: {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
-    print(f"  CVX_N: {data.cvx_N.item()}, CVX_E: {data.cvx_E.item()}")
+    # print(f"Before batching fix:")
+    # print(f"  Graph: {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
+    # print(f"  CVX_N: {data.cvx_N.item()}, CVX_E: {data.cvx_E.item()}")
     
-    from cvx_infeasibility_analysis import fix_cvx_infeasibility
-    data, validation = fix_cvx_infeasibility(data)
+    # from cvx_infeasibility_analysis import fix_cvx_infeasibility
+    # data, validation = fix_cvx_infeasibility(data)
     
-    print(f"After fix:")
+    # print(f"After fix:")
 
-    print(f"  CVX_N: {data.cvx_N.item()}, CVX_E: {data.cvx_E.item()}")
-    print(f"  Validation: {validation}")
+    # print(f"  CVX_N: {data.cvx_N.item()}, CVX_E: {data.cvx_E.item()}")
+    # print(f"  Validation: {validation}")
 
-    if track_gradients:
-        gradient_tracker = GradientFlowTracker(model, track_detailed=detailed_tracking,)
-        gradient_tracker.register_hooks()
-        logger.info(f"Gradient tracking enabled for model {args.model_module} with job name {args.job_name}")
+    # if track_gradients:
+    #     gradient_tracker = GradientFlowTracker(model, track_detailed=detailed_tracking,)
+    #     gradient_tracker.register_hooks()
+    #     logger.info(f"Gradient tracking enabled for model {args.model_module} with job name {args.job_name}")
 
     lambda_dict = { 'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
                     'lambda_mask': getattr(args, 'lambda_mask', 0.01),
@@ -244,27 +244,20 @@ def main():
                      "normalization_type": getattr(args, 'normalization_type', 'none'),}
 
     for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
-        if gradient_tracker:
-            gradient_tracker.reset_epoch_stats()
-        if track_gradients and epoch in gradient_check_epochs:
-            logger.info(f"Gradient statistics at epoch {epoch+1}:")
-            train_loss, train_dict = enhanced_train_with_gradient_tracking(model, train_loader, optimizer, criterion, device,track_gradients=True, detailed_tracking =detailed_tracking, **lambda_dict)
-            val_loss, val_dict     = test(model, validation_loader, criterion, device,**lambda_dict)
-            #if gradient_tracker:
-            #        gradient_tracker.save_gradient_stats(epoch, f"gradient_analysis_epoch_{epoch}.txt")
-        else:
-            train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict)
-            val_loss, val_dict      = test(model, validation_loader, criterion, device,**lambda_dict)
+        train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict)
+        val_loss, val_dict      = test(model, validation_loader, criterion, device,**lambda_dict)
         total_grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
-        print(f"   Total gradient norm: {total_grad_norm:.6f}")
-        
-        if total_grad_norm < 1e-6:
-            print("🚨 GRADIENTS TOO SMALL - model not learning!")
-        elif train_dict.get('train_accuracy', 0) > 0.1:
-            print("✅ Model is learning!")
-        else:
-            print("⚠️  Model learning slowly")
-        logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+        logger.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Total Grad Norm: {total_grad_norm:.6f}")
+
+        # if track_gradients and epoch % gradient_check_epochs == 0:
+    
+        # if total_grad_norm < 1e-6:
+        #     print("🚨 GRADIENTS TOO SMALL - model not learning!")
+        # elif train_dict.get('train_accuracy', 0) > 0.1:
+        #     print("✅ Model is learning!")
+        # else:
+        #     print("⚠️  Model learning slowly")
+        # logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
         if epoch % 5 == 0 or epoch == args.epochs - 1:
             logger.info(f"\n Epoch {epoch+1}/{args.epochs} - Train Metrics: {train_dict}\n ")
             logger.info(f"Epoch {epoch+1}/{args.epochs} - Val Metrics: {val_dict} \n ")

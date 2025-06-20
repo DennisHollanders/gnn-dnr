@@ -1,76 +1,75 @@
-description: "GAT model with hyperparameter optimization"
-job_name: "GAT_HPO_Large"
+# Test working config in HPO - based on your config-mlp-GAT.yaml
+# This config has NO search space - it uses fixed parameters that work in main.py
 
-# Data Configuration
+model_module: "AdvancedMLP"
 dataset_names: ["train", "validation", "test"]
-folder_names:
-  - "data/split_datasets/train"
-  - "data/split_datasets/validation"
-  - "data/split_datasets/test"
+folder_names: 
+  - "data\\split_datasets\\train"
+  - "data\\split_datasets\\validation"
+  - "data\\split_datasets\\test"
 dataset_type: "default"
 batching_type: "dynamic"
-max_nodes: 20000
-max_edges: 50000
-train_ratio: 0.85
-seed: 0
-num_workers: 4
+batch_size: 128
 
-# Model Configuration
-model_module: "AdvancedMLP"
-model_kwargs:
-  # GAT Configuration
-  gnn_type: GAT
-  gnn_layers: 2
-  gnn_hidden_dim: 256 
-  gat_heads: 4
-  gat_dropout: 0.005
-  gat_v2: true
-
-  # Edge MLP
+# All parameters as fixed_params (no search)
+fixed_params:
+  # Data settings
+  max_nodes: 20000
+  max_edges: 50000
+  train_ratio: 0.85
+  seed: 0
+  num_workers: 0
+  
+  # Model architecture - copied from your working config
+  gnn_type: "GAT"
+  gat_dropout: 0.05099716381479796
+  gat_heads: 2
+  gnn_layers: 4
+  gnn_hidden_dim: 448  # 224 * 2 heads
+  
+  # MLP settings
   use_edge_mlp: true
-  edge_hidden_dims: [256, 512]
-
-  # Node MLP
-  use_node_mlp: true
-  node_hidden_dims: [256, 512, 512]
-  # General Configuration
+  edge_hidden_dims: [128, 256]
+  use_node_mlp: true  
+  node_hidden_dims: [64, 64, 128, 256]
+  
+  # General settings
   activation: "leaky_relu"
-  dropout_rate:  0.01
+  dropout_rate: 0.0013447489600537238
   use_batch_norm: true
   use_residual: true
   use_skip_connections: true
   pooling: "add"
   normalization_type: "per_node"
-
-  # Switch Head
-  switch_head_type: "mlp"
-  switch_head_layers: 3
-
-  # Physics losses
+  
+  # Switch head
+  switch_head_type: "mlp" 
+  switch_head_layers: 4
+  
+  # Physics - IMPORTANT: These were missing in HPO
   use_gated_mp: true
   use_phyr: false
-  lambda_connectivity: 1e-1
-  lambda_phy_loss: 0.7
-  lambda_radiality: 1e-2
-
-  # Optimizer
-  learning_rate: 0.00035760499745340354
-  weight_decay: 3.1083921460064515e-05
-
-  # Loss & Optimization
-  loss_scaling_strategy: "adaptive_magnitude"
+  lambda_connectivity: 0.0028830179868523345
+  lambda_phy_loss: 0.96543480711283145
+  lambda_radiality: 0.001834148675023315
+  lambda_mask: 0.01  # Default value
+  
+  # Training
+  learning_rate: 0.0009708944531483163
+  weight_decay: 0.00015996260658050464
   criterion_name: "WeightedBCELoss"
-criterion_name: "WeightedBCELoss"
-# Training Configuration
-batch_size: 128
-epochs: 200
-patience: 20
-learning_rate: 0.00035760499745340354
-weight_decay: 3.1083921460064515e-05
-# Output Configuration
-output_type: "mutliclass"
-num_classes: 2
+  epochs: 50  # Shorter for testing
+  patience: 10
+  
+  # Output
+  output_type: "multiclass"
+  num_classes: 2
+  
+  # Loss scaling - IMPORTANT: This was missing
+  loss_scaling_strategy: "adaptive_magnitude"
+  
+  # Logging
+  wandb_project: "HPO_Config_Test"
 
-# Logging
-wandb_project: "GAT_HPO_Large"
-wandb: true
+# Empty search space - this makes it a single trial with fixed config
+search_space: {}

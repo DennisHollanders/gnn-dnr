@@ -59,6 +59,7 @@ def process_batch(model, data, criterion, device, is_training=True,
                  lambda_connectivity=0.05, lambda_radiality=0.05,
                  normalization_type="adaptive", 
                  loss_scaling_strategy="adaptive_ratio"):
+    #print(f"Processing batch with {data.x.size(0)} nodes and {data.edge_index.size(1)} edges")
     if data is None:
         logger.debug("Warning: Data is None, skipping this batch.")
         return torch.tensor(0.0, device=device), {}, {"valid_batch": False}

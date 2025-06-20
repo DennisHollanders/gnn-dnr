@@ -29,8 +29,11 @@ sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "model_search")])
 
 from load_data import create_data_loaders
 from train import train, test
+# Add paths
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "src")])
 
-
+from loss_functions import FocalLoss, WeightedBCELoss
 class SimpleHPO:
     """Simplified HPO with feasibility checks, CSV tracking, and W&B experiment grouping"""
     
@@ -340,19 +343,12 @@ class SimpleHPO:
         # Constraint 12: Match criterion to output type
         output_type = config.get('output_type', 'binary')
         if output_type == 'multiclass' and 'criterion_name' not in self.fixed_params:
-            config['criterion_name'] = 'CrossEntropyLoss'
+            config['criterion_name'] = "FocalLoss"
         elif output_type == 'binary' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'BCEWithLogitsLoss'
         elif output_type == 'regression' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'MSELoss'
-        
-        # Constraint 13: Set num_classes based on output_type
-        if output_type == 'multiclass':
-            config['num_classes'] = 2  
-        elif output_type == 'binary':
-            config['num_classes'] = 2
-        else:  # regression
-            config.pop('num_classes', None)
+    
         
         # Constraint 14: Memory limit (batch_size × max_nodes)
         batch_size = config.get('batch_size', 32)
@@ -405,9 +401,6 @@ class SimpleHPO:
         return True
     
     def objective(self, trial: optuna.Trial) -> float:
-        """Simplified objective function with comprehensive constraint validation"""
-        
-        # Initialize individual trial W&B run
         trial_run = None
         if self.wandb_run:
             trial_run = wandb.init(
@@ -423,7 +416,6 @@ class SimpleHPO:
         try:
             config = self.suggest_params(trial)
             
-            # Validate configuration
             if not self._validate_config(config):
                 logger.warning(f"Trial {trial.number}: Invalid configuration, pruning")
                 if trial_run:
@@ -431,7 +423,6 @@ class SimpleHPO:
                     wandb.finish()
                 raise optuna.TrialPruned()
             
-            # Set W&B config for this trial
             if trial_run:
                 wandb.config.update(config)
             
@@ -443,14 +434,21 @@ class SimpleHPO:
                     wandb.finish()
                 return -1.0 
             
-            # Log configuration validity and model size
             model_params = sum(p.numel() for p in model.parameters())
             logger.info(f"Trial {trial.number}: Config valid, Model params: {model_params:,}")
             
-            # Training loop with detailed logging
             optimizer = optim.Adam(model.parameters(), 
-                                 lr=config['learning_rate'], 
-                                 weight_decay=config['weight_decay'])
+                                lr=config['learning_rate'], 
+                                weight_decay=config['weight_decay'])
+
+            lambda_dict = {
+                'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
+                'lambda_mask': config.get('lambda_mask', 0.01),
+                'lambda_connectivity': config.get('lambda_connectivity', 0.05),
+                'lambda_radiality': config.get('lambda_radiality', 0.05),
+                'normalization_type': config.get('normalization_type', 'adaptive'),
+                'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
+            }
             
             starting_val_loss = float('inf')
             best_train_loss = float('inf')
@@ -458,20 +456,26 @@ class SimpleHPO:
             best_minority_f1 = 0.0
             best_mcc = -1.0 
             best_balanced_accuracy = 0.0
-           
+        
             patience = 0
             max_epochs = min(config.get('epochs', 100), 80)
             max_patience = config.get('patience', 25)
             
+            print(f"Starting training for {max_epochs} epochs with patience {max_patience}")
+            print(f"Lambda dict: {lambda_dict}")  
+            
             for epoch in range(max_epochs):
-                train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device)
-                val_loss, val_dict = test(model, val_loader, criterion, self.device)
+                train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device, **lambda_dict)
+                val_loss, val_dict = test(model, val_loader, criterion, self.device, **lambda_dict)
                 
                 if epoch == 0: 
                     starting_val_loss = val_loss
                     starting_train_loss = train_loss
+                    
+                print(f"Epoch {epoch+1}/{max_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+                print("Train MCC:", train_dict.get('train_mcc', 0.0), 
+                    "Val MCC:", val_dict.get('test_mcc', 0.0))
 
-                # Extract metrics 
                 current_f1_minority = val_dict.get('test_f1_minority', 0.0)
                 current_mcc = val_dict.get('test_mcc', 0.0)
                 current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
@@ -485,7 +489,7 @@ class SimpleHPO:
                     patience = 0
                 else:
                     patience += 1
-    
+
                 if trial_run:
                     wandb.log({
                         "epoch": epoch,
@@ -494,10 +498,10 @@ class SimpleHPO:
                         "val_f1_minority": current_f1_minority,
                         "val_mcc": current_mcc,
                         "val_balanced_accuracy": current_balanced_accuracy,
-                        "patience": patience
+                        "patience": patience,
+                        **lambda_dict  
                     })
                 
-    
                 trial.report(current_mcc, epoch)
                 if trial.should_prune() or patience >= max_patience:
                     break
@@ -522,7 +526,6 @@ class SimpleHPO:
                 'config_valid': True
             }
             
-            # Store in Optuna trial
             for key, value in metrics.items():
                 trial.set_user_attr(key, value)
 
@@ -537,7 +540,6 @@ class SimpleHPO:
             return best_mcc 
             
         except optuna.TrialPruned:
-            # Handle pruned trials properly
             pruned_metrics = {
                 "starting_val_loss": float('inf'),
                 "starting_train_loss": float('inf'),
@@ -568,34 +570,6 @@ class SimpleHPO:
             
         except Exception as e:
             logger.error(f"Trial {trial.number} failed: {e}")
-            failure_metrics = {
-                "starting_val_loss": float('inf'),
-                "starting_train_loss": float('inf'),	
-                'best_mcc': 0.0, 
-                "best_f1_minority": 0.0,
-                "best_balanced_accuracy": 0.0,
-                'best_train_loss': float('inf'),
-                'best_val_loss': float('inf'),
-                'final_train_loss': float('inf'),
-                'final_val_loss': float('inf'),
-                'final_f1_minority': 0.0,
-                'final_mcc': 0.0,  
-                'final_balanced_accuracy': 0.0,
-                'final_epoch': 0,
-                'converged': False,
-                'model_parameters': 0,
-                'status': 'failed', 
-                'config_valid': True, 
-                'error_message': str(e)
-            }
-
-            
-            if trial_run:
-                wandb.log(failure_metrics)
-                wandb.finish()
-            
-            self._log_trial_to_csv(trial.number, self.suggest_params(trial), failure_metrics)
-            
             return -1.0
     
     def _load_data_once(self):
@@ -663,52 +637,47 @@ class SimpleHPO:
             
             if not train_loader or not val_loader:
                 return None, None, None, None
-            
 
             model_kwargs = {
                 'node_input_dim': self.data_sample.x.shape[1],
                 'edge_input_dim': self.data_sample.edge_attr.shape[1],
             }
- 
+
+            # FIXED: Include ALL possible model parameters
             for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
-                       'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
-                       'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
-                       'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
-                       'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
-                       'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
-                       'loss_scaling_strategy']:
+                    'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
+                    'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
+                    'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
+                    'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
+                    'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
+                    'loss_scaling_strategy', 'enforce_radiality']:  # Added missing parameters
                 if key in config:
                     model_kwargs[key] = config[key]
 
+            # Handle the node/edge MLP conversion that was causing issues
             if 'node_mlp_layers' in config and 'node_mlp_dim' in config:
                 config['node_hidden_dims'] = [config['node_mlp_dim']] * config['node_mlp_layers']
-                # Remove the old parameters to avoid confusion
-                config.pop('node_mlp_layers', None)
-                config.pop('node_mlp_dim', None)
-        
-            # Convert edge MLP parameters to expected format
+                model_kwargs['node_hidden_dims'] = config['node_hidden_dims']
+            
             if 'edge_mlp_layers' in config and 'edge_mlp_dim' in config:
                 config['edge_hidden_dims'] = [config['edge_mlp_dim']] * config['edge_mlp_layers']
-                # Remove the old parameters to avoid confusion
-                config.pop('edge_mlp_layers', None)
-                config.pop('edge_mlp_dim', None)
-        
-            model_kwargs = {
-                'node_input_dim': self.data_sample.x.shape[1],
-                'edge_input_dim': self.data_sample.edge_attr.shape[1],
-            }
+                model_kwargs['edge_hidden_dims'] = config['edge_hidden_dims']
             
             model = model_class(**model_kwargs).to(self.device)
 
             criterion_name = config.get('criterion_name', 'MSELoss')
-            if hasattr(model_module, criterion_name):
-                criterion = getattr(model_module, criterion_name)()
+            if criterion_name == "WeightedBCELoss":
+                criterion = WeightedBCELoss(pos_weight=2.0)
+            elif criterion_name == "FocalLoss":
+                criterion = FocalLoss(alpha=1.0, gamma=2.0)
+            elif criterion_name == "MSELoss":
+                criterion = nn.MSELoss()
+            elif criterion_name == "CrossEntropyLoss":
+                criterion = nn.CrossEntropyLoss()
             else:
                 criterion = getattr(nn, criterion_name)()
             
             return model, train_loader, val_loader, criterion
-        
-
             
         except Exception as e:
             logger.error(f"Setup failed: {e}")

@@ -24,6 +24,22 @@ from data_generation.define_ground_truth import (
     plot_voltage_profile,
     visualize_network_states
 )
+def calculate_topology_error_hamming(y_true, y_pred):    
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Handle length mismatch
+    if len(y_true) != len(y_pred):
+        min_len = min(len(y_true), len(y_pred))
+        y_true = y_true[:min_len]
+        y_pred = y_pred[:min_len]
+    
+    if len(y_true) == 0:
+        return 1.0 
+    hamming_distance = np.sum(y_true != y_pred)
+    topology_error = hamming_distance / len(y_true)
+    
+    return topology_error
 
 def calculate_specificity_sensitivity(y_true, y_pred):
     """Calculate specificity and sensitivity"""
@@ -156,7 +172,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                     solve_time = row.get('solve_time', 0.0)
                     if pd.isna(solve_time):
                         solve_time = 0.0
-                    elif solve_time > 299:
+                    elif solve_time > 599:
                         is_infeasible = True
                         if infeasible_type == 'error':
                             # Both error and timeout
@@ -185,8 +201,13 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                         f1_majority = calculate_f1_majority(ground_truth, final_optima)
                         balanced_acc = balanced_accuracy_score(ground_truth, final_optima)
                         spec, sens = calculate_specificity_sensitivity(ground_truth, final_optima)
+                        
+                        # Add GraPhyR topology error metric
+                        topology_error_hamming = calculate_topology_error_hamming(ground_truth, final_optima)
+                        
                     else:
                         mcc = f1_majority = balanced_acc = spec = sens = 0.0
+                        topology_error_hamming = 1.0  # Maximum error for infeasible cases
                     
                     # Solve time is already retrieved above
                     
@@ -240,6 +261,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                         'balanced_accuracy': balanced_acc,
                         'specificity': spec,
                         'sensitivity': sens,
+                        'topology_error_hamming': topology_error_hamming,  # Add this line
                         'solve_time': solve_time,
                         'loss_ground_truth': loss_ground_truth,
                         'loss_final': loss_final,
@@ -296,6 +318,14 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
         else:
             overall_mcc = overall_f1_majority = overall_balanced_acc = overall_spec = overall_sens = 0.0
         
+        # Calculate aggregated topology error
+        all_topology_errors = []
+        for _, exp in group.iterrows():
+            if not exp['is_infeasible']:
+                all_topology_errors.append(exp['topology_error_hamming'])
+        
+        avg_topology_error = np.mean(all_topology_errors) if all_topology_errors else 1.0
+        
         # Count categories - each graph in exactly one category
         correct_count = sum(group['category'] == 'correct')
         radial_wrong = sum(group['category'] == 'radial_wrong')
@@ -333,6 +363,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
             'Balanced Accuracy': overall_balanced_acc,
             'Specificity': overall_spec,
             'Sensitivity': overall_sens,
+            'Topology Error (Hamming)': avg_topology_error,  # Add this line
             'Time [s] (feasible only)': time_feasible,
             'Time [s] (including infeasible)': time_including_infeasible,
             'Difference in loss between optima': avg_loss_diff,
@@ -368,7 +399,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
     return detailed_df, summary_df
 
 def create_latex_table_new_format(results_df):
-    """Create LaTeX table with the new format"""
+    """Create LaTeX table with the new format including topology error"""
     if results_df.empty:
         return "No results to display"
     
@@ -379,9 +410,9 @@ def create_latex_table_new_format(results_df):
         "  \\small",
         "  \\renewcommand{\\arraystretch}{1.2}",
         "  \\resizebox{\\textwidth}{!}{%",
-        "    \\begin{tabular}{llccccccccccccc}",
+        "    \\begin{tabular}{llcccccccccccccc}",  # Added one more 'c' for topology error
         "      \\toprule",
-        "      Model & GNN & MCC & F1-maj & Bal.Acc & Spec & Sens & Time(F) & Time(I) & Loss & Correct & Radial & Non-Rad & Inf(E) & Inf(T) \\\\",
+        "      Model & GNN & MCC & F1-maj & Bal.Acc & Spec & Sens & TopErr & Time(F) & Time(I) & Loss & Correct & Radial & Non-Rad & Inf(E) & Inf(T) \\\\",  # Added TopErr column
         "      \\midrule"
     ]
     
@@ -390,7 +421,8 @@ def create_latex_table_new_format(results_df):
             f"      {row['Name of model']} & {row['GNN type']} & "
             f"{row['MCC score']:.3f} & {row['F1-majority score']:.3f} & "
             f"{row['Balanced Accuracy']:.3f} & {row['Specificity']:.3f} & "
-            f"{row['Sensitivity']:.3f} & {row['Time [s] (feasible only)']:.1f} & "
+            f"{row['Sensitivity']:.3f} & {row['Topology Error (Hamming)']:.3f} & "  # Added topology error
+            f"{row['Time [s] (feasible only)']:.1f} & "
             f"{row['Time [s] (including infeasible)']:.1f} & "
             f"{row['Difference in loss between optima']:.2f} & "
             f"{row['number of graphs: predicted correctly']} & "
@@ -405,7 +437,7 @@ def create_latex_table_new_format(results_df):
         "      \\bottomrule",
         "    \\end{tabular}%",
         "  }",
-        "  \\caption{Experiment Results Summary (Inf(E) = Infeasible due to error, Inf(T) = Infeasible due to time limit)}",
+        "  \\caption{Experiment Results Summary (TopErr = Topology Error Hamming distance, Inf(E) = Infeasible due to error, Inf(T) = Infeasible due to time limit)}",
         "  \\label{tab:experiment-results}",
         "\\end{table*}"
     ])
