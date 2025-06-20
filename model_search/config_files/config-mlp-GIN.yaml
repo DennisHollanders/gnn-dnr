@@ -12,20 +12,51 @@ dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
+batch_size: 128
 train_ratio: 0.85
 seed: 0
 num_workers: 0
 
+# Training Configuration
+learning_rate: 0.00035760499745340354
+weight_decay: 3.1083921460064515e-05
+epochs: 200
+patience: 20
+criterion_name: "FocalLoss"
+
+# Physics Loss Configuration (used in training loop)
+lambda_phy_loss: 0.96543480711283145
+lambda_mask: 0.01
+lambda_connectivity: 0.0028830179868523345
+lambda_radiality: 0.001834148675023315
+loss_scaling_strategy: "fixed"
+normalization_type: "adaptive"
+
+# Hyperparameter Search
+hp_search: false
+hp_search_n_trials: 50
+
+
 # Model Configuration
 model_module: "AdvancedMLP"
+
 model_kwargs:
+  # Output Configuration
+  output_type: "multiclass"
+  num_classes: 2
+
   # GIN Configuration
   gnn_type: "GIN"
   gin_mlp_layers: 3
   gin_eps: 0.06118747565904727
   gin_train_eps: false
-  gnn_layers: 1
-  gnn_hidden_dim_multiple: 302
+
+  gnn_layers: 2
+  gnn_hidden_dim_multiple: 360
+
+  gat_heads: 4  # Added (default value)
+  gat_dropout: 0.1  # Added (default value)
+
 
   # Edge MLP
   use_edge_mlp: true
@@ -38,7 +69,7 @@ model_kwargs:
   n_node_hidden_dims_layers: 4
 
   # General Configuration
-  activation: "relu"
+  activation: "leaky_relu"
   dropout_rate: 0.0013447489600537238
   use_batch_norm: true
   use_residual: true
@@ -48,30 +79,13 @@ model_kwargs:
   # Switch Head
   switch_head_type: "mlp"
   switch_head_layers: 4
+  switch_attention_heads: 4
 
   # Physics
   use_gated_mp: true
   use_phyr: false
-  lambda_phy_loss: 0.9634733268065652
-  lambda_connectivity: 0.031023696908473272
-  lambda_radiality: 0.0036467753703689383
+  enforce_radiality: true
 
-  # Loss & Optimization
-  loss_scaling_strategy: "adaptive_magnitude"
-  criterion_name: "WeightedBCELoss"
-  
-  weight_decay: 3.1083921460064515e-05
-learning_rate: 0.0009708944531483163
-weight_decay: 3.1083921460064515e-05
-criterion_name: "WeightedBCELoss"
-# Training Configuration
-batch_size: 128
-epochs: 200
-patience: 20
-
-# Output Configuration
-output_type: "binary"
-num_classes: 2
 
 # Logging
 wandb_project: "GIN_HPO"

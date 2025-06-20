@@ -341,9 +341,9 @@ class SimpleHPO:
             config.pop('phyr_k_ratio', None)
         
         # Constraint 12: Match criterion to output type
-        output_type = config.get('output_type', 'binary')
+        output_type = config.get('output_type', 'multiclass')
         if output_type == 'multiclass' and 'criterion_name' not in self.fixed_params:
-            config['criterion_name'] = "FocalLoss"
+            config['criterion_name'] = "WeightedBCELoss"
         elif output_type == 'binary' and 'criterion_name' not in self.fixed_params:
             config['criterion_name'] = 'BCEWithLogitsLoss'
         elif output_type == 'regression' and 'criterion_name' not in self.fixed_params:
@@ -462,6 +462,7 @@ class SimpleHPO:
             max_patience = config.get('patience', 25)
             
             print(f"Starting training for {max_epochs} epochs with patience {max_patience}")
+            print("config:", config)
             print(f"Lambda dict: {lambda_dict}")  
             
             for epoch in range(max_epochs):
@@ -473,8 +474,10 @@ class SimpleHPO:
                     starting_train_loss = train_loss
                     
                 print(f"Epoch {epoch+1}/{max_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-                print("Train MCC:", train_dict.get('train_mcc', 0.0), 
-                    "Val MCC:", val_dict.get('test_mcc', 0.0))
+                if epoch % 5 == 0 or epoch ==0:
+                    print(f"\n Epoch {epoch+1}- Train Metrics: {train_dict}\n ")
+                    print(f"Epoch {epoch+1} - Val Metrics: {val_dict} \n ")
+                    
 
                 current_f1_minority = val_dict.get('test_f1_minority', 0.0)
                 current_mcc = val_dict.get('test_mcc', 0.0)

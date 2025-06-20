@@ -1,12 +1,11 @@
 description: "GIN model with hyperparameter optimization"
 job_name: "None"
 
-
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
 folder_names:
   - "data\\split_datasets\\train"
-  - "data\\split_datasets\\validation"
+  - "data\\split_datasets\\validation"  
   - "data\\split_datasets\\test"
 dataset_type: "default"
 batching_type: "dynamic"
@@ -17,66 +16,65 @@ train_ratio: 0.85
 seed: 0
 num_workers: 0
 
+# Training Configuration
+learning_rate: 0.00035760499745340354
+weight_decay: 3.1083921460064515e-05
+epochs: 200
+patience: 20
+criterion_name: "FocalLoss"
+
+# Physics Loss Configuration (used in training loop)
+lambda_phy_loss: 0.96543480711283145
+lambda_mask: 0.01
+lambda_connectivity: 0.0028830179868523345
+lambda_radiality: 0.001834148675023315
+loss_scaling_strategy: "fixed"
+normalization_type: "adaptive"
+
+# Hyperparameter Search
+hp_search: false
+hp_search_n_trials: 50
+
 # Model Configuration
 model_module: "AdvancedMLP"
 model_kwargs:
-  # GIN Configuration
+  # Output Configuration
+  output_type: "multiclass"
+  num_classes: 2
+  
+  # GNN Configuration
   gnn_type: "GAT"
-  gat_dropout: 0.05099716381479796
-  gat_edge_dim: 40
+  gnn_layers: 2
+  gnn_hidden_dim: 224  # Fixed from gnn_hidden_dim_multiple
   gat_heads: 2
-  gat_v2: true
-  gnn_layers: 4
-  gnn_hidden_dim_multiple: 224
+  gat_dropout: 0.05099716381479796
+  gin_eps: 0.0  # Added (for GIN layers)
 
-  # Edge MLP
-  use_edge_mlp: true
-  edge_hidden_dims: [128, 256,]
-  n_edge_hidden_dims_layers: 2
-
-  # Node MLP
+  # MLP Configuration
   use_node_mlp: true
-  node_hidden_dims: [64, 64, 128,256]
-  n_node_hidden_dims_layers: 4
+  node_hidden_dims: [256, 512, 512]
+  use_edge_mlp: true
+  edge_hidden_dims: [256, 512]
 
   # General Configuration
   activation: "leaky_relu"
-  dropout_rate: 0.0013447489600537238
+  dropout_rate: 0.0
   use_batch_norm: true
   use_residual: true
   use_skip_connections: true
   pooling: "add"
-  normalization_type: per_node
 
-  # Switch Head
+
+  # Switch Head Configuration
   switch_head_type: "mlp"
   switch_head_layers: 4
+  switch_attention_heads: 4  # Added
 
-  # Physics
+  # Physics Configuration
   use_gated_mp: true
   use_phyr: false
-  lambda_connectivity: 0.0028830179868523345
-  lambda_phy_loss: 0.96543480711283145
-  lambda_radiality: 0.001834148675023315
-  learning_rate: 0.009123940339510332
-
-  # Loss & Optimization
-  loss_scaling_strategy: "adaptive_magnitude"
-  criterion_name: "WeightedBCELoss"
-  
-  weight_decay: 0.00015996260658050464
-learning_rate: 0.0009708944531483163
-weight_decay: 0.00015996260658050464
-criterion_name: "WeightedBCELoss"
-# Training Configuration
-batch_size: 128
-epochs: 200
-patience: 20
-
-# Output Configuration
-output_type: "binary"
-num_classes: 2
+  enforce_radiality: false  # Added
 
 # Logging
-wandb_project: "GIN_HPO"
 wandb: true
+wandb_project: "GIN_HPO"

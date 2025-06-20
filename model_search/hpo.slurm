@@ -1,35 +1,45 @@
 #!/bin/bash
-#SBATCH --job-name=HPO-GAT
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
+
+# Simple HPO job submission script
+
+BASE_DIR="$HOME/gnn-dnr"
+LOG_DIR="$BASE_DIR/slurm_logs"
+mkdir -p "$LOG_DIR"
+
+submit_hpo_job() {
+    local MODEL=$1
+    local CONFIG=$2
+    local JOB_NAME="HPO-${MODEL}"
+    
+    cat > "$LOG_DIR/${JOB_NAME}.slurm" <<EOF
+#!/bin/bash
+#SBATCH --job-name=${JOB_NAME}
+#SBATCH --output=$LOG_DIR/${JOB_NAME}_%j.out
+#SBATCH --error=$LOG_DIR/${JOB_NAME}_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-# SBATCH --gres=gpu:1 
 #SBATCH --mem=16G
 #SBATCH --time=1-00:00:00
-#SBATCH --partition=tue.default.q # Or tue.gpu.q if using the --gres=gpu:1 directive
+#SBATCH --partition=tue.default.q
 
-export DATA_FOLDER="test_data"
-
-# Create required directories
-mkdir -p ./data
-mkdir -p ./logs
-
-echo "Loading modules..."
-
-!
-module purge # Start with a clean environment
+module purge
 module load Python/3.11.3
-# module load CUDA/11.7.0 
 module load poetry/1.5.1-GCCcore-12.3.0
 module load Gurobi/11.0.3-GCCcore-12.3.0
-echo "Modules loaded."
 
+cd $BASE_DIR || exit 1
+mkdir -p ./data ./logs
 
-echo "Navigating to project directory..."
-cd $HOME/gnn-dnr || exit 1 # Add error check for cd
+poetry run python -I model_search/hpo.py --config ${CONFIG} --trials 250 --wandb --study_name ${MODEL}
+EOF
 
-echo "Running script using 'poetry run'..."
+    sbatch "$LOG_DIR/${JOB_NAME}.slurm"
+}
 
-poetry run python -I model_search/hpo.py --config hpo-GAT.yaml --trials 250 --wandb --study_name GAT
+# Submit all three jobs
+submit_hpo_job "GAT" "hpo-GAT.yaml"
+submit_hpo_job "GCN" "hpo-GCN.yaml"
+submit_hpo_job "GIN" "hpo-GIN.yaml"
+
+echo "Submitted 3 HPO jobs: GAT, GCN, GIN"

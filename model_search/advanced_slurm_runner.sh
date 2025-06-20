@@ -181,9 +181,14 @@ for model in "${!MODELS[@]}"; do
   echo "=> Submitted $job_count jobs so far"
 done
 
-# one global “optimization with warmstart” job (using first model/config)
+# Add the missing baseline job
+submit_job "optimization_without_warmstart" "$GLOBAL_MODEL" "$GLOBAL_MP" "$GLOBAL_CP" "optimization_without_warmstart" "round" 0.5 "" "--optimize"
+((job_count++))
+
+# one global "optimization with warmstart" job (using first model/config)
 submit_job "optimization_with_warmstart" "$GLOBAL_MODEL" "$GLOBAL_MP" "$GLOBAL_CP" "soft" "round" 0.5 "" "--optimize"
 ((job_count++))
+
 
 echo "All done. Total jobs: $job_count"
 echo "Check with: squeue -u \$USER or sacct -j <job_id>"

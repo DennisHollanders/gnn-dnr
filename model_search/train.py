@@ -21,12 +21,12 @@ def approximate_connectivity_loss(switch_probs, edge_index, num_nodes, device):
     
     disconnected_penalty = torch.relu(1.0 - node_degrees).sum()
     return disconnected_penalty
-
 def enhanced_physics_loss(output, data, device, lambda_phy=0.1, 
                          lambda_connectivity=0.05, lambda_radiality=0.05,
-                         normalization_type="adaptive"):
+                         normalization_type="paper_based"):
+    """Enhanced physics loss with paper-based normalization."""
     # Get base physics loss
-    base_phy_loss = physics_loss(output, data, device, normalization_type)
+    base_phy_loss = physics_loss(output, data, device, "none")  # Use raw physics loss
     
     # Get switch probabilities
     switch_probs = output.get("switch_predictions")
@@ -41,32 +41,57 @@ def enhanced_physics_loss(output, data, device, lambda_phy=0.1,
     
     # Connectivity loss
     conn_loss = approximate_connectivity_loss(switch_probs, edge_index, num_nodes, device)
-    conn_loss_normalized = conn_loss / num_nodes 
     
     # Radiality loss
     rad_loss = radiality_loss(switch_probs, num_nodes)
-    rad_loss_normalized = rad_loss / (num_nodes - 1)**2
     
-    # Combine all losses 
-    total_loss = (lambda_phy * base_phy_loss + 
-                  lambda_connectivity * conn_loss_normalized + 
-                  lambda_radiality * rad_loss_normalized)
+    if normalization_type == "paper_based":
+        # Initialize normalization constants on first call
+        if not hasattr(enhanced_physics_loss, 'norm_constants'):
+            enhanced_physics_loss.norm_constants = {
+                'physics': None,
+                'connectivity': None, 
+                'radiality': None
+            }
+        
+        # Store initial loss magnitudes for normalization (detached to avoid gradients)
+        if enhanced_physics_loss.norm_constants['physics'] is None:
+            enhanced_physics_loss.norm_constants['physics'] = base_phy_loss.detach().item() + 1e-8
+        if enhanced_physics_loss.norm_constants['connectivity'] is None:
+            enhanced_physics_loss.norm_constants['connectivity'] = conn_loss.detach().item() + 1e-8
+        if enhanced_physics_loss.norm_constants['radiality'] is None:
+            enhanced_physics_loss.norm_constants['radiality'] = rad_loss.detach().item() + 1e-8
+        
+        # Apply paper-based normalization: L_component / L_component^0
+        normalized_phy_loss = base_phy_loss / enhanced_physics_loss.norm_constants['physics']
+        normalized_conn_loss = conn_loss / enhanced_physics_loss.norm_constants['connectivity'] 
+        normalized_rad_loss = rad_loss / enhanced_physics_loss.norm_constants['radiality']
+        
+        # Combine with lambda weights
+        total_loss = (lambda_phy * normalized_phy_loss + 
+                      lambda_connectivity * normalized_conn_loss + 
+                      lambda_radiality * normalized_rad_loss)
+    else:
+        # Fallback to original normalization
+        conn_loss_normalized = conn_loss / num_nodes 
+        rad_loss_normalized = rad_loss / (num_nodes - 1)**2
+        total_loss = (lambda_phy * base_phy_loss + 
+                      lambda_connectivity * conn_loss_normalized + 
+                      lambda_radiality * rad_loss_normalized)
     
     return total_loss
 
 def process_batch(model, data, criterion, device, is_training=True, 
                  lambda_phy_loss=0.1, lambda_mask=0.01, 
                  lambda_connectivity=0.05, lambda_radiality=0.05,
-                 normalization_type="adaptive", 
-                 loss_scaling_strategy="adaptive_ratio"):
-    #print(f"Processing batch with {data.x.size(0)} nodes and {data.edge_index.size(1)} edges")
+                 normalization_type="paper_based", 
+                 loss_scaling_strategy="paper_based"):
+    """Updated process_batch with paper-based normalization."""
     if data is None:
         logger.debug("Warning: Data is None, skipping this batch.")
         return torch.tensor(0.0, device=device), {}, {"valid_batch": False}
 
     data = data.to(device)
-    
-    # Forward pass
     output = model(data)
    
     if hasattr(data, 'batch') and data.batch.max() >= len(data.ptr) - 1:
@@ -87,34 +112,17 @@ def process_batch(model, data, criterion, device, is_training=True,
     switch_logits = output.get("switch_logits")
     target_switches = data.edge_y
     
-    # Debug logging
-    if switch_logits is not None:
-        logger.debug(f"switch_logits shape: {switch_logits.shape}")
-        logger.debug(f"mean switch_logits: {switch_logits.mean().item()}")
-        logger.debug(f"requires_grad: {switch_logits.requires_grad}")
-        logger.debug(f"grad_fn: {switch_logits.grad_fn}")
-    
-    if target_switches is not None:
-        logger.debug(f"target_switches shape: {target_switches.shape}")
-        logger.debug(f"mean target_switches: {target_switches.float().mean().item()}")
-    
     # Process predictions if available
     if switch_logits is not None and target_switches is not None:
         if hasattr(model, 'output_type') and model.output_type == "multiclass":
-    
             target_classes = target_switches.long()
             
-            # Use CrossEntropyLoss for multiclass
             if isinstance(criterion, nn.CrossEntropyLoss):
                 switch_loss = criterion(switch_logits, target_classes)
-                logger.debug(f"Using CrossEntropyLoss: {switch_loss.item()}")
             else:
-                # Fallback: convert logits to binary probabilities
                 switch_probs = F.softmax(switch_logits, dim=1)[:, 1]  
                 switch_loss = criterion(switch_probs, target_switches.float())
-                logger.debug(f"Using fallback binary loss: {switch_loss.item()}")
                 
-            # For metrics, use binary probabilities
             if switch_logits.dim() > 1:
                 predicted_scores = F.softmax(switch_logits, dim=1)[:, 1] 
             else:
@@ -124,55 +132,69 @@ def process_batch(model, data, criterion, device, is_training=True,
             
             if predicted_scores.shape == target_switches.shape:
                 switch_loss = criterion(predicted_scores, target_switches.float())
-                logger.debug(f"Using binary loss: {switch_loss.item()}")
             else:
                 logger.debug(f"Shape mismatch: predicted ({predicted_scores.shape}) vs target ({target_switches.shape})")
                 _log_batch_debug_info(data)
-
                 return total_loss, metrics, batch_stats
-        
-    
 
         loss_components["switch_loss"] = switch_loss
-        total_loss = switch_loss
+        
+        # Initialize switch loss normalization constant
+        if loss_scaling_strategy == "paper_based":
+            if not hasattr(process_batch, 'switch_norm_constant'):
+                process_batch.switch_norm_constant = switch_loss.detach().item() + 1e-8
+            
+            # Normalize switch loss by its initial magnitude
+            normalized_switch_loss = switch_loss / process_batch.switch_norm_constant
+            total_loss = normalized_switch_loss
+        else:
+            total_loss = switch_loss
 
+        # Add physics losses
         if any(key in output for key in ["flows", "node_v", "switch_predictions"]):
             try:
                 with torch.set_grad_enabled(is_training):
                     physics_loss = enhanced_physics_loss(
                         output, data, device, 
-                        lambda_phy=1.0,  
-                        lambda_connectivity=1.0,
-                        lambda_radiality=1.0,
+                        lambda_phy=lambda_phy_loss,  
+                        lambda_connectivity=lambda_connectivity,
+                        lambda_radiality=lambda_radiality,
                         normalization_type=normalization_type
                     )
                     loss_components["physics_loss"] = physics_loss
                     
-                    # Apply loss scaling strategy
-                    scaled_physics_loss = apply_loss_scaling(
-                        switch_loss, physics_loss, 
-                        lambda_phy_loss, lambda_connectivity, lambda_radiality,
-                        loss_scaling_strategy
-                    )
-                    
-                    total_loss = switch_loss + scaled_physics_loss
-                    loss_components["scaled_physics_loss"] = scaled_physics_loss
-                    
-                    logger.debug(f"Switch loss: {switch_loss.item():.6f}")
-                    logger.debug(f"Raw physics loss: {physics_loss.item():.6f}")
-                    logger.debug(f"Scaled physics loss: {scaled_physics_loss.item():.6f}")
-                    logger.debug(f"Total loss: {total_loss.item():.6f}")
+                    if loss_scaling_strategy == "paper_based":
+                        # Physics loss is already normalized inside enhanced_physics_loss
+                        total_loss = normalized_switch_loss + physics_loss
+                    else:
+                        # Apply original loss scaling
+                        scaled_physics_loss = apply_loss_scaling(
+                            switch_loss, physics_loss, 
+                            lambda_phy_loss, lambda_connectivity, lambda_radiality,
+                            loss_scaling_strategy
+                        )
+                        total_loss = switch_loss + scaled_physics_loss
+                        loss_components["scaled_physics_loss"] = scaled_physics_loss
                 
             except Exception as e:
                 logger.warning(f"Enhanced physics loss computation failed: {e}")
-  
+
+        # Add sparsity loss with paper-based normalization
         if "switch_mask" in output:
             sparsity_loss = output["switch_mask"].mean()
-            scaled_sparsity = lambda_mask * sparsity_loss
-            total_loss = total_loss + scaled_sparsity
-            loss_components["sparsity_loss"] = scaled_sparsity
-            logger.debug(f"Sparsity: {sparsity_loss.item()}, Scaled: {scaled_sparsity.item()}")
-        
+            
+            if loss_scaling_strategy == "paper_based":
+                # Initialize sparsity normalization constant
+                if not hasattr(process_batch, 'sparsity_norm_constant'):
+                    process_batch.sparsity_norm_constant = sparsity_loss.detach().item() + 1e-8
+                
+                normalized_sparsity = (lambda_mask * sparsity_loss) / process_batch.sparsity_norm_constant
+                total_loss = total_loss + normalized_sparsity
+                loss_components["sparsity_loss"] = normalized_sparsity
+            else:
+                scaled_sparsity = lambda_mask * sparsity_loss
+                total_loss = total_loss + scaled_sparsity
+                loss_components["sparsity_loss"] = scaled_sparsity
 
         metrics = compute_switch_metrics(predicted_scores, target_switches)
         
@@ -184,9 +206,6 @@ def process_batch(model, data, criterion, device, is_training=True,
             "loss": total_loss.item(),
             "batch_size": target_switches.numel()
         }
-        
-        logger.debug(f"Final total loss: {total_loss.item()}")
-        logger.debug(f"Switch metrics: {metrics}")
             
     else:
         logger.debug("Missing predictions or targets")
