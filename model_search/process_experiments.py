@@ -345,7 +345,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
         time_feasible = feasible_times.mean() if len(feasible_times) > 0 else 0.0
         
         # For infeasible, assume max time
-        max_time = 300.0
+        max_time = 6000
         all_times = group['solve_time'].fillna(max_time)
         all_times[group['is_infeasible']] = max_time
         time_including_infeasible = all_times.mean()

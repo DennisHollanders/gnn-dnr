@@ -50,7 +50,7 @@ fixed_params:
   pooling: "add"
   
   # Output settings 
-  output_type: "binary"
+  output_type: "multiclass"
   num_classes: 2  
   wandb_project: "GIN_HPO_Stage1"
 

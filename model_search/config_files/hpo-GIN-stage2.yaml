@@ -36,7 +36,7 @@ fixed_params:
   use_phyr: false
   
   # Output settings 
-  output_type: "binary"
+  output_type: "multiclass"
   num_classes: 2  
   wandb_project: "GIN_HPO_Stage2"
 
