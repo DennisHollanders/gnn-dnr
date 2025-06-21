@@ -1,0 +1,123 @@
+description: "Stage 2 HPO for GCN: Hyperparameter tuning with best architecture from Stage 1"
+job_name: "GCN-stage2-hyperparameter-tuning"
+
+# Data Configuration
+dataset_names: ["train", "validation", "test"]
+folder_names: 
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+dataset_type: "default"
+batching_type: "dynamic"
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 0
+
+# Model Configuration (fixed for all trials)
+model_module: "AdvancedMLP"
+
+# STAGE 2: Fixed Parameters (Best Architecture from Stage 1)
+fixed_params:
+  # Output Configuration
+  output_type: "multiclass"
+  num_classes: 2
+  
+  # Best GCN Architecture from Stage 1
+  gnn_type: "GCN"
+  gnn_layers: 2
+  gnn_hidden_dim: 256
+  gin_eps: 0.0
+  gat_heads: 4
+  gat_dropout: 0.1
+  
+  # Best MLP Architecture from Stage 1
+  use_node_mlp: true
+  node_hidden_dims: [128]  # From node_hidden_dims_0: 128, n_node_hidden_dims_layers: 1
+  use_edge_mlp: true
+  edge_hidden_dims: [32]   # From edge_hidden_dims_0: 32, n_edge_hidden_dims_layers: 1
+  
+  # Best Switch Head Architecture from Stage 1
+  switch_head_type: "mlp"
+  switch_head_layers: 4
+  switch_attention_heads: 1
+  
+  # General Configuration (keep fixed)
+  activation: "leaky_relu"
+  use_batch_norm: true
+  use_residual: true
+  use_skip_connections: true
+  pooling: "add"
+  
+  # Physics Configuration (keep fixed)
+  use_gated_mp: true
+  use_phyr: false
+  enforce_radiality: false
+  
+  # Training Configuration (keep some fixed)
+  epochs: 200  # Increase for final training
+  patience: 25  # Increase patience for final training
+  criterion_name: "FocalLoss"
+
+# STAGE 2: HYPERPARAMETER TUNING SEARCH SPACE
+search_space:
+  # Training Hyperparameters
+  learning_rate:
+    search_type: "float"
+    min: 0.0001
+    max: 0.01
+    log: true
+  
+  weight_decay:
+    search_type: "float"
+    min: 1e-6
+    max: 1e-2
+    log: true
+  
+  dropout_rate:
+    search_type: "float"
+    min: 0.0
+    max: 0.5
+  
+  # Physics Loss Hyperparameters
+  lambda_phy_loss:
+    search_type: "float"
+    min: 0.1
+    max: 2.0
+  
+  lambda_mask:
+    search_type: "float"
+    min: 0.001
+    max: 0.1
+    log: true
+  
+  lambda_connectivity:
+    search_type: "float"
+    min: 0.001
+    max: 0.1
+    log: true
+  
+  lambda_radiality:
+    search_type: "float"
+    min: 0.001
+    max: 0.1
+    log: true
+  
+  # Loss scaling strategy
+  loss_scaling_strategy:
+    search_type: "categorical"
+    choices: ["fixed", "adaptive", "adaptive_ratio"]
+  
+  normalization_type:
+    search_type: "categorical"
+    choices: ["adaptive", "standard", "robust"]
+  
+  # Batch size optimization
+  batch_size:
+    search_type: "categorical"
+    choices: [32, 64, 128, 256]
+
+# Logging
+wandb: true
+wandb_project: "GCN_HPO_Stage2"

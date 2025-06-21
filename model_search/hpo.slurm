@@ -38,8 +38,8 @@ EOF
 }
 
 # Submit all three jobs
-submit_hpo_job "GAT" "hpo-GAT.yaml"
-submit_hpo_job "GCN" "hpo-GCN.yaml"
-submit_hpo_job "GIN" "hpo-GIN.yaml"
+submit_hpo_job "GAT" "hpo-GAT-stage2.yaml"
+submit_hpo_job "GCN" "hpo-GCN-stage2.yaml"
+submit_hpo_job "GIN" "hpo-GIN-stage2.yaml"
 
 echo "Submitted 3 HPO jobs: GAT, GCN, GIN"
