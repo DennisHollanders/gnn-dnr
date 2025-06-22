@@ -576,15 +576,24 @@ class SimpleHPO:
             return -1.0
     
     def _load_data_once(self):
-        """Load data once during initialization to avoid repeated loading"""
+        """Load data once during initialization with default batch size"""
         try:
             logger.info("Loading data once for all trials...")
+
+            # Use a default batch size for initial data loading
+            # This will be overridden per trial if batch_size is in search_space
+            default_batch_size = self.config.get('batch_size', 128)
+            
+            # If batch_size is in search_space, use a reasonable default
+            if 'batch_size' in self.search_space:
+                default_batch_size = 128  # Safe default
+                logger.info(f"batch_size is tunable, using default {default_batch_size} for initial load")
 
             dataloaders = create_data_loaders(
                 dataset_names=self.config['dataset_names'],
                 folder_names=self.config['folder_names'],
                 dataset_type=self.config.get('dataset_type', 'default'),
-                batch_size=self.config['batch_size'],
+                batch_size=default_batch_size,  # Use default batch size
                 max_nodes=self.config.get('max_nodes', 1000),
                 max_edges=self.config.get('max_edges', 5000),
                 train_ratio=self.config.get('train_ratio', 0.85),
@@ -595,6 +604,7 @@ class SimpleHPO:
             
             self.train_loader = dataloaders.get("train")
             self.val_loader = dataloaders.get("validation")
+            self.default_batch_size = default_batch_size  # Store for reference
             
             if not self.train_loader or not self.val_loader:
                 raise ValueError("Failed to create data loaders")
@@ -609,24 +619,32 @@ class SimpleHPO:
     
     def _create_dynamic_data_loader(self, batch_size: int):
         """Create new data loaders with different batch size if needed"""
-        if batch_size == self.config['batch_size']:
+        # Always create new loaders if batch_size is tunable or different from current
+        current_batch_size = getattr(self, 'default_batch_size', self.config.get('batch_size', 128))
+        
+        if batch_size == current_batch_size and 'batch_size' not in self.search_space:
             return self.train_loader, self.val_loader
         
-        # Create new loaders with different batch size
-        dataloaders = create_data_loaders(
-            dataset_names=self.config['dataset_names'],
-            folder_names=self.config['folder_names'],
-            dataset_type=self.config.get('dataset_type', 'default'),
-            batch_size=batch_size,  
-            max_nodes=self.config.get('max_nodes', 1000),
-            max_edges=self.config.get('max_edges', 5000),
-            train_ratio=self.config.get('train_ratio', 0.85),
-            seed=self.seed,
-            num_workers=self.config.get('num_workers', 0),
-            batching_type=self.config.get('batching_type', 'dynamic'),
-        )
+        # Create new loaders with the specified batch size
+        try:
+            dataloaders = create_data_loaders(
+                dataset_names=self.config['dataset_names'],
+                folder_names=self.config['folder_names'],
+                dataset_type=self.config.get('dataset_type', 'default'),
+                batch_size=batch_size,  
+                max_nodes=self.config.get('max_nodes', 1000),
+                max_edges=self.config.get('max_edges', 5000),
+                train_ratio=self.config.get('train_ratio', 0.85),
+                seed=self.seed,
+                num_workers=self.config.get('num_workers', 0),
+                batching_type=self.config.get('batching_type', 'dynamic'),
+            )
+            
+            return dataloaders.get("train"), dataloaders.get("validation")
         
-        return dataloaders.get("train"), dataloaders.get("validation")
+        except Exception as e:
+            logger.warning(f"Failed to create data loader with batch_size={batch_size}: {e}")
+            return None, None
 
     def _setup_training(self, config: dict):
         """Setup model and criterion (data is already loaded)"""
@@ -634,9 +652,11 @@ class SimpleHPO:
             # Load model
             model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
             model_class = getattr(model_module, config['model_module'])
+
+            batch_size = config.get('batch_size', self.config.get('batch_size', 128))
             
             # Get data loaders 
-            train_loader, val_loader = self._create_dynamic_data_loader(config['batch_size'])
+            train_loader, val_loader = self._create_dynamic_data_loader(batch_size)
             
             if not train_loader or not val_loader:
                 return None, None, None, None
@@ -646,14 +666,13 @@ class SimpleHPO:
                 'edge_input_dim': self.data_sample.edge_attr.shape[1],
             }
 
-            # FIXED: Include ALL possible model parameters
             for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
-                    'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
-                    'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
-                    'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
-                    'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
-                    'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
-                    'loss_scaling_strategy', 'enforce_radiality']:  # Added missing parameters
+                'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
+                'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
+                'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
+                'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
+                'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
+                'loss_scaling_strategy', 'enforce_radiality']:
                 if key in config:
                     model_kwargs[key] = config[key]
 

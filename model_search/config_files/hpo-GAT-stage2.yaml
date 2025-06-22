@@ -69,8 +69,8 @@ search_space:
   
   weight_decay:
     search_type: "float"
-    min: 1e-6
-    max: 1e-2
+    min: 0.000001
+    max: 0.001
     log: true
   
   dropout_rate:
