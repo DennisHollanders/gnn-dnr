@@ -13,7 +13,7 @@ max_nodes: 20000
 max_edges: 50000
 batch_size: 128
 train_ratio: 0.85
-seed: 0
+seed: 1
 num_workers: 0
 
 # Model Configuration (fixed for all trials)
@@ -105,7 +105,7 @@ search_space:
   # Switch Head Architecture
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "attention", "gated_attention"]
+    choices: ["mlp", "attention", "graph_attention"]
   
   switch_head_layers:
     search_type: "int"

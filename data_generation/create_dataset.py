@@ -118,15 +118,15 @@ def parse_arguments():
     
     parser.add_argument('--force_graph_topology', type=str, nargs='*', default=["pp_case33bw"],
                         help='List of specific graph topologies to force include (e.g., ["pp_case33bw", "simbench_1-MV-rural--0-sw"])')
-    parser.add_argument('--dataset_names', type=str, nargs='+', default=["test", "validation"],
+    parser.add_argument('--dataset_names', type=str, nargs='+', default=["test-small", ],
                         help='Names of datasets to create (e.g. --dataset_names test validation)')
-    parser.add_argument('--samples_per_dataset', type=int, nargs='+', default=[1000,1000],
+    parser.add_argument('--samples_per_dataset', type=int, nargs='+', default=[100],
                         help='Number of samples for each dataset (e.g. --samples_per_dataset 100 100)')
 
 
     parser.add_argument('--load_variation_range', type=float, nargs=2, default=[0.7, 1.3],
                         help='Range for load variation in test/val sets ')
-    parser.add_argument('--bus_range_test_val', type=int, nargs=2, default=[30, 230],
+    parser.add_argument('--bus_range_test_val', type=int, nargs=2, default=[3, 30],
                         help='Bus range for test/val sets ')
     parser.add_argument('--require_switches', action='store_true', default=True,
                         help='Require switches in test/val networks')

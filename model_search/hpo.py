@@ -1,5 +1,5 @@
 import argparse
-from typing import final
+from typing import final, Dict, Any
 import yaml
 import torch
 import torch.optim as optim
@@ -23,6 +23,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import threading
 import time
 from functools import partial
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -88,22 +89,22 @@ class HPO:
         self.val_loader = None
         self.data_sample = None
     
-    
     def _init_csv_tracking(self):
         """Initialize CSV file for tracking all trial results"""
         # Create CSV with headers for hyperparameters + metrics
         self.csv_file.touch()
         
     def _log_trial_to_csv(self, trial_num: int, config: dict, metrics: dict):
-        """Thread-safe CSV logging"""
+        """Thread-safe CSV logging - now logs ALL parameters including defaults"""
         with self.csv_lock:
-            # Same implementation as before but with lock
+            # Combine metrics and full config
             row_data = {
                 'trial_number': trial_num,
                 'timestamp': datetime.now().isoformat(),
                 **metrics
             }
             
+            # Add ALL config parameters, including those with default values
             for key, value in config.items():
                 if isinstance(value, list):
                     if not value:
@@ -130,11 +131,14 @@ class HPO:
         """Suggest parameters with FIXED feasibility checks using YAML config"""
         config = self.config.copy()
         config.update(self.fixed_params)
+        
+        # Remove any existing GAT/GIN params to ensure clean slate
         for p in [
             'gat_heads','gat_dropout','gat_v2','gat_edge_dim',
             'gin_layers','gin_hidden_dim','gin_eps'
         ]:
             config.pop(p, None)
+            
         logger.info("\n inside suggest_params \n")
         logger.info("gnn_type: %s", config.get('gnn_type', 'NONE'))
 
@@ -255,7 +259,6 @@ class HPO:
                 config[bool_param] = bool(config[bool_param])
 
         return config
-  
     
     def _suggest_dynamic_list(self, trial: optuna.Trial, param: str, spec: dict) -> list:
         """Handle dynamic list parameters like hidden_dims - constrained to powers of 2"""
@@ -288,38 +291,6 @@ class HPO:
             dims.append(dim)
         
         return dims
-    
-    def _optuna_constraints(self, trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
-        """Constraint function for Optuna sampler"""
-        p = trial.params
-        cons = []
-        
-        # Constraint 1: GAT divisibility
-        if p.get('gnn_type') == 'GAT':
-            gnn_hidden_dim = p.get('gnn_hidden_dim')
-            gat_heads = p.get('gat_heads')
-            if gnn_hidden_dim is not None and gat_heads is not None:
-                remainder = gnn_hidden_dim % gat_heads
-                cons.append(float(remainder)) 
-        
-        # Constraint 2: Switch attention heads divisibility
-        switch_head_type = p.get('switch_head_type', '')
-        if 'attention' in switch_head_type.lower():
-            gnn_hidden_dim = p.get('gnn_hidden_dim')
-            switch_heads = p.get('switch_attention_heads')
-            if gnn_hidden_dim is not None and switch_heads is not None:
-                cons.append(float(gnn_hidden_dim % switch_heads))
-        
-        # Constraint 3: At least one MLP must be enabled
-        use_node_mlp = p.get('use_node_mlp', True)
-        use_edge_mlp = p.get('use_edge_mlp', True)
-        if not use_node_mlp and not use_edge_mlp:
-            cons.append(1.0)  
-        else:
-            cons.append(0.0) 
-        
-        return tuple(cons)
-    
     
     def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
         """Apply comprehensive feasibility constraints with standardized null values"""
@@ -496,473 +467,40 @@ class HPO:
 
         return True
     
-    # def objective(self, trial: optuna.Trial) -> float:
-    #     trial_run = None
-    #     if self.wandb_run:
-    #         trial_run = wandb.init(
-    #             project=self.config.get('wandb_project', 'HPO'),
-    #             group=self.experiment_id, 
-    #             name=f"trial_{trial.number:03d}",
-    #             job_type="hpo_trial",
-    #             tags=[self.study_name, "hpo_trial"],
-    #             config=None, 
-    #             reinit=True
-    #         )
-        
-    #     try:
-    #         config = self.suggest_params(trial)
-            
-    #         if not self._validate_config(config):
-    #             logger.warning(f"Trial {trial.number}: Invalid configuration, pruning")
-    #             if trial_run:
-    #                 wandb.log({"status": "invalid_config"})
-    #                 wandb.finish()
-    #             raise optuna.TrialPruned()
-            
-    #         if trial_run:
-    #             wandb.config.update(config)
-            
-    #         # Create model and data
-    #         model, train_loader, val_loader, criterion = self._setup_training(config)
-    #         if model is None:
-    #             if trial_run:
-    #                 wandb.log({"status": "failed_setup"})
-    #                 wandb.finish()
-    #             return -1.0 
-            
-    #         model_params = sum(p.numel() for p in model.parameters())
-    #         logger.info(f"Trial {trial.number}: Config valid, Model params: {model_params:,}")
-            
-    #         optimizer = optim.Adam(model.parameters(), 
-    #                             lr=config['learning_rate'], 
-    #                             weight_decay=config['weight_decay'])
-
-    #         lambda_dict = {
-    #             'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
-    #             'lambda_mask': config.get('lambda_mask', 0.01),
-    #             'lambda_connectivity': config.get('lambda_connectivity', 0.05),
-    #             'lambda_radiality': config.get('lambda_radiality', 0.05),
-    #             'normalization_type': config.get('normalization_type', 'adaptive'),
-    #             'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
-    #         }
-            
-    #         starting_val_loss = float('inf')
-    #         best_train_loss = float('inf')
-    #         best_val_loss = float('inf')
-    #         best_minority_f1 = 0.0
-    #         best_mcc = -1.0 
-    #         best_balanced_accuracy = 0.0
-        
-    #         patience = 0
-    #         max_epochs = min(config.get('epochs', 100), 80)
-    #         max_patience = config.get('patience', 25)
-            
-    #         print(f"Starting training for {max_epochs} epochs with patience {max_patience}")
-    #         print("config:", config)
-    #         print(f"Lambda dict: {lambda_dict}")  
-            
-    #         for epoch in range(max_epochs):
-    #             train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device, **lambda_dict)
-    #             val_loss, val_dict = test(model, val_loader, criterion, self.device, **lambda_dict)
-                
-    #             if epoch == 0: 
-    #                 starting_val_loss = val_loss
-    #                 starting_train_loss = train_loss
-                    
-    #             print(f"Epoch {epoch+1}/{max_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-    #             if epoch % 5 == 0 or epoch ==0:
-    #                 print(f"\n Epoch {epoch+1}- Train Metrics: {train_dict}\n ")
-    #                 print(f"Epoch {epoch+1} - Val Metrics: {val_dict} \n ")
-                    
-
-    #             current_f1_minority = val_dict.get('test_f1_minority', 0.0)
-    #             current_mcc = val_dict.get('test_mcc', 0.0)
-    #             current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
-                
-    #             if current_mcc > best_mcc:
-    #                 best_mcc = current_mcc
-    #                 best_minority_f1 = current_f1_minority
-    #                 best_balanced_accuracy = current_balanced_accuracy
-    #                 best_train_loss = train_loss
-    #                 best_val_loss = val_loss
-    #                 patience = 0
-    #             else:
-    #                 patience += 1
-
-    #             if trial_run:
-    #                 wandb.log({
-    #                     "epoch": epoch,
-    #                     "train_loss": train_loss,
-    #                     "val_loss": val_loss,
-    #                     "val_f1_minority": current_f1_minority,
-    #                     "val_mcc": current_mcc,
-    #                     "val_balanced_accuracy": current_balanced_accuracy,
-    #                     "patience": patience,
-    #                     **lambda_dict  
-    #                 })
-                
-    #             trial.report(current_mcc, epoch)
-    #             if trial.should_prune() or patience >= max_patience:
-    #                 break
-
-    #         metrics = {
-    #             "starting_val_loss": starting_val_loss,
-    #             "starting_train_loss": starting_train_loss,
-    #             'best_mcc': best_mcc,  
-    #             'best_train_loss': best_train_loss,
-    #             'best_val_loss': best_val_loss,
-    #             "best_f1_minority": best_minority_f1,
-    #             "best_balanced_accuracy": best_balanced_accuracy,
-    #             "final_train_loss": train_loss,
-    #             "final_val_loss" : val_loss,
-    #             "final_f1_minority" : current_f1_minority,
-    #             "final_mcc" : current_mcc,
-    #             "final_balanced_accuracy" : current_balanced_accuracy,
-    #             'final_epoch': epoch,
-    #             'converged': patience < max_patience,
-    #             'model_parameters': model_params,
-    #             'status': 'completed',
-    #             'config_valid': True
-    #         }
-            
-    #         for key, value in metrics.items():
-    #             trial.set_user_attr(key, value)
-
-    #         if trial_run:
-    #             wandb.log(metrics)
-    #             wandb.log({"trial_score": best_mcc})  
-    #             wandb.finish()
-
-    #         self._log_trial_to_csv(trial.number, config, metrics)
-    #         logger.info(f"Trial {trial.number}: MCC={best_mcc:.4f}, Val_Loss={best_val_loss:.4f}, Epoch={epoch}, Params={model_params:,}")
-            
-    #         return best_mcc 
-            
-    #     except optuna.TrialPruned:
-    #         pruned_metrics = {
-    #             "starting_val_loss": float('inf'),
-    #             "starting_train_loss": float('inf'),
-    #             'best_mcc': 0.0,  
-    #             "best_f1_minority": 0.0,
-    #             "best_balanced_accuracy": 0.0,
-    #             'best_train_loss': float('inf'),
-    #             'best_val_loss': float('inf'),
-    #             'final_train_loss': float('inf'),
-    #             'final_val_loss': float('inf'),
-    #             'final_f1_minority': 0.0,
-    #             'final_mcc': 0.0,  
-    #             'final_balanced_accuracy': 0.0,
-    #             'final_epoch': 0,
-    #             'converged': False,
-    #             'model_parameters': 0,
-    #             'status': 'pruned',
-    #             'config_valid': True
-    #         }
-            
-    #         if trial_run:
-    #             wandb.log(pruned_metrics)
-    #             wandb.finish()
-            
-    #         self._log_trial_to_csv(trial.number, self.suggest_params(trial), pruned_metrics)
-    #         logger.info(f"Trial {trial.number}: Pruned")
-    #         raise
-            
-    #     except Exception as e:
-    #         logger.error(f"Trial {trial.number} failed: {e}")
-    #         return -1.0
-    
-    def _load_data_once(self):
-        """Load data once during initialization with default batch size"""
-        try:
-            logger.info("Loading data once for all trials...")
-
-            # Use a default batch size for initial data loading
-            # This will be overridden per trial if batch_size is in search_space
-            default_batch_size = self.config.get('batch_size', 128)
-            
-            # If batch_size is in search_space, use a reasonable default
-            if 'batch_size' in self.search_space:
-                default_batch_size = 128  # Safe default
-                logger.info(f"batch_size is tunable, using default {default_batch_size} for initial load")
-
-            dataloaders = create_data_loaders(
-                dataset_names=self.config['dataset_names'],
-                folder_names=self.config['folder_names'],
-                dataset_type=self.config.get('dataset_type', 'default'),
-                batch_size=default_batch_size,  # Use default batch size
-                max_nodes=self.config.get('max_nodes', 1000),
-                max_edges=self.config.get('max_edges', 5000),
-                train_ratio=self.config.get('train_ratio', 0.85),
-                seed=self.seed,
-                num_workers=self.config.get('num_workers', 0),
-                batching_type=self.config.get('batching_type', 'dynamic'),
-            )
-            
-            self.train_loader = dataloaders.get("train")
-            self.val_loader = dataloaders.get("validation")
-            self.default_batch_size = default_batch_size  # Store for reference
-            
-            if not self.train_loader or not self.val_loader:
-                raise ValueError("Failed to create data loaders")
-            
-            self.data_sample = self.train_loader.dataset[0]
-            
-            logger.info(f"Data loaded successfully: {len(self.train_loader)} train batches, {len(self.val_loader)} val batches")
-            
-        except Exception as e:
-            logger.error(f"Failed to load data: {e}")
-            raise
-    
-    def _create_dynamic_data_loader(self, batch_size: int):
-        """Create new data loaders with different batch size if needed"""
-        # Always create new loaders if batch_size is tunable or different from current
-        current_batch_size = getattr(self, 'default_batch_size', self.config.get('batch_size', 128))
-        
-        if batch_size == current_batch_size and 'batch_size' not in self.search_space:
-            return self.train_loader, self.val_loader
-        
-        # Create new loaders with the specified batch size
-        try:
-            dataloaders = create_data_loaders(
-                dataset_names=self.config['dataset_names'],
-                folder_names=self.config['folder_names'],
-                dataset_type=self.config.get('dataset_type', 'default'),
-                batch_size=batch_size,  
-                max_nodes=self.config.get('max_nodes', 1000),
-                max_edges=self.config.get('max_edges', 5000),
-                train_ratio=self.config.get('train_ratio', 0.85),
-                seed=self.seed,
-                num_workers=self.config.get('num_workers', 0),
-                batching_type=self.config.get('batching_type', 'dynamic'),
-            )
-            
-            return dataloaders.get("train"), dataloaders.get("validation")
-        
-        except Exception as e:
-            logger.warning(f"Failed to create data loader with batch_size={batch_size}: {e}")
-            return None, None
-
-    def _setup_training_worker(self, config: dict, device):
-        """Setup training for a worker process"""
-        try:
-            # Load model
-            model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
-            model_class = getattr(model_module, config['model_module'])
-
-            # Create data loaders for this worker - batch_size comes from config/search_space
-            batch_size = config.get('batch_size', self.config.get('batch_size', 128))
-            dataloaders = create_data_loaders(
-                dataset_names=config['dataset_names'],
-                folder_names=config['folder_names'],
-                dataset_type=config.get('dataset_type', 'default'),
-                batch_size=batch_size,
-                max_nodes=config.get('max_nodes', 1000),
-                max_edges=config.get('max_edges', 5000),
-                train_ratio=config.get('train_ratio', 0.85),
-                seed=self.seed,
-                num_workers=0,  # Set to 0 for multiprocessing
-                batching_type=config.get('batching_type', 'dynamic'),
-            )
-            
-            train_loader = dataloaders.get("train")
-            val_loader = dataloaders.get("validation")
-            
-            if not train_loader or not val_loader:
-                return None, None, None, None
-
-            data_sample = train_loader.dataset[0]
-            
-            model_kwargs = {
-                'node_input_dim': data_sample.x.shape[1],
-                'edge_input_dim': data_sample.edge_attr.shape[1],
-            }
-
-            # Add model parameters from config
-            for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
-                'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
-                'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
-                'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
-                'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
-                'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
-                'loss_scaling_strategy', 'enforce_radiality']:
-                if key in config:
-                    value = config[key]
-                    
-                    # Skip empty lists or zero values for optional parameters
-                    if key == 'node_hidden_dims' and (not value or value == []):
-                        if config.get('use_node_mlp', True):
-                            model_kwargs[key] = [128]  # Default fallback
-                        else:
-                            continue  # Skip if node MLP is disabled
-                    elif key == 'edge_hidden_dims' and (not value or value == []):
-                        if config.get('use_edge_mlp', True):
-                            model_kwargs[key] = [128]  # Default fallback
-                        else:
-                            continue  # Skip if edge MLP is disabled
-                    elif key in ['gat_heads', 'gat_dropout', 'gin_eps', 'gin_mlp_layers', 
-                                'switch_attention_heads', 'phyr_k_ratio'] and value == 0:
-                        continue
-                    elif key == 'gin_train_eps' and not config.get('gnn_type') == 'GIN':
-                        continue
-                    elif key == 'gnn_hidden_dim' and value == 0:
-                        continue  # Skip if no GNN
-                    else:
-                        model_kwargs[key] = value
-            
-            model = model_class(**model_kwargs).to(device)
-
-            # Setup criterion
-            criterion_name = config.get('criterion_name', 'MSELoss')
-            if criterion_name == "WeightedBCELoss":
-                criterion = WeightedBCELoss(pos_weight=2.0)
-            elif criterion_name == "FocalLoss":
-                criterion = FocalLoss(alpha=1.0, gamma=2.0)
-            elif criterion_name == "MSELoss":
-                criterion = nn.MSELoss()
-            elif criterion_name == "CrossEntropyLoss":
-                criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = getattr(nn, criterion_name)()
-            
-            return model, train_loader, val_loader, criterion
-            
-        except Exception as e:
-            logger.error(f"Setup failed: {e}")
-            return None, None, None, None
-    
-    def create_parallel_plot(self, study: optuna.Study) -> go.Figure:
-        """Create parallel coordinates plot with robust CSV handling"""
-        try:
-            if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
-                try:
-                    df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
-                    df = df[df['status'] == 'completed'].sort_values('best_mcc', ascending=False)  # Changed: Sort by MCC
-                    
-                    if len(df) >= 5:
-                        return self._create_plot_from_dataframe(df)
-                except Exception as e:
-                    logger.warning(f"Could not read CSV for plotting: {e}")
-        except Exception:
-            pass
- 
-        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-        
-        if len(completed_trials) < 5:
-            return None
-        
-
-        data = []
-        for trial in completed_trials:
-            row = trial.params.copy()
-            for key, value in row.items():
-                if isinstance(value, list):
-                    row[key] = str(value)
-            row['best_mcc'] = trial.user_attrs.get('best_mcc', trial.value)
-            row['Trial'] = trial.number
-            data.append(row)
-        
-        df = pd.DataFrame(data).sort_values('best_mcc', ascending=False)
-        return self._create_plot_from_dataframe(df, eval_metric='best_mcc') 
-    
-    def _create_plot_from_dataframe(self, df: pd.DataFrame, eval_metric: str = 'best_mcc') -> go.Figure:
-        """Create parallel coordinates plot from DataFrame"""
-
-        dimensions = [
-            dict(label=eval_metric, values=df[eval_metric], 
-                 range=[df[eval_metric].min(), df[eval_metric].max()])
-        ]
-        
-        for metric in ['best_val_loss', 'final_epoch']:
-            if metric in df.columns and df[metric].notna().any():
-                dimensions.append(dict(
-                    label=metric.replace('_', ' ').title(),
-                    values=df[metric],
-                    range=[df[metric].min(), df[metric].max()]
-                ))
-        
-        # Add hyperparameters 
-        exclude_cols = {'trial_number', 'timestamp', 'best_f1_score', 'best_train_loss', 
-                       'best_val_loss', 'final_train_loss', 'final_val_loss', 'final_precision',
-                       'final_recall', 'final_accuracy', 'final_epoch', 'converged', "starting_val_loss",
-                       'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score',
-                       'best_mcc', 'final_mcc', 'best_f1_minority', 'final_f1_minority', 
-                       'best_balanced_accuracy', 'final_balanced_accuracy'}
-        
-        param_cols = [col for col in df.columns if col not in exclude_cols]
-        
-        for col in param_cols:
-            if df[col].dtype in ['object', 'string'] or col.startswith('n_') or 'hidden_dims' in col:
-                unique_vals = df[col].unique()
-                if len(unique_vals) > 1: 
-                    processed_vals = []
-                    for val in df[col]:
-                        if isinstance(val, str) and ('[' in val or 'True' in val or 'False' in val):
-                            processed_vals.append(str(val)[:20] + '...' if len(str(val)) > 20 else str(val))
-                        else:
-                            processed_vals.append(str(val))
-                    
-                    unique_processed = list(set(processed_vals))
-                    val_map = {val: i for i, val in enumerate(unique_processed)}
-                    
-                    dimensions.append(dict(
-                        label=col,
-                        values=[val_map.get(pv, 0) for pv in processed_vals],
-                        tickvals=list(range(len(unique_processed))),
-                        ticktext=unique_processed
-                    ))
-            else:
-                # Numerical parameter
-                if df[col].nunique() > 1:  
-                    dimensions.append(dict(
-                        label=col,
-                        values=df[col],
-                        range=[df[col].min(), df[col].max()]
-                    ))
-        
-
-        fig = go.Figure(data=go.Parcoords(
-            line=dict(color=df[eval_metric], colorscale='Viridis', showscale=True,
-                     colorbar=dict(title="MCC Score")), 
-            dimensions=dimensions
-        ))
-        
-        fig.update_layout(
-            title=f"HPO Results: {self.study_name} ({len(df)} completed trials)",
-            height=600,
-            font=dict(size=10)
-        )
-        
-        return fig
-    
     def run_parallel_batch(self, study: optuna.Study, batch_size: int = None) -> list:
-        """Run a batch of trials in parallel"""
+        """Run a batch of trials in parallel - FIXED version"""
         if batch_size is None:
             batch_size = self.n_parallel
         
-        # Generate batch of trials
-        trials = []
+        # Generate batch of trials with complete configs
+        trials_with_configs = []
         for _ in range(batch_size):
             trial = study.ask()
-            trials.append(trial)
+            # Generate complete config including defaults HERE in main process
+            complete_config = self.suggest_params(trial)
+            trials_with_configs.append((trial, complete_config))
         
         # Run trials in parallel
         with ProcessPoolExecutor(max_workers=self.n_parallel) as executor:
-            # Submit all trials
+            # Submit all trials with their complete configs
             future_to_trial = {}
-            for trial in trials:
+            for trial, config in trials_with_configs:
                 future = executor.submit(
                     _trial_worker,
-                    str(self.config_path),      # picklable
-                    self.study_name,           # picklable
-                    trial,
-                    trial.params
+                    str(self.config_path),      
+                    self.study_name,           
+                    trial._trial_id,           # Pass trial ID instead of trial object
+                    config,                    # Pass the complete config
+                    self.seed,
+                    self.config,
+                    self.fixed_params
                 )
-                future_to_trial[future] = trial
+                future_to_trial[future] = (trial, config)
             
             # Collect results as they complete
             results = []
             for future in as_completed(future_to_trial):
-                trial = future_to_trial[future]
+                trial, config = future_to_trial[future]
                 try:
                     result = future.result()
                     results.append((trial, result))
@@ -970,8 +508,12 @@ class HPO:
                     # Tell study about the completed trial
                     study.tell(trial, result['objective_value'], state=optuna.trial.TrialState.COMPLETE)
                     
-                    # Log to CSV
-                    self._log_trial_to_csv(trial._trial_id, trial.params, result['metrics'])
+                    # Update trial user attributes with metrics
+                    for key, value in result['metrics'].items():
+                        trial.set_user_attr(key, value)
+                    
+                    # Log to CSV with the COMPLETE config that was actually used
+                    self._log_trial_to_csv(trial._trial_id, config, result['metrics'])
                     
                 except Exception as e:
                     logger.error(f"Trial {trial._trial_id} failed: {e}")
@@ -980,83 +522,9 @@ class HPO:
         
         return results
 
-    def _run_single_trial(self, trial: int, params: dict) -> dict:
-        """Run a single trial - this runs in a separate process"""
-        logger.info("inside trial")
-        try:
-            # Set device for this worker
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
-            # Load data for this worker 
-            config = self.config.copy()
-            config.update(self.fixed_params)
-            config = self.suggest_params(trial)
-            
-            # Validate config
-            if not self._validate_config(config):
-                return {'objective_value': float('-inf'), 'metrics': {'status': 'invalid_config'}}
-            
-            # Setup training
-            model, train_loader, val_loader, criterion = self._setup_training_worker(config, device)
-            if model is None:
-                return {'objective_value': float('-inf'), 'metrics': {'status': 'failed_setup'}}
-            
-            model_params = sum(p.numel() for p in model.parameters())
-            
-            optimizer = optim.Adam(model.parameters(), 
-                                 lr=config['learning_rate'], 
-                                 weight_decay=config['weight_decay'])
-
-            lambda_dict = {
-                'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
-                'lambda_mask': config.get('lambda_mask', 0.01),
-                'lambda_connectivity': config.get('lambda_connectivity', 0.05),
-                'lambda_radiality': config.get('lambda_radiality', 0.05),
-                'normalization_type': config.get('normalization_type', 'adaptive'),
-                'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
-            }
-            
-            # Training loop with early stopping
-            best_mcc = -1.0
-            best_val_loss = float('inf')
-            patience = 0
-            max_epochs = min(config.get('epochs', 100), 80)
-            max_patience = config.get('patience', 25)
-            
-            for epoch in range(max_epochs):
-                train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
-                val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
-                
-                current_mcc = val_dict.get('test_mcc', 0.0)
-                
-                if current_mcc > best_mcc:
-                    best_mcc = current_mcc
-                    best_val_loss = val_loss
-                    patience = 0
-                else:
-                    patience += 1
-                
-                # Early stopping
-                if patience >= max_patience:
-                    break
-            
-            metrics = {
-                'best_mcc': best_mcc,
-                'best_val_loss': best_val_loss,
-                'final_epoch': epoch,
-                'model_parameters': model_params,
-                'status': 'completed'
-            }
-            
-            return {'objective_value': best_mcc, 'metrics': metrics}
-            
-        except Exception as e:
-            logger.error(f"Trial {trial._trial_id} failed: {e}")
-            return {'objective_value': float('-inf'), 'metrics': {'status': 'failed', 'error': str(e)}}
-        
     def run_async_optimization(self, n_trials: int = 100, use_wandb: bool = False):
         """Run asynchronous parallel optimization"""
-        batch_size = self.n_parallel  # Use n_parallel for batch processing, not data batch_size
+        batch_size = self.n_parallel  
 
         if use_wandb:
             self.wandb_run = wandb.init(
@@ -1217,9 +685,286 @@ class HPO:
                 epoch = trial.user_attrs.get('final_epoch', 'N/A')
                 logger.info(f"  Trial {trial.number}: MCC={mcc:.4f}, Val_Loss={val_loss}, Epoch={epoch}")
 
-def _trial_worker(config_path: str, study_name: str, trial: int, params: dict) -> dict:
-        hpo = HPO(Path(config_path), study_name)
-        return hpo._run_single_trial(trial, params)
+    def create_parallel_plot(self, study: optuna.Study) -> go.Figure:
+        """Create parallel coordinates plot with robust CSV handling"""
+        try:
+            if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
+                try:
+                    df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
+                    df = df[df['status'] == 'completed'].sort_values('best_mcc', ascending=False)  
+                    
+                    if len(df) >= 5:
+                        return self._create_plot_from_dataframe(df)
+                except Exception as e:
+                    logger.warning(f"Could not read CSV for plotting: {e}")
+        except Exception:
+            pass
+ 
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        if len(completed_trials) < 5:
+            return None
+        
+        data = []
+        for trial in completed_trials:
+            row = trial.params.copy()
+            for key, value in row.items():
+                if isinstance(value, list):
+                    row[key] = str(value)
+            row['best_mcc'] = trial.user_attrs.get('best_mcc', trial.value)
+            row['Trial'] = trial.number
+            data.append(row)
+        
+        df = pd.DataFrame(data).sort_values('best_mcc', ascending=False)
+        return self._create_plot_from_dataframe(df, eval_metric='best_mcc') 
+    
+    def _create_plot_from_dataframe(self, df: pd.DataFrame, eval_metric: str = 'best_mcc') -> go.Figure:
+        """Create parallel coordinates plot from DataFrame"""
+
+        dimensions = [
+            dict(label=eval_metric, values=df[eval_metric], 
+                 range=[df[eval_metric].min(), df[eval_metric].max()])
+        ]
+        
+        for metric in ['best_val_loss', 'final_epoch']:
+            if metric in df.columns and df[metric].notna().any():
+                dimensions.append(dict(
+                    label=metric.replace('_', ' ').title(),
+                    values=df[metric],
+                    range=[df[metric].min(), df[metric].max()]
+                ))
+        
+        # Add hyperparameters 
+        exclude_cols = {'trial_number', 'timestamp', 'best_f1_score', 'best_train_loss', 
+                       'best_val_loss', 'final_train_loss', 'final_val_loss', 'final_precision',
+                       'final_recall', 'final_accuracy', 'final_epoch', 'converged', "starting_val_loss",
+                       'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score',
+                       'best_mcc', 'final_mcc', 'best_f1_minority', 'final_f1_minority', 
+                       'best_balanced_accuracy', 'final_balanced_accuracy'}
+        
+        param_cols = [col for col in df.columns if col not in exclude_cols]
+        
+        for col in param_cols:
+            if df[col].dtype in ['object', 'string'] or col.startswith('n_') or 'hidden_dims' in col:
+                unique_vals = df[col].unique()
+                if len(unique_vals) > 1: 
+                    processed_vals = []
+                    for val in df[col]:
+                        if isinstance(val, str) and ('[' in val or 'True' in val or 'False' in val):
+                            processed_vals.append(str(val)[:20] + '...' if len(str(val)) > 20 else str(val))
+                        else:
+                            processed_vals.append(str(val))
+                    
+                    unique_processed = list(set(processed_vals))
+                    val_map = {val: i for i, val in enumerate(unique_processed)}
+                    
+                    dimensions.append(dict(
+                        label=col,
+                        values=[val_map.get(pv, 0) for pv in processed_vals],
+                        tickvals=list(range(len(unique_processed))),
+                        ticktext=unique_processed
+                    ))
+            else:
+                # Numerical parameter
+                if df[col].nunique() > 1:  
+                    dimensions.append(dict(
+                        label=col,
+                        values=df[col],
+                        range=[df[col].min(), df[col].max()]
+                    ))
+        
+        fig = go.Figure(data=go.Parcoords(
+            line=dict(color=df[eval_metric], colorscale='Viridis', showscale=True,
+                     colorbar=dict(title="MCC Score")), 
+            dimensions=dimensions
+        ))
+        
+        fig.update_layout(
+            title=f"HPO Results: {self.study_name} ({len(df)} completed trials)",
+            height=600,
+            font=dict(size=10)
+        )
+        
+        return fig
+
+
+def _trial_worker(config_path: str, study_name: str, trial_id: int, 
+                  complete_config: Dict[str, Any], seed: int, 
+                  base_config: dict, fixed_params: dict) -> dict:
+    """Worker function that runs in separate process - receives complete config"""
+    try:
+        # Set device for this worker
+        if torch.cuda.is_available():
+            # Assign GPU based on worker ID to avoid conflicts
+            gpu_id = trial_id % torch.cuda.device_count()
+            device = torch.device(f"cuda:{gpu_id}")
+            torch.cuda.set_device(gpu_id)
+        else:
+            device = torch.device("cpu")
+        
+        # The config is already complete with all defaults applied
+        config = complete_config
+        
+        # Load model module
+        model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
+        model_class = getattr(model_module, config['model_module'])
+        
+        # Create data loaders for this worker
+        batch_size = config.get('batch_size', 128)
+        dataloaders = create_data_loaders(
+            dataset_names=config.get('dataset_names', base_config['dataset_names']),
+            folder_names=config.get('folder_names', base_config['folder_names']),
+            dataset_type=config.get('dataset_type', 'default'),
+            batch_size=batch_size,
+            max_nodes=config.get('max_nodes', 1000),
+            max_edges=config.get('max_edges', 5000),
+            train_ratio=config.get('train_ratio', 0.85),
+            seed=seed,
+            num_workers=0,  # Important: Set to 0 for multiprocessing
+            batching_type=config.get('batching_type', 'dynamic'),
+        )
+        
+        train_loader = dataloaders.get("train")
+        val_loader = dataloaders.get("validation")
+        
+        if not train_loader or not val_loader:
+            return {'objective_value': float('-inf'), 'metrics': {'status': 'failed_data_loading'}}
+
+        data_sample = train_loader.dataset[0]
+        
+        # Build model kwargs
+        model_kwargs = {
+            'node_input_dim': data_sample.x.shape[1],
+            'edge_input_dim': data_sample.edge_attr.shape[1],
+        }
+
+        # Add all model parameters from config
+        for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
+            'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
+            'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
+            'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
+            'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
+            'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
+            'loss_scaling_strategy', 'enforce_radiality']:
+            if key in config:
+                value = config[key]
+                
+                # Skip empty lists or zero values for optional parameters
+                if key == 'node_hidden_dims' and (not value or value == []):
+                    if config.get('use_node_mlp', True):
+                        model_kwargs[key] = [128]  # Default fallback
+                    else:
+                        continue  
+                elif key == 'edge_hidden_dims' and (not value or value == []):
+                    if config.get('use_edge_mlp', True):
+                        model_kwargs[key] = [128]  # Default fallback
+                    else:
+                        continue  
+                elif key in ['gat_heads', 'gat_dropout', 'gin_eps', 'gin_mlp_layers', 
+                            'switch_attention_heads', 'phyr_k_ratio'] and value == 0:
+                    continue
+                elif key == 'gin_train_eps' and not config.get('gnn_type') == 'GIN':
+                    continue
+                elif key == 'gnn_hidden_dim' and value == 0:
+                    continue  
+                else:
+                    model_kwargs[key] = value
+        
+        model = model_class(**model_kwargs).to(device)
+        model_params = sum(p.numel() for p in model.parameters())
+
+        # Setup criterion
+        criterion_name = config.get('criterion_name', 'MSELoss')
+        if criterion_name == "WeightedBCELoss":
+            criterion = WeightedBCELoss(pos_weight=2.0)
+        elif criterion_name == "FocalLoss":
+            criterion = FocalLoss(alpha=1.0, gamma=2.0)
+        elif criterion_name == "MSELoss":
+            criterion = nn.MSELoss()
+        elif criterion_name == "CrossEntropyLoss":
+            criterion = nn.CrossEntropyLoss()
+        else:
+            criterion = getattr(nn, criterion_name)()
+        
+        optimizer = optim.Adam(model.parameters(), 
+                             lr=config['learning_rate'], 
+                             weight_decay=config['weight_decay'])
+
+        lambda_dict = {
+            'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
+            'lambda_mask': config.get('lambda_mask', 0.01),
+            'lambda_connectivity': config.get('lambda_connectivity', 0.05),
+            'lambda_radiality': config.get('lambda_radiality', 0.05),
+            'normalization_type': config.get('normalization_type', 'adaptive'),
+            'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
+        }
+        
+        # Training loop
+        starting_val_loss = float('inf')
+        starting_train_loss = float('inf')
+        best_train_loss = float('inf')
+        best_val_loss = float('inf')
+        best_minority_f1 = 0.0
+        best_mcc = -1.0 
+        best_balanced_accuracy = 0.0
+        patience = 0
+        max_epochs = min(config.get('epochs', 100), 80)
+        max_patience = config.get('patience', 25)
+        
+        for epoch in range(max_epochs):
+            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
+            val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
+            
+            if epoch == 0: 
+                starting_val_loss = val_loss
+                starting_train_loss = train_loss
+                
+            current_f1_minority = val_dict.get('test_f1_minority', 0.0)
+            current_mcc = val_dict.get('test_mcc', 0.0)
+            current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
+            
+            if current_mcc > best_mcc:
+                best_mcc = current_mcc
+                best_minority_f1 = current_f1_minority
+                best_balanced_accuracy = current_balanced_accuracy
+                best_train_loss = train_loss
+                best_val_loss = val_loss
+                patience = 0
+            else:
+                patience += 1
+            
+            # Early stopping
+            if patience >= max_patience:
+                break
+        
+        metrics = {
+            "starting_val_loss": starting_val_loss,
+            "starting_train_loss": starting_train_loss,
+            'best_mcc': best_mcc,
+            'best_train_loss': best_train_loss,
+            'best_val_loss': best_val_loss,
+            "best_f1_minority": best_minority_f1,
+            "best_balanced_accuracy": best_balanced_accuracy,
+            "final_train_loss": train_loss,
+            "final_val_loss" : val_loss,
+            "final_f1_minority" : current_f1_minority,
+            "final_mcc" : current_mcc,
+            "final_balanced_accuracy" : current_balanced_accuracy,
+            'final_epoch': epoch,
+            'converged': patience < max_patience,
+            'model_parameters': model_params,
+            'status': 'completed',
+            'config_valid': True
+        }
+        
+        return {'objective_value': best_mcc, 'metrics': metrics}
+        
+    except Exception as e:
+        logger.error(f"Trial {trial_id} failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'objective_value': float('-inf'), 'metrics': {'status': 'failed', 'error': str(e)}}
+
 
 def main():
     parser = argparse.ArgumentParser(description="Simplified HPO")

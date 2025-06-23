@@ -105,7 +105,7 @@ search_space:
   # Switch Head Architecture
   switch_head_type:
     search_type: "categorical"
-    choices: ["mlp", "attention", "gated_attention"]
+    choices: ["mlp", "attention", "graph_attention"]
   
   switch_head_layers:
     search_type: "int"

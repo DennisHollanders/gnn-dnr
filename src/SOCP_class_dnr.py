@@ -201,7 +201,9 @@ class SOCP_class:
                 s_max_pu = s_max_mva_thermal / (self.S_base_VA / 1e6) 
                 self.bigM[l_idx] = s_max_pu 
             else:
-                max_total_system_load_pu = sum(abs(p) for p in self.bus_p_inj.values()) 
+                max_total_system_load_pu = sum(abs(p) for p in self.bus_p_inj.values())  
+                if max_total_system_load_pu > 1000:
+                    max_total_system_load_pu /=  S_base_MVA
                 self.bigM[l_idx] = max_total_system_load_pu if max_total_system_load_pu > 0 else 10.0
         self.logger.info(f"bigM values: max {max(self.bigM.values()):.3f}, min {min(self.bigM.values()):.3f}")
         self.logger.info("Initialisation finished (%d buses, %d lines)",len(self.bus_df), len(self.line_df))
