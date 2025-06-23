@@ -1,0 +1,74 @@
+description: "Train MLP"
+
+job_name: "cvx_test"
+# Data
+dataset_names: ["train",
+                  "validation",
+                  "test"]
+folder_names: 
+  -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
+  -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
+  -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
+# - "data\\split_datasets\\train"
+# - "data\\split_datasets\\validation"
+# - "data\\split_datasets\\test"
+# Model
+model_module: "cvx"
+
+criterion_name: "FocalLoss"
+track_gradients: true 
+detailed_tracking: true
+gradient_check_epochs: [0,1,2,5,10]
+
+model_kwargs:
+  hidden_dims: [1024,512,256,128,64,]
+  latent_dim: 8
+  activation: "relu"
+  dropout_rate: 0.0
+  batch_norm: false
+  residual_connections: false
+  use_bias: true
+  weight_init: "xavier_uniform"
+  bias_init: "zeros"
+  cvx_layer: None
+  edge_input_dim: 0
+  node_input_dim: 0 
+  
+  # GNN Configuratio
+  gnn_type: "GAT"  # "GCN", "GAT", "GIN", or None
+  gnn_layers: 2
+  gnn_hidden_dim: 64
+  gat_heads:  4
+  gat_dropout: 0.1
+  gin_eps:  0.0
+  # MLP Configuration
+  use_node_mlp: True
+  use_edge_mlp: True
+  node_hidden_dims:  [64, 32]
+  edge_hidden_dims:  [64, 32]
+  # General Configuration
+  activation:  "relu"
+  dropout_rate: 0.1
+  use_batch_norm:  True
+  use_residual:  False
+  pooling:  "add"  # "mean", "max", "add", "attention"'
+
+batch_size: 1
+learning_rate: 0.001
+weight_decay: 0.00005
+
+epochs: 100
+patience: 10
+hp_search: false
+hp_search_n_trials: 50
+wandb: False
+config: config-cvx.yaml
+evaluate_every_x_epoch: 5
+dataset_type: "cvx"
+# Data Loading Configuration
+batching_type: "standard"
+max_nodes: 32000
+max_edges: 35000
+train_ratio: 0.85
+seed: 0
+num_workers: 0

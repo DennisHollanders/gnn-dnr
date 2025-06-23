@@ -1,0 +1,57 @@
+trial_number: 151
+description: GNN Models
+job_name: GAT-stage2-hyperparameter-tuning
+dataset_names:
+- train
+- validation
+- test
+folder_names:
+- "data\\split_datasets\\train"
+- "data\\split_datasets\\validation"
+- "data\\split_datasets\\test"
+dataset_type: default
+batching_type: dynamic
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 0
+model_module: AdvancedMLP
+wandb: true
+wandb_project: GAT_HPO_Stage2
+epochs: 200
+patience: 25
+criterion_name: FocalLoss
+learning_rate: 0.002884250393356107
+weight_decay: 1.1728312286758137e-06
+batch_size: 5
+model_kwargs:
+  model_parameters: 2832024
+  output_type: multiclass
+  num_classes: 2
+  gnn_type: GAT
+  gnn_layers: 2
+  gat_heads: 2
+  gnn_hidden_dim: 384
+  use_node_mlp: false
+  use_edge_mlp: true
+  edge_hidden_dims:
+  - 64
+  switch_head_type: mlp
+  switch_head_layers: 2
+  activation: leaky_relu
+  use_batch_norm: true
+  use_residual: true
+  use_skip_connections: true
+  pooling: add
+  use_gated_mp: true
+  use_phyr: false
+  enforce_radiality: false
+  dropout_rate: 0.045509536210371286
+  gat_dropout: 0.0934906942320373
+  lambda_phy_loss: 0.9499668648916252
+  lambda_mask: 0.043667370825053335
+  lambda_connectivity: 0.0323415973633699
+  lambda_radiality: 0.004979170693833894
+  loss_scaling_strategy: adaptive
+  normalization_type: standard

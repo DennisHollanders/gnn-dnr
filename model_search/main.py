@@ -13,7 +13,8 @@ import importlib
 import sys
 import logging
 
-from zmq import has 
+from torch.utils.tensorboard import SummaryWriter
+
 
 console = logging.StreamHandler(sys.stdout)
 console.setFormatter(logging.Formatter("%(message)s"))   
@@ -115,11 +116,9 @@ def main():
     # Get the model class from the imported module
     model_class = getattr(model_module, args.model_module)
     print(f"Successfully imported model: {args.model_module}")
-    
-    project_description = args.description if args.description else DEFAULT_DESCRIPTION
 
     if args.wandb:
-        run = wandb.init(project=project_description, job_type="train", config=vars(args))
+        run = wandb.init(project=args.description, job_type="train", config=vars(args))
         args.job_name = run.name    
 
     # Save the configuration file in the model folder's config_files subdirectory.
@@ -177,7 +176,7 @@ def main():
 
     model = model_class(**model_kwargs)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     best_loss = float("inf")
     patience = 0
@@ -211,53 +210,20 @@ def main():
         else:
             criterion = getattr(nn, args.criterion_name)()
 
-    # if hasattr(args, 'track_gradients') and args.track_gradients:
-    #     track_gradients = args.track_gradients
-    #     detailed_tracking = args.detailed_tracking 
-    #     gradient_check_epochs = args.gradient_check_epochs
-    # else: 
-    #     track_gradients = False
-    data = next(iter(train_loader))
-    
-    # print(f"Before batching fix:")
-    # print(f"  Graph: {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
-    # print(f"  CVX_N: {data.cvx_N.item()}, CVX_E: {data.cvx_E.item()}")
-    
-    # from cvx_infeasibility_analysis import fix_cvx_infeasibility
-    # data, validation = fix_cvx_infeasibility(data)
-    
-    # print(f"After fix:")
-
-    # print(f"  CVX_N: {data.cvx_N.item()}, CVX_E: {data.cvx_E.item()}")
-    # print(f"  Validation: {validation}")
-
-    # if track_gradients:
-    #     gradient_tracker = GradientFlowTracker(model, track_detailed=detailed_tracking,)
-    #     gradient_tracker.register_hooks()
-    #     logger.info(f"Gradient tracking enabled for model {args.model_module} with job name {args.job_name}")
-
     lambda_dict = { 'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
                     'lambda_mask': getattr(args, 'lambda_mask', 0.01),
                     "lambda_connectivity": getattr(args, 'lambda_connectivity', 0.05),
                     "lambda_radiality": getattr(args, 'lambda_radiality', 0.05),
                     "loss_scaling_strategy": getattr(args, 'loss_scaling_strategy', 'adaptive_ratio'),
                      "normalization_type": getattr(args, 'normalization_type', 'none'),}
-
+    writer = SummaryWriter(log_dir="runs/grad_debug")
+    global_step = 0 
     for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
-        train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict)
+        train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict, writer=writer, global_step=global_step)
         val_loss, val_dict      = test(model, validation_loader, criterion, device,**lambda_dict)
         total_grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
         logger.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Total Grad Norm: {total_grad_norm:.6f}")
 
-        # if track_gradients and epoch % gradient_check_epochs == 0:
-    
-        # if total_grad_norm < 1e-6:
-        #     print("🚨 GRADIENTS TOO SMALL - model not learning!")
-        # elif train_dict.get('train_accuracy', 0) > 0.1:
-        #     print("✅ Model is learning!")
-        # else:
-        #     print("⚠️  Model learning slowly")
-        # logger.info(f"Epoch {epoch}/{args.epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
         if epoch % 5 == 0 or epoch == args.epochs - 1:
             logger.info(f"\n Epoch {epoch+1}/{args.epochs} - Train Metrics: {train_dict}\n ")
             logger.info(f"Epoch {epoch+1}/{args.epochs} - Val Metrics: {val_dict} \n ")
@@ -266,7 +232,6 @@ def main():
         
         if args.wandb:
             wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
-        #logger.info(f"                                              valloss: {val_loss:.4f} -  patience: {patience} - best_loss: {best_loss:.4f}")
         if val_loss < best_loss:
             best_loss = val_loss
             patience = 0

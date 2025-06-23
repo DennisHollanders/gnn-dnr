@@ -645,7 +645,7 @@ class AdvancedMLP(nn.Module):
                  node_input_dim: int,
                  edge_input_dim: int,
                  # Output Configuration
-                 output_type: str = "mutliclass",  
+                 output_type: str = "multiclass",  
                  num_classes: int = 2,
                  # GNN Configuration
                  gnn_type: Optional[str] = None,

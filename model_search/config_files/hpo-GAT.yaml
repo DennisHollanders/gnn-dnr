@@ -41,7 +41,7 @@ fixed_params:
   lambda_connectivity: 0.01
   lambda_radiality: 0.01
   loss_scaling_strategy: "fixed"
-  normalization_type: "adaptive"
+  normalization_type: "paper_based"
   
   # General Configuration (fixed)
   activation: "leaky_relu"
@@ -51,17 +51,18 @@ fixed_params:
   use_skip_connections: true
   pooling: "add"
   
-  # Physics Configuration (fixed)
-  use_gated_mp: true
   use_phyr: false
   enforce_radiality: false
   
   # GAT-specific fixed params
-  gat_dropout: 0.1
+  gat_dropout: 0.0
   gin_eps: 0.0
 
 # STAGE 1: ARCHITECTURE SEARCH SPACE
 search_space:
+  use_gated_mp:
+    search_type: "categorical"
+    choices: [true, false]
   # GNN Architecture
   gnn_layers:
     search_type: "int"

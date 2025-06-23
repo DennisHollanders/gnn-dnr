@@ -1,12 +1,12 @@
-description: "Two-stage HPO for GIN: Architecture search then hyperparameter tuning"
-job_name: "GIN-two-stage-HPO"
+description: "Two-stage HPO for GAT: Architecture search then hyperparameter tuning"
+job_name: "GAT-two-stage-HPO"
 
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
 folder_names: 
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+- "data\\split_datasets\\train"
+- "data\\split_datasets\\validation"
+- "data\\split_datasets\\test"
 dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000
@@ -25,8 +25,8 @@ fixed_params:
   output_type: "multiclass"
   num_classes: 2
   
-  # GNN Type (fixed for GIN experiments)
-  gnn_type: "GIN"
+  # GNN Type (fixed for GAT experiments)
+  gnn_type: "GAT"
   
   # Training Configuration (fixed during architecture search)
   learning_rate: 0.001
@@ -45,21 +45,18 @@ fixed_params:
   
   # General Configuration (fixed)
   activation: "leaky_relu"
-  dropout_rate: 0.0
+  dropout_rate: 0.1
   use_batch_norm: true
   use_residual: true
   use_skip_connections: true
   pooling: "add"
   
-  # Physics Configuration (fixed)
   use_phyr: false
   enforce_radiality: false
   
-  # GIN-specific fixed params
-  gin_eps: 0.1
-  gin_train_eps: false
-  gat_heads: 4
-  gat_dropout: 0.1
+  # GAT-specific fixed params
+  gat_dropout: 0.0
+  gin_eps: 0.0
 
 # STAGE 1: ARCHITECTURE SEARCH SPACE
 search_space:
@@ -72,15 +69,14 @@ search_space:
     min: 1
     max: 4
   
+  # GAT-specific architecture
+  gat_heads:
+    search_type: "categorical"
+    choices: [1, 2, 4, 8]
+  
   gnn_hidden_dim:
     search_type: "categorical"
-    choices: [64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768]
-  
-  # GIN-specific architecture
-  gin_mlp_layers:
-    search_type: "int"
-    min: 1
-    max: 4
+    choices: [64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024]
   
   # Node MLP Architecture
   use_node_mlp:
@@ -141,15 +137,11 @@ search_space:
 #     min: 0.0
 #     max: 0.5
 #   
-#   # GIN-specific hyperparameters
-#   gin_eps:
+#   # GAT-specific hyperparameters
+#   gat_dropout:
 #     search_type: "float"
 #     min: 0.0
 #     max: 0.5
-#   
-#   gin_train_eps:
-#     search_type: "categorical"
-#     choices: [true, false]
 #   
 #   # Physics Loss Hyperparameters
 #   lambda_phy_loss:
@@ -190,20 +182,20 @@ search_space:
 # fixed_params:
 #   # Best architecture from Stage 1 (example values - replace with actual best)
 #   gnn_layers: 2
-#   gnn_hidden_dim: 360
-#   gin_mlp_layers: 3
+#   gat_heads: 4
+#   gnn_hidden_dim: 384
 #   use_node_mlp: true
-#   node_hidden_dims: [256, 512, 256, 128]
+#   node_hidden_dims: [256, 512, 256]
 #   use_edge_mlp: true
-#   edge_hidden_dims: [128, 512, 64]
-#   switch_head_type: "mlp"
-#   switch_head_layers: 4
+#   edge_hidden_dims: [128, 256]
+#   switch_head_type: "attention"
+#   switch_head_layers: 3
 #   switch_attention_heads: 4
 #   
 #   # Fixed model configuration
 #   output_type: "multiclass"
 #   num_classes: 2
-#   gnn_type: "GIN"
+#   gnn_type: "GAT"
 #   activation: "leaky_relu"
 #   use_batch_norm: true
 #   use_residual: true
@@ -211,13 +203,12 @@ search_space:
 #   pooling: "add"
 #   use_gated_mp: true
 #   use_phyr: false
-#   enforce_radiality: true
-#   gat_heads: 4
-#   gat_dropout: 0.1
+#   enforce_radiality: false
+#   gin_eps: 0.0
 #   epochs: 200
 #   patience: 20
 #   criterion_name: "FocalLoss"
 
 # Logging
 wandb: true
-wandb_project: "GIN_HPO_TwoStage"
+wandb_project: "GAT_HPO_TwoStage"

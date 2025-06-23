@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import wandb
 import psutil
 import logging 
+import sys 
+from pathlib import Path    
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,7 @@ def enhanced_physics_loss(output, data, device, lambda_phy=0.1,
     
     return total_loss
 
-def process_batch(model, data, criterion, device, is_training=True, 
+def process_batch(model, data, criterion, device,writer=None, global_step=0, is_training=True, 
                  lambda_phy_loss=0.1, lambda_mask=0.01, 
                  lambda_connectivity=0.05, lambda_radiality=0.05,
                  normalization_type="paper_based", 
@@ -292,7 +294,7 @@ def _log_batch_debug_info(data):
         logger.debug(f"Batch 'ptr' tensor shape: {data.ptr.shape}")
     logger.debug("--------------------------------------")
 
-def train(model, train_loader, optimizer, criterion, device, 
+def train(model, train_loader, optimizer, criterion, device, writer=None,global_step=0, 
           lambda_phy_loss=0.1, lambda_mask=0.01,
           lambda_connectivity=0.05, lambda_radiality=0.05,
           normalization_type="adaptive", loss_scaling_strategy="adaptive_ratio"):
@@ -307,7 +309,7 @@ def train(model, train_loader, optimizer, criterion, device,
         optimizer.zero_grad()
         
         loss, metrics, batch_stats = process_batch(
-            model, data, criterion, device, is_training=True,
+            model, data, criterion, device,writer=writer,global_step=global_step, is_training=True,
             lambda_phy_loss=lambda_phy_loss, 
             lambda_mask=lambda_mask,
             lambda_connectivity=lambda_connectivity,
@@ -318,7 +320,16 @@ def train(model, train_loader, optimizer, criterion, device,
         
         if batch_stats["valid_batch"] and loss.requires_grad:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if hasattr(model, 'log_warmstart_grads'):
+                model.log_warmstart_grads("Warm-start after backward")
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        writer.add_histogram(f"{name}.grad", param.grad.cpu(), global_step)
+                writer.add_scalar("Loss/train", loss.item(), global_step)
+            #logger.info(f"Post‐backward y_opt.grad norm: {y_opt.grad.norm().item():.6f}")
+            #logger.info(f"Post‐backward v_sq_opt.grad norm: {v_sq_opt.grad.norm().item():.6f}")
+
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             running_loss += loss.item()

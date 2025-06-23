@@ -111,11 +111,11 @@ search_space:
   # Loss scaling strategy
   loss_scaling_strategy:
     search_type: "categorical"
-    choices: ["fixed", "adaptive", "adaptive_ratio"]
+    choices: ["fixed", "adaptive_ratio", "adaptive_magnitude"]
   
   normalization_type:
     search_type: "categorical"
-    choices: ["adaptive", "standard", "robust"]
+    choices: ["adaptive", "simple", "injection_scale", "per_node", "paper_based"]
   
   # Batch size optimization
   batch_size:

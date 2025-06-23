@@ -1,12 +1,12 @@
-description: "Stage 2 HPO for GIN: Hyperparameter tuning with best architecture from Stage 1"
-job_name: "GIN-stage2-hyperparameter-tuning"
+description: "Stage 2 HPO for GCN: Hyperparameter tuning with best architecture from Stage 1"
+job_name: "GCN-stage2-hyperparameter-tuning"
 
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
 folder_names: 
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+- "data\\split_datasets\\train"
+- "data\\split_datasets\\validation"
+- "data\\split_datasets\\test"
 dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000
@@ -24,25 +24,24 @@ fixed_params:
   output_type: "multiclass"
   num_classes: 2
   
-  # Best GIN Architecture from Stage 1
-  gnn_type: "GIN"
+  # Best GCN Architecture from Stage 1
+  gnn_type: "GCN"
   gnn_layers: 2
-  gnn_hidden_dim: 128
-  gin_mlp_layers: 4
-  gin_train_eps: false
+  gnn_hidden_dim: 256
+  gin_eps: 0.0
   gat_heads: 4
   gat_dropout: 0.1
   
   # Best MLP Architecture from Stage 1
   use_node_mlp: true
-  node_hidden_dims: [256, 64, 128]  # From node_hidden_dims_0: 256, node_hidden_dims_1: 64, node_hidden_dims_2: 128
+  node_hidden_dims: [128]  # From node_hidden_dims_0: 128, n_node_hidden_dims_layers: 1
   use_edge_mlp: true
-  edge_hidden_dims: [256, 128]      # From edge_hidden_dims_0: 256, edge_hidden_dims_1: 128
+  edge_hidden_dims: [32]   # From edge_hidden_dims_0: 32, n_edge_hidden_dims_layers: 1
   
   # Best Switch Head Architecture from Stage 1
   switch_head_type: "mlp"
-  switch_head_layers: 5
-  switch_attention_heads: 4
+  switch_head_layers: 4
+  switch_attention_heads: 1
   
   # General Configuration (keep fixed)
   activation: "leaky_relu"
@@ -81,12 +80,6 @@ search_space:
     min: 0.0
     max: 0.5
   
-  # GIN-specific hyperparameters
-  gin_eps:
-    search_type: "float"
-    min: 0.0
-    max: 0.5
-  
   # Physics Loss Hyperparameters
   lambda_phy_loss:
     search_type: "float"
@@ -115,7 +108,7 @@ search_space:
   loss_scaling_strategy:
     search_type: "categorical"
     choices: ["fixed", "adaptive_ratio", "adaptive_magnitude"]
-  
+
   normalization_type:
     search_type: "categorical"
     choices: ["adaptive", "simple", "injection_scale", "per_node", "paper_based"]
@@ -127,4 +120,4 @@ search_space:
 
 # Logging
 wandb: true
-wandb_project: "GIN_HPO_Stage2"
+wandb_project: "GCN_HPO_Stage2"

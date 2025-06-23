@@ -3,6 +3,9 @@ import torch.nn as nn
 from torch_geometric.nn import GCNConv
 import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
+import logging
+
+logger = logging.getLogger(__name__)
 
 def build_cvx_layer(max_n: int, max_e: int):
     """Build DPP-compliant CVX layer using affine constraints only"""
@@ -55,16 +58,14 @@ def build_cvx_layer(max_n: int, max_e: int):
     cons += [v_sq >= v_low_sq*0.8, v_sq <= v_high_sq*1.2]
     
     # DPP-compliant masking using affine constraints
-    # For active elements: S @ x = x, target = 0 → constraint becomes x = x (no effect)
-    # For inactive elements: S @ x = 0, target = value → constraint becomes x = value
-    cons += [v_sq == S_nodes @ v_sq + v_target]     # Active: no change, Inactive: v_sq = 1.0
-    cons += [z_bus == S_nodes @ z_bus + z_target]   # Active: no change, Inactive: z_bus = 0.0
-    cons += [y_line == S_edges @ y_line + y_target] # Active: no change, Inactive: y_line = 0.0
-    cons += [p_flow == S_edges @ p_flow + flow_target] # Active: no change, Inactive: p_flow = 0.0
-    cons += [q_flow == S_edges @ q_flow + flow_target] # Active: no change, Inactive: q_flow = 0.0
-    cons += [I_sq == S_edges @ I_sq + I_target]     # Active: no change, Inactive: I_sq = 0.0
+    cons += [v_sq == S_nodes @ v_sq + v_target]
+    cons += [z_bus == S_nodes @ z_bus + z_target]
+    cons += [y_line == S_edges @ y_line + y_target]
+    cons += [p_flow == S_edges @ p_flow + flow_target]
+    cons += [q_flow == S_edges @ q_flow + flow_target]
+    cons += [I_sq == S_edges @ I_sq + I_target]
     
-    # Substation constraints (applied to all, but inactive nodes are fixed)
+    # Substation constraints
     cons += [cp.multiply(sub_mask_full, v_sq) == sub_mask_full]
     cons += [cp.multiply(sub_mask_full, z_bus) == sub_mask_full]
 
@@ -90,7 +91,7 @@ def build_cvx_layer(max_n: int, max_e: int):
         I_sq   <= cp.multiply(bigM_flow_sq_full, y_line)
     ]
 
-    # SOC constraint (applied to all edges, inactive edges have 0 flows due to masking)
+    # SOC constraint
     v_from = A_from_full @ v_sq
     soc_X = cp.vstack([2 * p_flow, 2 * q_flow, v_from - I_sq])
     cons += [cp.SOC(v_from + I_sq, soc_X)]
@@ -115,7 +116,7 @@ def build_cvx_layer(max_n: int, max_e: int):
         qe <=  Mbal*sub_mask_full, -qe <=  Mbal*sub_mask_full
     ]
 
-    # Radiality constraint - uses sum over all elements, but inactive are 0 due to masking
+    # Radiality constraint
     cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
 
     # Objective function
@@ -129,7 +130,6 @@ def build_cvx_layer(max_n: int, max_e: int):
     # Verify DPP compliance
     if not problem.is_dcp(dpp=True):
         print("Warning: Problem is not DPP compliant!")
-        # Try to identify which constraints are problematic
         for i, constraint in enumerate(cons):
             if not constraint.is_dcp(dpp=True):
                 print(f"Constraint {i} is not DPP compliant: {constraint}")
@@ -162,91 +162,199 @@ class cvx(nn.Module):
         self.relu = nn.ReLU()
         self.drop = nn.Dropout(p=K['dropout_rate'])
         self.vl, self.vu = 0.9, 1.1
+        
+        # Add flag for gradient checking
+        self.debug_gradients = True
+        self.pre_cvx_hook  = lambda grad: self._hook_log("Pre-CVX", grad)
+        self.post_cvx_hook = lambda grad: self._hook_log("Post-CVX", grad)
+
+    def _hook_log(self, stage, grad):
+        if grad is None:
+            logger.info(f"{stage} hook: grad is None")
+            return None
+        norm = grad.norm().item()
+        logger.info(f"{stage} hook grad-norm: {norm:.6f}")
+        return grad
+
 
     def create_selection_matrices_and_targets(self, actual_nodes, actual_edges, device):
         """Create DPP-compliant selection matrices and target vectors"""
-        # Selection matrices: diagonal with 1s for active elements, 0s for inactive
         S_nodes = torch.zeros(self.max_n, self.max_n, device=device)
         S_edges = torch.zeros(self.max_e, self.max_e, device=device)
         
-        # Set diagonal elements to 1 for active nodes/edges
         S_nodes[:actual_nodes, :actual_nodes] = torch.eye(actual_nodes, device=device)
         S_edges[:actual_edges, :actual_edges] = torch.eye(actual_edges, device=device)
         
-        # Target values: 0 for active elements, desired value for inactive elements
-        v_target = torch.ones(self.max_n, device=device)  # Inactive nodes → v_sq = 1.0
-        v_target[:actual_nodes] = 0.0  # Active nodes → add 0 (no change)
+        v_target = torch.ones(self.max_n, device=device)
+        v_target[:actual_nodes] = 0.0
         
-        z_target = torch.zeros(self.max_n, device=device)  # All → z_bus gets 0 added
-        y_target = torch.zeros(self.max_e, device=device)  # All → y_line gets 0 added
-        flow_target = torch.zeros(self.max_e, device=device)  # All → flows get 0 added
-        I_target = torch.zeros(self.max_e, device=device)  # All → currents get 0 added
+        z_target = torch.zeros(self.max_n, device=device)
+        y_target = torch.zeros(self.max_e, device=device)
+        flow_target = torch.zeros(self.max_e, device=device)
+        I_target = torch.zeros(self.max_e, device=device)
         
         return S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target
 
+    # def forward(self, data):
+    #     x, ei = data.x, data.edge_index
+        
+    #     # Enable gradient computation for intermediate values
+    #     x.requires_grad_(True)
+        
+    #     x = self.relu(self.node_enc(x))
+    #     for g in self.gnns:
+    #         x = self.relu(g(x, ei))
+        
+    #     # GNN predictions
+    #     emb = torch.cat([x[ei[0]], x[ei[1]]], dim=1)
+    #     yw_unpadded = self.sw_pred(emb).squeeze(-1)
+    #     vr = self.v_pred(x).squeeze(-1)
+    #     vw_unpadded = (self.vl + (self.vu - self.vl)*vr).pow(2)
+        
+    #     # Get actual sizes
+    #     actual_edges = ei.shape[1]
+    #     actual_nodes = x.shape[0]
+
+    #     pad_e = self.max_e - actual_edges
+    #     if pad_e > 0:
+    #         pad = yw_unpadded.new_zeros((pad_e,))
+    #         yw = torch.cat([yw_unpadded, pad], dim=0)
+    #     else:
+    #         yw = yw_unpadded
+
+    #     pad_n = self.max_n - actual_nodes
+    #     if pad_n > 0:
+    #         pad = vw_unpadded.new_ones((pad_n,))
+    #         vw = torch.cat([vw_unpadded, pad], dim=0)
+    #     else:
+    #         vw = vw_unpadded
+
+    #     self.last_yw, self.last_vw = yw, vw
+
+    #     yw.register_hook(self.pre_cvx_hook)
+    #     vw.register_hook(self.pre_cvx_hook)
+        
+        
+    #     # Create DPP-compliant selection matrices
+    #     S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target = \
+    #         self.create_selection_matrices_and_targets(actual_nodes, actual_edges, x.device)
+        
+    #     try:
+    #         # Call CVX layer
+    #         y_opt, v_sq_opt = self.cvx_layer(
+    #             yw, vw,
+    #             data.cvx_p_inj.squeeze(0), data.cvx_q_inj.squeeze(0), data.cvx_y0.squeeze(0),
+    #             data.cvx_r_pu.squeeze(0), data.cvx_x_pu.squeeze(0), 
+    #             data.cvx_bigM_flow.squeeze(0), data.cvx_bigM_v.squeeze(0),
+    #             data.cvx_A_from.squeeze(0), data.cvx_A_to.squeeze(0), 
+    #             data.cvx_sub_mask.squeeze(0), data.cvx_non_sub_mask.squeeze(0),
+    #             data.cvx_bigM_flow_sq.squeeze(0), data.cvx_z_line_sq.squeeze(0),
+    #             S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target,
+    #             solver_args={'verbose': False, 'solve_method': 'ECOS'}
+    #         )
+            
+    #         # Extract relevant parts
+    #         y_opt_unpadded = y_opt[:actual_edges]
+    #         v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
+
+    #         y_opt_unpadded.register_hook(self.post_cvx_hook)
+    #         v_sq_opt_unpadded.register_hook(self.post_cvx_hook)
+
+
+    #         return {
+    #             "switch_predictions": y_opt_unpadded,  # Changed from switch_logits
+    #             "voltage_predictions": v_sq_opt_unpadded.sqrt(),  # Convert from squared
+    #             "switch_logits": yw_unpadded,  # Keep GNN predictions as logits
+    #             "voltage_scores": vw_unpadded,
+    #         }
+            
+    #     except Exception as e:
+    #         logger.error(f"CVX solver error: {e}")
+    #         logger.info("Falling back to GNN predictions only")
+    #         return {
+    #             "switch_predictions": yw_unpadded,
+    #             "voltage_predictions": vw_unpadded.sqrt(),
+    #             "switch_logits": yw_unpadded,
+    #             "voltage_scores": vw_unpadded,
+    #         }
+
     def forward(self, data):
+        # 1) GNN → raw logits
         x, ei = data.x, data.edge_index
         x = self.relu(self.node_enc(x))
         for g in self.gnns:
             x = self.relu(g(x, ei))
-        
-        # GNN predictions (unpadded - based on actual graph size)
-        emb = torch.cat([x[ei[0]], x[ei[1]]], dim=1)
-        yw_unpadded = self.sw_pred(emb).squeeze(-1)  # Shape: [actual_edges]
-        vr = self.v_pred(x).squeeze(-1)              # Shape: [actual_nodes]
-        vw_unpadded = (self.vl + (self.vu - self.vl)*vr).pow(2)
-        
-        # Get actual sizes from GNN
-        actual_edges = ei.shape[1]
-        actual_nodes = x.shape[0]
-        
-        #print(f"Debug: GNN output shapes - nodes: {actual_nodes}, edges: {actual_edges}")
-        
-        # Create warm start by padding GNN predictions to CVX size
-        yw = torch.zeros(self.max_e, device=yw_unpadded.device, dtype=yw_unpadded.dtype)
-        yw[:actual_edges] = torch.clamp(yw_unpadded, min=0.0, max=1.0)
-        
-        vw = torch.ones(self.max_n, device=vw_unpadded.device, dtype=vw_unpadded.dtype)
-        vw[:actual_nodes] = torch.clamp(vw_unpadded, min=0.81, max=1.21)
-        
-        # Create DPP-compliant selection matrices and targets
-        S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target = \
-            self.create_selection_matrices_and_targets(actual_nodes, actual_edges, x.device)
-        
-        try:
-            # Call CVX layer with DPP-compliant parameters
-            y_opt, v_sq_opt = self.cvx_layer(
-                yw, vw,
-                data.cvx_p_inj.squeeze(0), data.cvx_q_inj.squeeze(0), data.cvx_y0.squeeze(0),
-                data.cvx_r_pu.squeeze(0), data.cvx_x_pu.squeeze(0), 
-                data.cvx_bigM_flow.squeeze(0), data.cvx_bigM_v.squeeze(0),
-                data.cvx_A_from.squeeze(0), data.cvx_A_to.squeeze(0), 
-                data.cvx_sub_mask.squeeze(0), data.cvx_non_sub_mask.squeeze(0),
-                data.cvx_bigM_flow_sq.squeeze(0), data.cvx_z_line_sq.squeeze(0),
-                S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target,
-                solver_args={'verbose': False, 'solve_method': 'ECOS'}
-            )
-            
-            #print(f"Debug: CVX output shapes - nodes: {torch.mean(v_sq_opt)}, edges: {(y_opt)}")
-            # Extract only the relevant parts (first actual_edges/actual_nodes)
-            y_opt_unpadded = y_opt[:actual_edges]
-            v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
 
-            #print(f"Debug: CVX unpadded shapes - nodes: {torch.mean(v_sq_opt_unpadded)}, edges: {torch.mean(y_opt_unpadded)}")
-            
-            return {
-                "switch_logits": y_opt_unpadded,      # ← Changed key name
-                "voltage_scores": v_sq_opt_unpadded,
-                "switch_predictions": yw_unpadded,
-                "voltage_predictions": vw_unpadded,
-            }
-            
-        except Exception as e:
-            print(f"CVX solver error: {e}")
-            print("Falling back to GNN predictions only")
-            return {
-                "switch_scores": yw_unpadded,
-                "voltage_scores": vw_unpadded.sqrt(),  # Convert back from squared
-                "switch_predictions": yw_unpadded,
-                "voltage_predictions": vw_unpadded,
-            }
+        emb = torch.cat([x[ei[0]], x[ei[1]]], dim=1)
+        yw_unp = self.sw_pred(emb).squeeze(-1)      # (E,)
+        vr     = self.v_pred(x).squeeze(-1)
+        vw_unp = (self.vl + (self.vu - self.vl)*vr).pow(2)  # (N,)
+
+        E, N = ei.shape[1], x.shape[0]
+
+        # in __init__ or once per batch:
+        P_e = torch.eye(self.max_e)[:E]   # shape [E, max_e]
+        P_n = torch.eye(self.max_n)[:N]   # shape [N, max_n]
+
+        # 2) Functional padding
+        pad_e = self.max_e - E
+        yw_pad = yw_unp if pad_e==0 else torch.cat([yw_unp, yw_unp.new_zeros(pad_e)], 0)
+
+        pad_n = self.max_n - N
+        vw_pad = vw_unp if pad_n==0 else torch.cat([vw_unp, vw_unp.new_ones(pad_n)], 0)
+
+        # 3) Make them require_grad (so register_hook works)
+        #    but keep the grad_fn so gradients still flow back through the GNN.
+        yw = yw_pad.clone().requires_grad_()
+        vw = vw_pad.clone().requires_grad_()
+
+        # stash for logging after backward
+        self.last_yw, self.last_vw = yw, vw
+
+        # 4) register your hooks
+        yw.register_hook(self.pre_cvx_hook)
+        vw.register_hook(self.pre_cvx_hook)
+
+        # 5) Build any selection‐matrices / targets here, then call CVX
+        S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t = \
+            self.create_selection_matrices_and_targets(N, E, x.device)
+
+        opt_out, v_out = self.cvx_layer(
+            yw, vw,
+            data.cvx_p_inj.squeeze(0), data.cvx_q_inj.squeeze(0), data.cvx_y0.squeeze(0),
+            data.cvx_r_pu.squeeze(0),   data.cvx_x_pu.squeeze(0),
+            data.cvx_bigM_flow.squeeze(0), data.cvx_bigM_v.squeeze(0),
+            data.cvx_A_from.squeeze(0),    data.cvx_A_to.squeeze(0),
+            data.cvx_sub_mask.squeeze(0),  data.cvx_non_sub_mask.squeeze(0),
+            data.cvx_bigM_flow_sq.squeeze(0), data.cvx_z_line_sq.squeeze(0),
+            S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t
+        )
+
+        y_opt       = opt_out.clone().requires_grad_()
+        v_sq_opt    = v_out.clone().requires_grad_()
+
+        # now hooks will register
+        y_opt.register_hook(lambda g: self._hook_log("Post-CVX y_opt", g))
+        v_sq_opt.register_hook(lambda g: self._hook_log("Post-CVX v_sq", g))
+
+
+        # # now slice off what you need for return
+        # y_un = y_opt[:E]
+        # v_un = v_sq_opt[:N]
+
+        y_un   = P_e @ y_opt     # shape [E]
+        v_un   = P_n @ v_sq_opt  # shape [N]
+
+        return {
+            "switch_logits": yw_unp,
+            "voltage_scores": vw_unp,
+            "switch_predictions": y_un,
+            "voltage_predictions": v_un.sqrt(),
+        }
+        
+    def log_warmstart_grads(self, stage="After backward"):
+        """Call this *after* loss.backward() to log .grad norms on the warm‐starts."""
+        if hasattr(self, 'last_yw') and self.last_yw.grad is not None:
+            logger.info(f"{stage} yw.grad norm: {self.last_yw.grad.norm().item():.6f}")
+        if hasattr(self, 'last_vw') and self.last_vw.grad is not None:
+            logger.info(f"{stage} vw.grad norm: {self.last_vw.grad.norm().item():.6f}")
