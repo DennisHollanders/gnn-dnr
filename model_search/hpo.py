@@ -52,17 +52,20 @@ class HPO:
         self.seed = 2
         self.config_path = config_path
         self.study_name = study_name
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Set parallel workers - use 2x CPU cores or available GPUs
+        # Force CPU usage
+        self.device = torch.device("cpu")
+        torch.set_num_threads(1)  # Prevent thread oversubscription
+        
+        # Set parallel workers based on CPU cores
         if n_parallel is None:
-            n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
             n_cpus = mp.cpu_count()
-            self.n_parallel = max(2, min(n_gpus * 2 if n_gpus > 0 else n_cpus // 2, 8))
+            # Use half the available cores to avoid oversubscription
+            self.n_parallel = max(2, min(n_cpus // 2, 8))
         else:
             self.n_parallel = n_parallel
             
-        logger.info(f"Using {self.n_parallel} parallel workers")
+        logger.info(f"Using {self.n_parallel} parallel workers on CPU")
         
         with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
@@ -213,6 +216,9 @@ class HPO:
                 if not valid_heads:
                     valid_heads = [1]  
                 config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads_valid', valid_heads)
+        elif 'attention' not in config.get('switch_head_type', '').lower():
+            # If not using attention, set to 0
+            config['switch_attention_heads'] = 0
         
         # Phase 5: Process all other parameters with proper separation
         for param, spec in self.search_space.items():
@@ -315,14 +321,16 @@ class HPO:
             if remainder != 0:
                 config['hidden_dim'] = hidden_dim + (gat_heads - remainder)
         
-        # Constraint 3: switch_attention_heads divisibility 
-        if 'switch_attention_heads' in config and 'hidden_dim' in config:
-            hidden_dim = config['hidden_dim']
-            switch_heads = config['switch_attention_heads']
+        # Constraint 3: switch_attention_heads divisibility with gnn_hidden_dim
+        if 'attention' in config.get('switch_head_type', '').lower() and 'switch_attention_heads' in config:
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 128)
+            switch_heads = config.get('switch_attention_heads', 1)
             
-            remainder = hidden_dim % switch_heads
-            if remainder != 0:
-                config['hidden_dim'] = hidden_dim + (switch_heads - remainder)
+            if switch_heads > 0 and gnn_hidden_dim % switch_heads != 0:
+                # Adjust gnn_hidden_dim to be divisible by switch_heads
+                remainder = gnn_hidden_dim % switch_heads
+                config['gnn_hidden_dim'] = gnn_hidden_dim + (switch_heads - remainder)
+                logger.debug(f"Adjusted gnn_hidden_dim to {config['gnn_hidden_dim']} for switch attention heads")
         
         # Constraint 4: Conditional parameters for GAT
         if config.get('gnn_type') != 'GAT':
@@ -343,6 +351,9 @@ class HPO:
         switch_head_type = config.get('switch_head_type', 'mlp')
         if 'attention' not in switch_head_type.lower():
             config['switch_attention_heads'] = 0
+        elif 'switch_attention_heads' not in config:
+            # Set a safe default if using attention but no heads specified
+            config['switch_attention_heads'] = 1
         
         # Constraint 7: Node MLP dims only if using node MLP
         if not config.get('use_node_mlp', True):
@@ -447,6 +458,15 @@ class HPO:
                 logger.warning(f"config with problem: {config}")
                 return False
 
+        # Check switch attention heads divisibility
+        if 'attention' in config.get('switch_head_type', '').lower():
+            switch_heads = config.get('switch_attention_heads', 1)
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 128)
+            if switch_heads > 0 and gnn_hidden_dim % switch_heads != 0:
+                logger.warning(f"Invalid attention config: {gnn_hidden_dim} not divisible by {switch_heads} heads")
+                logger.warning(f"config with problem: {config}")
+                return False
+
         # Ensure at least one MLP is enabled
         if not (config.get('use_node_mlp') or config.get('use_edge_mlp')):
             logger.warning("Invalid config: Neither node nor edge MLP enabled")
@@ -503,21 +523,33 @@ class HPO:
                 trial, config = future_to_trial[future]
                 try:
                     result = future.result()
-                    results.append((trial, result))
-                    
-                    # Tell study about the completed trial
-                    study.tell(trial, result['objective_value'], state=optuna.trial.TrialState.COMPLETE)
-                    
-                    # Update trial user attributes with metrics
                     for key, value in result['metrics'].items():
                         trial.set_user_attr(key, value)
-                    
-                    # Log to CSV with the COMPLETE config that was actually used
+                    study.tell(trial, result['objective_value'], state=optuna.trial.TrialState.COMPLETE)
+                    results.append((trial, result))
+
+
                     self._log_trial_to_csv(trial._trial_id, config, result['metrics'])
                     
                 except Exception as e:
                     logger.error(f"Trial {trial._trial_id} failed: {e}")
-                    study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                    # Always mark the trial as failed
+                    try:
+                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                    except Exception:
+                        pass
+
+                    
+                    # Log failed trial to CSV
+                    failed_metrics = {
+                        'status': 'failed',
+                        'error': str(e),
+                        'best_mcc': -1.0,
+                        'best_val_loss': float('inf'),
+                        'final_epoch': 0,
+                        'model_parameters': 0
+                    }
+                    self._log_trial_to_csv(trial._trial_id, config, failed_metrics)
                     results.append((trial, {'objective_value': float('-inf'), 'error': str(e)}))
         
         return results
@@ -793,14 +825,15 @@ def _trial_worker(config_path: str, study_name: str, trial_id: int,
                   base_config: dict, fixed_params: dict) -> dict:
     """Worker function that runs in separate process - receives complete config"""
     try:
-        # Set device for this worker
-        if torch.cuda.is_available():
-            # Assign GPU based on worker ID to avoid conflicts
-            gpu_id = trial_id % torch.cuda.device_count()
-            device = torch.device(f"cuda:{gpu_id}")
-            torch.cuda.set_device(gpu_id)
-        else:
-            device = torch.device("cpu")
+        # Force CPU and limit threads in worker
+        device = torch.device("cpu")
+        torch.set_num_threads(1)
+        
+        # Set environment variables for this worker
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        os.environ['OPENBLAS_NUM_THREADS'] = '1'
+        os.environ['NUMEXPR_NUM_THREADS'] = '1'
         
         # The config is already complete with all defaults applied
         config = complete_config
@@ -967,6 +1000,9 @@ def _trial_worker(config_path: str, study_name: str, trial_id: int,
 
 
 def main():
+    # Set proper multiprocessing start method for cluster
+    mp.set_start_method('spawn', force=True)
+    
     parser = argparse.ArgumentParser(description="Simplified HPO")
     parser.add_argument("--config", type=str, required=True, help="Config YAML path")
     parser.add_argument("--study_name", type=str, default="hpo", help="Study name")
