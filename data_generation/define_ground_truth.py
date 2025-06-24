@@ -1144,7 +1144,7 @@ def apply_optimization(folder_path, toggles=None, debug=False, serialize=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate ground truth data for power networks using optimization')
     parser.add_argument('--folder_path',
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test",
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\case118",
 
                         type=str, help='Dataset folder path')
     parser.add_argument('--debug', type=bool, default=True, help='Print debug information')

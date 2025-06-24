@@ -4,14 +4,6 @@ from torch_geometric.nn import GCNConv
 import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 import logging
-from concurrent.futures import ThreadPoolExecutor
-import sys 
-from pathlib import Path
-
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "model_search")])
-
-from AdvancedMLP.AdvancedMLP import AdvancedMLP
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +16,6 @@ def build_cvx_layer(max_n: int, max_e: int):
     I_sq         = cp.Variable(max_e, nonneg=True)
     y_line       = cp.Variable(max_e, nonneg=True)
     z_bus        = cp.Variable(max_n, nonneg=True)
-    f            = cp.Variable(max_e, nonneg=True)
-    s            = cp.Variable(nonneg=True)
 
     # Warm start parameters (padded size)
     y_warm       = cp.Parameter(max_e, nonneg=True)
@@ -75,8 +65,6 @@ def build_cvx_layer(max_n: int, max_e: int):
     cons += [q_flow == S_edges @ q_flow + flow_target]
     cons += [I_sq == S_edges @ I_sq + I_target]
     
-
-
     # Substation constraints
     cons += [cp.multiply(sub_mask_full, v_sq) == sub_mask_full]
     cons += [cp.multiply(sub_mask_full, z_bus) == sub_mask_full]
@@ -128,27 +116,14 @@ def build_cvx_layer(max_n: int, max_e: int):
         qe <=  Mbal*sub_mask_full, -qe <=  Mbal*sub_mask_full
     ]
 
-
-
-    # Add a new parameter for the penalty weight
-    lambda_penalty = cp.Parameter(nonneg=True)
+    # Radiality constraint
+    cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
 
     # Objective function
     loss  = cp.sum(cp.multiply(r_pu_full, I_sq))
     loss += 0.001*cp.sum_squares(y_line - y_warm)
     loss += 0.001*cp.sum_squares(v_sq - v_warm)
-    loss += 0.01*cp.norm1(y_line - y0_full)
-
-    # Add the convex penalty to encourage binary line states (soft radiality)
-    # This term is convex and pushes y_line values towards 0 or 1.
-    penalty = -cp.sum(y_line - cp.square(y_line)) 
-    loss += lambda_penalty * penalty
-
-    # We also still need the spanning tree constraint, but in a relaxed form.
-    # This ensures the correct number of lines are active, which is a necessary
-    # condition for radiality.
-    cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
-
+    loss += 0.0001*cp.norm1(y_line - y0_full)
 
     problem = cp.Problem(cp.Minimize(loss), cons)
     
@@ -165,23 +140,28 @@ def build_cvx_layer(max_n: int, max_e: int):
             y_warm, v_warm, p_inj_full, q_inj_full, y0_full, r_pu_full, x_pu_full,
             bigM_flow_full, bigM_v, A_from_full, A_to_full, sub_mask_full, non_sub_mask_full,
             bigM_flow_sq_full, z_line_sq_full, S_nodes, S_edges,
-            v_target, z_target, y_target, flow_target, I_target,
-            lambda_penalty  # <-- Add here
+            v_target, z_target, y_target, flow_target, I_target
         ],
         variables=[y_line, v_sq]
     )
 
 class cvx(nn.Module):
-    def __init__(self, **K,):
+    def __init__(self, **K):
         super().__init__()
         self.max_n = K['max_n']
         self.max_e = K['max_e']
         self.cvx_layer = K["cvx_layer"] 
-        self.lambda_penalty = 2
-     
-        self.vl, self.vu = 0.9, 1.1
         
-        self.gnn = AdvancedMLP(**K)
+        dims = K['hidden_dims']
+        L = K['latent_dim']
+        self.node_enc = nn.Linear(K['node_input_dim'], dims[0])
+        self.gnns = nn.ModuleList([GCNConv(dims[i], dims[i+1]) for i in range(len(dims)-1)])
+        self.gnns.append(GCNConv(dims[-1], L))
+        self.sw_pred = nn.Sequential(nn.Linear(2*L, 1), nn.Sigmoid())
+        self.v_pred = nn.Sequential(nn.Linear(L, 1), nn.Sigmoid())
+        self.relu = nn.ReLU()
+        self.drop = nn.Dropout(p=K['dropout_rate'])
+        self.vl, self.vu = 0.9, 1.1
         
         # Add flag for gradient checking
         self.debug_gradients = True
@@ -215,94 +195,163 @@ class cvx(nn.Module):
         
         return S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target
 
+    # def forward(self, data):
+    #     x, ei = data.x, data.edge_index
+        
+    #     # Enable gradient computation for intermediate values
+    #     x.requires_grad_(True)
+        
+    #     x = self.relu(self.node_enc(x))
+    #     for g in self.gnns:
+    #         x = self.relu(g(x, ei))
+        
+    #     # GNN predictions
+    #     emb = torch.cat([x[ei[0]], x[ei[1]]], dim=1)
+    #     yw_unpadded = self.sw_pred(emb).squeeze(-1)
+    #     vr = self.v_pred(x).squeeze(-1)
+    #     vw_unpadded = (self.vl + (self.vu - self.vl)*vr).pow(2)
+        
+    #     # Get actual sizes
+    #     actual_edges = ei.shape[1]
+    #     actual_nodes = x.shape[0]
+
+    #     pad_e = self.max_e - actual_edges
+    #     if pad_e > 0:
+    #         pad = yw_unpadded.new_zeros((pad_e,))
+    #         yw = torch.cat([yw_unpadded, pad], dim=0)
+    #     else:
+    #         yw = yw_unpadded
+
+    #     pad_n = self.max_n - actual_nodes
+    #     if pad_n > 0:
+    #         pad = vw_unpadded.new_ones((pad_n,))
+    #         vw = torch.cat([vw_unpadded, pad], dim=0)
+    #     else:
+    #         vw = vw_unpadded
+
+    #     self.last_yw, self.last_vw = yw, vw
+
+    #     yw.register_hook(self.pre_cvx_hook)
+    #     vw.register_hook(self.pre_cvx_hook)
+        
+        
+    #     # Create DPP-compliant selection matrices
+    #     S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target = \
+    #         self.create_selection_matrices_and_targets(actual_nodes, actual_edges, x.device)
+        
+    #     try:
+    #         # Call CVX layer
+    #         y_opt, v_sq_opt = self.cvx_layer(
+    #             yw, vw,
+    #             data.cvx_p_inj.squeeze(0), data.cvx_q_inj.squeeze(0), data.cvx_y0.squeeze(0),
+    #             data.cvx_r_pu.squeeze(0), data.cvx_x_pu.squeeze(0), 
+    #             data.cvx_bigM_flow.squeeze(0), data.cvx_bigM_v.squeeze(0),
+    #             data.cvx_A_from.squeeze(0), data.cvx_A_to.squeeze(0), 
+    #             data.cvx_sub_mask.squeeze(0), data.cvx_non_sub_mask.squeeze(0),
+    #             data.cvx_bigM_flow_sq.squeeze(0), data.cvx_z_line_sq.squeeze(0),
+    #             S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target,
+    #             solver_args={'verbose': False, 'solve_method': 'ECOS'}
+    #         )
+            
+    #         # Extract relevant parts
+    #         y_opt_unpadded = y_opt[:actual_edges]
+    #         v_sq_opt_unpadded = v_sq_opt[:actual_nodes]
+
+    #         y_opt_unpadded.register_hook(self.post_cvx_hook)
+    #         v_sq_opt_unpadded.register_hook(self.post_cvx_hook)
+
+
+    #         return {
+    #             "switch_predictions": y_opt_unpadded,  # Changed from switch_logits
+    #             "voltage_predictions": v_sq_opt_unpadded.sqrt(),  # Convert from squared
+    #             "switch_logits": yw_unpadded,  # Keep GNN predictions as logits
+    #             "voltage_scores": vw_unpadded,
+    #         }
+            
+    #     except Exception as e:
+    #         logger.error(f"CVX solver error: {e}")
+    #         logger.info("Falling back to GNN predictions only")
+    #         return {
+    #             "switch_predictions": yw_unpadded,
+    #             "voltage_predictions": vw_unpadded.sqrt(),
+    #             "switch_logits": yw_unpadded,
+    #             "voltage_scores": vw_unpadded,
+    #         }
+
     def forward(self, data):
-        # 1) one big GNN pass
-        gnn_out = self.gnn(data)
-        
-        # ←—— USE THE RAW GNN SCORES HERE
-        all_switch  = gnn_out["switch_logits"]    # ∑edges
-        all_voltage = gnn_out["voltage_scores"]   # ∑nodes
+        # 1) GNN → raw logits
+        x, ei = data.x, data.edge_index
+        x = self.relu(self.node_enc(x))
+        for g in self.gnns:
+            x = self.relu(g(x, ei))
 
-        # 2) get per‐subproblem sizes
-        edge_counts = data.cvx_E.tolist()   
-        
-        # ptr‐based node counts (safest)
-        ptr = data.ptr.tolist()  # e.g. [0, 95, 190]
-        node_counts = [ptr[i+1] - ptr[i] for i in range(len(ptr)-1)]
+        emb = torch.cat([x[ei[0]], x[ei[1]]], dim=1)
+        yw_unp = self.sw_pred(emb).squeeze(-1)      # (E,)
+        vr     = self.v_pred(x).squeeze(-1)
+        vw_unp = (self.vl + (self.vu - self.vl)*vr).pow(2)  # (N,)
 
-        # 3) split
-        switch_splits  = torch.split(all_switch,  edge_counts)
-        voltage_splits = torch.split(all_voltage, node_counts)
+        E, N = ei.shape[1], x.shape[0]
 
-        # 4) build CVX args per subproblem
-        cvx_args = []
-        for i, (n_e, n_n) in enumerate(zip(edge_counts, node_counts)):
-            sw_i = switch_splits[i]
-            vw_i = voltage_splits[i]
+        # in __init__ or once per batch:
+        P_e = torch.eye(self.max_e)[:E]   # shape [E, max_e]
+        P_n = torch.eye(self.max_n)[:N]   # shape [N, max_n]
 
-            pad_e = self.max_e - n_e
-            pad_n = self.max_n - n_n
+        # 2) Functional padding
+        pad_e = self.max_e - E
+        yw_pad = yw_unp if pad_e==0 else torch.cat([yw_unp, yw_unp.new_zeros(pad_e)], 0)
 
-            sw_full = torch.cat([sw_i, sw_i.new_zeros(pad_e)], dim=0)\
-                          .clone().requires_grad_()
-            vw_full = torch.cat([vw_i, torch.ones(pad_n, device=vw_i.device)],
-                                dim=0).clone().requires_grad_()
+        pad_n = self.max_n - N
+        vw_pad = vw_unp if pad_n==0 else torch.cat([vw_unp, vw_unp.new_ones(pad_n)], 0)
 
-            S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t = \
-                self.create_selection_matrices_and_targets(n_n, n_e,
-                                                          sw_full.device)
+        # 3) Make them require_grad (so register_hook works)
+        #    but keep the grad_fn so gradients still flow back through the GNN.
+        yw = yw_pad.clone().requires_grad_()
+        vw = vw_pad.clone().requires_grad_()
 
-            params = [
-                sw_full, vw_full,
-                data.cvx_p_inj   [i],
-                data.cvx_q_inj   [i],
-                data.cvx_y0      [i],
-                data.cvx_r_pu    [i],
-                data.cvx_x_pu    [i],
-                data.cvx_bigM_flow   [i],
-                data.cvx_bigM_v      [i].squeeze(),
-                data.cvx_A_from  [i],
-                data.cvx_A_to    [i],
-                data.cvx_sub_mask     [i],
-                data.cvx_non_sub_mask [i],
-                data.cvx_bigM_flow_sq [i],
-                data.cvx_z_line_sq    [i],
-                S_nodes, S_edges,
-                v_t, z_t, y_t, f_t, I_t,
-                torch.tensor(self.lambda_penalty,
-                             device=sw_full.device)
-            ]
-            cvx_args.append(params)
+        # stash for logging after backward
+        self.last_yw, self.last_vw = yw, vw
 
-        # 5) parallel CVX solves (threads keep autograd)
-        def _solve(args):
-            (y_full, v_sq_full), = self.cvx_layer(*args)
-            return y_full, v_sq_full
+        # 4) register your hooks
+        yw.register_hook(self.pre_cvx_hook)
+        vw.register_hook(self.pre_cvx_hook)
 
-        max_workers = min(len(cvx_args), os.cpu_count() or 1)
-        with ThreadPoolExecutor(max_workers=max_workers) as exe:
-            results = list(exe.map(_solve, cvx_args))
+        # 5) Build any selection‐matrices / targets here, then call CVX
+        S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t = \
+            self.create_selection_matrices_and_targets(N, E, x.device)
 
-        # 6) stitch outputs back into flat tensors
-        switch_out = []
-        voltage_out = []
-        for (y_full, v_sq_full), n_e, n_n in zip(results,
-                                                 edge_counts,
-                                                 node_counts):
-            switch_out .append(y_full   [:n_e])
-            voltage_out.append(torch.sqrt(v_sq_full[:n_n]))
+        opt_out, v_out = self.cvx_layer(
+            yw, vw,
+            data.cvx_p_inj.squeeze(0), data.cvx_q_inj.squeeze(0), data.cvx_y0.squeeze(0),
+            data.cvx_r_pu.squeeze(0),   data.cvx_x_pu.squeeze(0),
+            data.cvx_bigM_flow.squeeze(0), data.cvx_bigM_v.squeeze(0),
+            data.cvx_A_from.squeeze(0),    data.cvx_A_to.squeeze(0),
+            data.cvx_sub_mask.squeeze(0),  data.cvx_non_sub_mask.squeeze(0),
+            data.cvx_bigM_flow_sq.squeeze(0), data.cvx_z_line_sq.squeeze(0),
+            S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t
+        )
 
-        switch_preds  = torch.cat(switch_out,  dim=0)
-        voltage_preds = torch.cat(voltage_out, dim=0)
+        y_opt       = opt_out.clone().requires_grad_()
+        v_sq_opt    = v_out.clone().requires_grad_()
 
-        # 7) return GNN dict + CVX overrides
+        # now hooks will register
+        y_opt.register_hook(lambda g: self._hook_log("Post-CVX y_opt", g))
+        v_sq_opt.register_hook(lambda g: self._hook_log("Post-CVX v_sq", g))
+
+
+        # # now slice off what you need for return
+        # y_un = y_opt[:E]
+        # v_un = v_sq_opt[:N]
+
+        y_un   = P_e @ y_opt     # shape [E]
+        v_un   = P_n @ v_sq_opt  # shape [N]
+
         return {
-            **gnn_out,
-            "switch_predictions":  switch_preds,
-            "voltage_predictions": voltage_preds,
+            "switch_logits": yw_unp,
+            "voltage_scores": vw_unp,
+            "switch_predictions": y_un,
+            "voltage_predictions": v_un.sqrt(),
         }
-
-
+        
     def log_warmstart_grads(self, stage="After backward"):
         """Call this *after* loss.backward() to log .grad norms on the warm‐starts."""
         if hasattr(self, 'last_yw') and self.last_yw.grad is not None:

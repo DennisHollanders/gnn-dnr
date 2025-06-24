@@ -1,5 +1,5 @@
 import argparse
-from typing import final
+from typing import final, Dict, Any
 import yaml
 import torch
 import torch.optim as optim
@@ -18,6 +18,12 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 import csv
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import threading
+import time
+from functools import partial
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -34,18 +40,33 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "src")])
 
 from loss_functions import FocalLoss, WeightedBCELoss
-class SimpleHPO:
-    """Simplified HPO with feasibility checks, CSV tracking, and W&B experiment grouping"""
+
+class HPO:
+    """Parallelized HPO with multi-process execution and async TPE updates"""
     
-    def __init__(self, config_path: str, study_name: str, startup_trials: int = 10,
-                  pruner_startup: int = 5, pruner_warmup: int = 10):
+    def __init__(self, config_path: str, study_name: str, startup_trials: int = 25,
+                 pruner_startup: int = 15, pruner_warmup: int = 15, n_parallel: int = None):
         self.n_startup_trials = startup_trials
         self.pruner_startup = pruner_startup
         self.pruner_warmup = pruner_warmup
         self.seed = 2
         self.config_path = config_path
         self.study_name = study_name
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Force CPU usage
+        self.device = torch.device("cpu")
+        torch.set_num_threads(1)  # Prevent thread oversubscription
+        
+        # Set parallel workers based on CPU cores
+        if n_parallel is None:
+            n_cpus = mp.cpu_count()
+            # Use half the available cores to avoid oversubscription
+            self.n_parallel = max(2, min(n_cpus // 2, 8))
+        else:
+            self.n_parallel = n_parallel
+            
+        logger.info(f"Using {self.n_parallel} parallel workers on CPU")
+        
         with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
         
@@ -58,20 +79,18 @@ class SimpleHPO:
         self.results_dir = Path(f"model_search/models/{model_name}/hpo_{study_name}_{timestamp}")
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize CSV tracking
+        # Initialize CSV tracking with thread safety
         self.csv_file = self.results_dir / "hpo_results.csv"
-        self.csv_headers = None
-        self.csv_writer = None
+        self.csv_lock = threading.Lock()
         self._init_csv_tracking()
         
         self.wandb_run = None
         self.experiment_id = f"{study_name}_{timestamp}"
 
-        # NEW: Pre-load data once
+        # Data loading strategy - load once per worker
         self.train_loader = None
         self.val_loader = None
         self.data_sample = None
-        self._load_data_once()
     
     def _init_csv_tracking(self):
         """Initialize CSV file for tracking all trial results"""
@@ -79,101 +98,92 @@ class SimpleHPO:
         self.csv_file.touch()
         
     def _log_trial_to_csv(self, trial_num: int, config: dict, metrics: dict):
-        """Log trial results to CSV with proper handling of list parameters and standardized values"""
-        # Combine all data
-        row_data = {
-            'trial_number': trial_num,
-            'timestamp': datetime.now().isoformat(),
-            **metrics  
-        }
-        
-        # Add config parameters, handling lists and special values properly
-        for key, value in config.items():
-            if isinstance(value, list):
-                # For empty lists, use a special marker
-                if not value:
-                    row_data[key] = "[]"
-                else:
-                    # Convert lists to string representation without commas that break CSV
+        """Thread-safe CSV logging - now logs ALL parameters including defaults"""
+        with self.csv_lock:
+            # Combine metrics and full config
+            row_data = {
+                'trial_number': trial_num,
+                'timestamp': datetime.now().isoformat(),
+                **metrics
+            }
+            
+            # Add ALL config parameters, including those with default values
+            for key, value in config.items():
+                if isinstance(value, list):
+                    if not value:
+                        row_data[key] = "[]"
+                    else:
+                        row_data[key] = str(value).replace(',', ';')
+                elif isinstance(value, (dict, tuple)):
                     row_data[key] = str(value).replace(',', ';')
-            elif isinstance(value, (dict, tuple)):
-                # Handle other complex types
-                row_data[key] = str(value).replace(',', ';')
-            elif value is None:
-                # Handle None values explicitly
-                row_data[key] = "None"
-            elif isinstance(value, bool):
-                # Ensure booleans are stored as True/False strings
-                row_data[key] = str(value)
-            else:
-                row_data[key] = value
-        
-        # Ensure all expected columns are present (helps with consistent CSV structure)
-        expected_params = [
-            'use_node_mlp', 'use_edge_mlp', 'node_hidden_dims', 'edge_hidden_dims',
-            'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 'gat_heads', 'gat_dropout',
-            'gin_eps', 'gin_train_eps', 'gin_mlp_layers', 'switch_head_type',
-            'switch_head_layers', 'switch_attention_heads', 'learning_rate',
-            'weight_decay', 'dropout_rate', 'batch_size'
-        ]
-        
-        for param in expected_params:
-            if param not in row_data and param in self.search_space:
-                # Add default value for missing parameters
-                if param.endswith('_dims'):
-                    row_data[param] = "[]"
-                elif param in ['use_node_mlp', 'use_edge_mlp', 'gin_train_eps']:
-                    row_data[param] = "False"
-                elif param in ['gnn_layers', 'gin_mlp_layers', 'switch_head_layers', 
-                            'gat_heads', 'switch_attention_heads']:
-                    row_data[param] = 0
+                elif value is None:
+                    row_data[key] = "None"
+                elif isinstance(value, bool):
+                    row_data[key] = str(value)
                 else:
-                    row_data[param] = 0.0
-        
-        # Write to CSV with proper quoting
-        df = pd.DataFrame([row_data])
-        
-        # If file is empty, write headers
-        if not self.csv_file.exists() or self.csv_file.stat().st_size == 0:
-            df.to_csv(self.csv_file, index=False, quoting=1) 
-        else:
-            df.to_csv(self.csv_file, mode='a', header=False, index=False, quoting=1)
+                    row_data[key] = value
+            
+            df = pd.DataFrame([row_data])
+            
+            if not self.csv_file.exists() or self.csv_file.stat().st_size == 0:
+                df.to_csv(self.csv_file, index=False, quoting=1) 
+            else:
+                df.to_csv(self.csv_file, mode='a', header=False, index=False, quoting=1)
     
     def suggest_params(self, trial: optuna.Trial) -> dict:
         """Suggest parameters with FIXED feasibility checks using YAML config"""
         config = self.config.copy()
         config.update(self.fixed_params)
         
-        # Phase 1: Suggest GAT heads FIRST 
-        if 'gat_heads' not in config and 'gat_heads' in self.search_space:
-            spec = self.search_space['gat_heads']
-            if spec['search_type'] == 'categorical':
-                config['gat_heads'] = trial.suggest_categorical('gat_heads', spec['choices'])
-            elif spec['search_type'] == 'int':
-                config['gat_heads'] = trial.suggest_int('gat_heads', spec['min'], spec['max'])
-        
-        # Phase 2: Suggest GNN hidden dim with GAT constraint awareness
-        if 'gnn_hidden_dim' not in config and 'gnn_hidden_dim' in self.search_space:
-            spec = self.search_space['gnn_hidden_dim']
-            gat_heads = config.get('gat_heads', 1) 
+        # Remove any existing GAT/GIN params to ensure clean slate
+        for p in [
+            'gat_heads','gat_dropout','gat_v2','gat_edge_dim',
+            'gin_layers','gin_hidden_dim','gin_eps'
+        ]:
+            config.pop(p, None)
             
-            if spec['search_type'] == 'categorical':
-                # Filter choices to be divisible by GAT heads
-                valid_choices = [dim for dim in spec['choices'] if dim % gat_heads == 0]
-                if not valid_choices:
-                    # Fallback: find nearest multiples
-                    valid_choices = [((dim // gat_heads) + 1) * gat_heads for dim in spec['choices']]
-                    valid_choices = list(set(valid_choices)) 
-                config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim', valid_choices)
-            elif spec['search_type'] == 'int':
-                # Suggest in multiples of gat_heads
-                min_val = ((spec['min'] // gat_heads) + (1 if spec['min'] % gat_heads != 0 else 0)) * gat_heads
-                max_val = (spec['max'] // gat_heads) * gat_heads
-                if min_val > max_val:
-                    min_val = max_val = gat_heads
-                config['gnn_hidden_dim'] = trial.suggest_int('gnn_hidden_dim_multiple', 
-                                                            min_val // gat_heads, 
-                                                            max_val // gat_heads) * gat_heads
+        logger.info("\n inside suggest_params \n")
+        logger.info("gnn_type: %s", config.get('gnn_type', 'NONE'))
+
+        # Phase 1: GAT params only if using GAT, else set defaults
+        if config.get('gnn_type') == 'GAT':
+            logger.info("Using GAT parameters")
+            if 'gat_heads' not in config and 'gat_heads' in self.search_space:
+                spec = self.search_space['gat_heads']
+                if spec['search_type'] == 'categorical':
+                    config['gat_heads'] = trial.suggest_categorical('gat_heads', spec['choices'])
+                else:
+                    config['gat_heads'] = trial.suggest_int('gat_heads', spec['min'], spec['max'])
+            if 'gat_dropout' not in config and 'gat_dropout' in self.search_space:
+                spec = self.search_space['gat_dropout']
+                config['gat_dropout'] = trial.suggest_float('gat_dropout', spec['min'], spec['max'], log=spec.get('log', False))
+            if 'gat_v2' not in config and 'gat_v2' in self.search_space:
+                spec = self.search_space['gat_v2']
+                config['gat_v2'] = trial.suggest_categorical('gat_v2', spec['choices'])
+            if 'gat_edge_dim' not in config and 'gat_edge_dim' in self.search_space:
+                spec = self.search_space['gat_edge_dim']
+                config['gat_edge_dim'] = trial.suggest_int('gat_edge_dim', spec['min'], spec['max'])
+        else:
+            config['gat_heads']    = 0
+            config['gat_dropout']  = 0.0
+            config['gat_v2']       = False
+            config['gat_edge_dim'] = 0
+
+        # Phase 2: GIN params only if using GIN, else set defaults
+        if config.get('gnn_type') == 'GIN':
+            if 'gin_layers' not in config and 'gin_layers' in self.search_space:
+                spec = self.search_space['gin_layers']
+                config['gin_layers'] = trial.suggest_int('gin_layers', spec['min'], spec['max'])
+            if 'gin_hidden_dim' not in config and 'gin_hidden_dim' in self.search_space:
+                spec = self.search_space['gin_hidden_dim']
+                config['gin_hidden_dim'] = trial.suggest_int('gin_hidden_dim', spec['min'], spec['max'])
+            if 'gin_eps' not in config and 'gin_eps' in self.search_space:
+                spec = self.search_space['gin_eps']
+                config['gin_eps'] = trial.suggest_float('gin_eps', spec['min'], spec['max'], log=spec.get('log', False))
+        else:
+            config['gin_layers']     = 0
+            config['gin_hidden_dim'] = 0
+            config['gin_eps']        = 0.0
         
         # Phase 3: Suggest switch head type
         if 'switch_head_type' not in config and 'switch_head_type' in self.search_space:
@@ -191,7 +201,6 @@ class SimpleHPO:
             if spec['search_type'] == 'categorical':
                 valid_choices = [heads for heads in spec['choices'] if gnn_hidden_dim % heads == 0]
                 if not valid_choices:
-                    # Find factors of gnn_hidden_dim within the choice range
                     valid_choices = []
                     for heads in spec['choices']:
                         if gnn_hidden_dim >= heads and gnn_hidden_dim % heads == 0:
@@ -200,7 +209,6 @@ class SimpleHPO:
                         valid_choices = [1]  
                 config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads', valid_choices)
             elif spec['search_type'] == 'int':
-                # Find valid divisors within range
                 valid_heads = []
                 for heads in range(spec['min'], spec['max'] + 1):
                     if gnn_hidden_dim % heads == 0:
@@ -208,6 +216,9 @@ class SimpleHPO:
                 if not valid_heads:
                     valid_heads = [1]  
                 config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads_valid', valid_heads)
+        elif 'attention' not in config.get('switch_head_type', '').lower():
+            # If not using attention, set to 0
+            config['switch_attention_heads'] = 0
         
         # Phase 5: Process all other parameters with proper separation
         for param, spec in self.search_space.items():
@@ -252,7 +263,7 @@ class SimpleHPO:
                 # If somehow a non-boolean value got assigned, fix it
                 logger.warning(f"Non-boolean value {config[bool_param]} found for {bool_param}, converting to boolean")
                 config[bool_param] = bool(config[bool_param])
-        
+
         return config
     
     def _suggest_dynamic_list(self, trial: optuna.Trial, param: str, spec: dict) -> list:
@@ -287,38 +298,6 @@ class SimpleHPO:
         
         return dims
     
-    def _optuna_constraints(self, trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
-        """Constraint function for Optuna sampler"""
-        p = trial.params
-        cons = []
-        
-        # Constraint 1: GAT divisibility
-        if p.get('gnn_type') == 'GAT':
-            gnn_hidden_dim = p.get('gnn_hidden_dim')
-            gat_heads = p.get('gat_heads')
-            if gnn_hidden_dim is not None and gat_heads is not None:
-                remainder = gnn_hidden_dim % gat_heads
-                cons.append(float(remainder)) 
-        
-        # Constraint 2: Switch attention heads divisibility
-        switch_head_type = p.get('switch_head_type', '')
-        if 'attention' in switch_head_type.lower():
-            gnn_hidden_dim = p.get('gnn_hidden_dim')
-            switch_heads = p.get('switch_attention_heads')
-            if gnn_hidden_dim is not None and switch_heads is not None:
-                cons.append(float(gnn_hidden_dim % switch_heads))
-        
-        # Constraint 3: At least one MLP must be enabled
-        use_node_mlp = p.get('use_node_mlp', True)
-        use_edge_mlp = p.get('use_edge_mlp', True)
-        if not use_node_mlp and not use_edge_mlp:
-            cons.append(1.0)  
-        else:
-            cons.append(0.0) 
-        
-        return tuple(cons)
-    
-    
     def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
         """Apply comprehensive feasibility constraints with standardized null values"""
         
@@ -342,14 +321,16 @@ class SimpleHPO:
             if remainder != 0:
                 config['hidden_dim'] = hidden_dim + (gat_heads - remainder)
         
-        # Constraint 3: switch_attention_heads divisibility 
-        if 'switch_attention_heads' in config and 'hidden_dim' in config:
-            hidden_dim = config['hidden_dim']
-            switch_heads = config['switch_attention_heads']
+        # Constraint 3: switch_attention_heads divisibility with gnn_hidden_dim
+        if 'attention' in config.get('switch_head_type', '').lower() and 'switch_attention_heads' in config:
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 128)
+            switch_heads = config.get('switch_attention_heads', 1)
             
-            remainder = hidden_dim % switch_heads
-            if remainder != 0:
-                config['hidden_dim'] = hidden_dim + (switch_heads - remainder)
+            if switch_heads > 0 and gnn_hidden_dim % switch_heads != 0:
+                # Adjust gnn_hidden_dim to be divisible by switch_heads
+                remainder = gnn_hidden_dim % switch_heads
+                config['gnn_hidden_dim'] = gnn_hidden_dim + (switch_heads - remainder)
+                logger.debug(f"Adjusted gnn_hidden_dim to {config['gnn_hidden_dim']} for switch attention heads")
         
         # Constraint 4: Conditional parameters for GAT
         if config.get('gnn_type') != 'GAT':
@@ -370,6 +351,9 @@ class SimpleHPO:
         switch_head_type = config.get('switch_head_type', 'mlp')
         if 'attention' not in switch_head_type.lower():
             config['switch_attention_heads'] = 0
+        elif 'switch_attention_heads' not in config:
+            # Set a safe default if using attention but no heads specified
+            config['switch_attention_heads'] = 1
         
         # Constraint 7: Node MLP dims only if using node MLP
         if not config.get('use_node_mlp', True):
@@ -449,367 +433,297 @@ class SimpleHPO:
     
     def _validate_config(self, config: dict) -> bool:
         """Validate configuration before trial execution"""
-        
-        # Check divisibility constraints
-        if config.get('gnn_type') == 'GAT':
-            gnn_hidden_dim = config.get('gnn_hidden_dim', 64)
-            gat_heads = config.get('gat_heads', 4)
-            
-            if gnn_hidden_dim % gat_heads != 0:
-                logger.warning(f"Invalid GAT config: {gnn_hidden_dim} not divisible by {gat_heads}")
+
+        # GAT params: only invalid if non‐GAT backbone AND non‐zero GAT settings
+        if config.get('gnn_type') != 'GAT':
+            gat_params = ['gat_heads', 'gat_dropout', 'gat_v2', 'gat_edge_dim']
+            # if any of these is not the default zero/False, it's truly invalid
+            if any(config.get(p) not in (0, 0.0, False, None) for p in gat_params):
+                logger.warning("Invalid config: non‐zero GAT parameters with non‐GAT backbone")
+                logger.warning(f"config with problem: {config}")
                 return False
-        
-        # Check that at least one MLP is enabled
-        if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
+
+        # GIN params: same logic
+        if config.get('gnn_type') != 'GIN':
+            gin_params = ['gin_eps', 'gin_train_eps', 'gin_mlp_layers']
+            if any(config.get(p) not in (0, 0.0, False, None) for p in gin_params):
+                logger.warning("Invalid config: non‐zero GIN parameters with non‐GIN backbone")
+                logger.warning(f"config with problem: {config}")
+                return False
+
+        # Check divisibility constraints for real GAT configs
+        if config.get('gnn_type') == 'GAT':
+            if config['gnn_hidden_dim'] % config['gat_heads'] != 0:
+                logger.warning(f"Invalid GAT config: {config['gnn_hidden_dim']} not divisible by {config['gat_heads']}")
+                logger.warning(f"config with problem: {config}")
+                return False
+
+        # Check switch attention heads divisibility
+        if 'attention' in config.get('switch_head_type', '').lower():
+            switch_heads = config.get('switch_attention_heads', 1)
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 128)
+            if switch_heads > 0 and gnn_hidden_dim % switch_heads != 0:
+                logger.warning(f"Invalid attention config: {gnn_hidden_dim} not divisible by {switch_heads} heads")
+                logger.warning(f"config with problem: {config}")
+                return False
+
+        # Ensure at least one MLP is enabled
+        if not (config.get('use_node_mlp') or config.get('use_edge_mlp')):
             logger.warning("Invalid config: Neither node nor edge MLP enabled")
+            logger.warning(f"config with problem: {config}")
             return False
-        
-        # Check logical dependencies
+
+        # Gated MP needs a GNN backbone
         if config.get('use_gated_mp') and not config.get('gnn_type'):
             logger.warning("Invalid config: Gated MP requires GNN")
+            logger.warning(f"config with problem: {config}")
             return False
-        
-        # Check PhyR dependency
+
+        # PhyR dependency
         if config.get('use_phyr') and 'phyr_k_ratio' not in config:
             logger.warning("Invalid config: PhyR enabled but no k_ratio specified")
+            logger.warning(f"config with problem: {config}")
             return False
-        
-        # Check conditional parameters
-        if config.get('gnn_type') != 'GAT' and any(k in config for k in ['gat_heads', 'gat_dropout']):
-            logger.warning("Invalid config: GAT parameters with non-GAT backbone")
-            return False
-            
-        if config.get('gnn_type') != 'GIN' and 'gin_eps' in config:
-            logger.warning("Invalid config: GIN parameters with non-GIN backbone")
-            return False
-        
+
         return True
     
-    def objective(self, trial: optuna.Trial) -> float:
-        trial_run = None
-        if self.wandb_run:
-            trial_run = wandb.init(
+    def run_parallel_batch(self, study: optuna.Study, batch_size: int = None) -> list:
+        """Run a batch of trials in parallel - FIXED version"""
+        if batch_size is None:
+            batch_size = self.n_parallel
+        
+        # Generate batch of trials with complete configs
+        trials_with_configs = []
+        for _ in range(batch_size):
+            trial = study.ask()
+            # Generate complete config including defaults HERE in main process
+            complete_config = self.suggest_params(trial)
+            trials_with_configs.append((trial, complete_config))
+        
+        # Run trials in parallel
+        with ProcessPoolExecutor(max_workers=self.n_parallel) as executor:
+            # Submit all trials with their complete configs
+            future_to_trial = {}
+            for trial, config in trials_with_configs:
+                future = executor.submit(
+                    _trial_worker,
+                    str(self.config_path),      
+                    self.study_name,           
+                    trial._trial_id,           # Pass trial ID instead of trial object
+                    config,                    # Pass the complete config
+                    self.seed,
+                    self.config,
+                    self.fixed_params
+                )
+                future_to_trial[future] = (trial, config)
+            
+            # Collect results as they complete
+            results = []
+            for future in as_completed(future_to_trial):
+                trial, config = future_to_trial[future]
+                try:
+                    result = future.result()
+                    for key, value in result['metrics'].items():
+                        trial.set_user_attr(key, value)
+                    study.tell(trial, result['objective_value'], state=optuna.trial.TrialState.COMPLETE)
+                    results.append((trial, result))
+
+
+                    self._log_trial_to_csv(trial._trial_id, config, result['metrics'])
+                    
+                except Exception as e:
+                    logger.error(f"Trial {trial._trial_id} failed: {e}")
+                    # Always mark the trial as failed
+                    try:
+                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                    except Exception:
+                        pass
+
+                    
+                    # Log failed trial to CSV
+                    failed_metrics = {
+                        'status': 'failed',
+                        'error': str(e),
+                        'best_mcc': -1.0,
+                        'best_val_loss': float('inf'),
+                        'final_epoch': 0,
+                        'model_parameters': 0
+                    }
+                    self._log_trial_to_csv(trial._trial_id, config, failed_metrics)
+                    results.append((trial, {'objective_value': float('-inf'), 'error': str(e)}))
+        
+        return results
+
+    def run_async_optimization(self, n_trials: int = 100, use_wandb: bool = False):
+        """Run asynchronous parallel optimization"""
+        batch_size = self.n_parallel  
+
+        if use_wandb:
+            self.wandb_run = wandb.init(
                 project=self.config.get('wandb_project', 'HPO'),
-                group=self.experiment_id, 
-                name=f"trial_{trial.number:03d}",
-                job_type="hpo_trial",
-                tags=[self.study_name, "hpo_trial"],
-                config=None, 
-                reinit=True
+                name=self.experiment_id,
+                job_type="parallel_hpo_experiment",
+                config={**self.config, 'n_parallel': self.n_parallel, 'processing_batch_size': batch_size}
             )
+
+        logger.info(f"Starting Parallel HPO: {self.experiment_id}")
+        logger.info(f"Parallel workers: {self.n_parallel}, Processing batch size: {batch_size}")
         
+        # Create study with async-compatible sampler
+        sampler = optuna.samplers.TPESampler(
+            seed=self.seed,
+            n_startup_trials=self.n_startup_trials,
+            multivariate=True,  # Better for parallel execution
+        )
+        
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=sampler,
+            pruner=optuna.pruners.MedianPruner(
+                n_startup_trials=self.pruner_startup,
+                n_warmup_steps=self.pruner_warmup,
+            )
+        )
+
+        completed_trials = 0
+        start_time = time.time()
+        
+        while completed_trials < n_trials:
+            remaining_trials = n_trials - completed_trials
+            current_batch_size = min(batch_size, remaining_trials)
+            
+            logger.info(f"Running batch of {current_batch_size} trials ({completed_trials}/{n_trials} completed)")
+            
+            batch_results = self.run_parallel_batch(study, current_batch_size)
+            completed_trials += len(batch_results)
+            
+            # Log progress
+            if self.wandb_run:
+                best_value = study.best_value if study.trials else -1
+                elapsed_time = time.time() - start_time
+                wandb.log({
+                    "experiment/completed_trials": completed_trials,
+                    "experiment/best_mcc_so_far": best_value,
+                    "experiment/elapsed_time": elapsed_time,
+                    "experiment/trials_per_minute": completed_trials / (elapsed_time / 60)
+                })
+            
+            logger.info(f"Batch completed. Best MCC so far: {study.best_value:.4f}")
+
+        # Save results
+        self._save_results(study)
+        
+        if self.wandb_run:
+            wandb.finish()
+        
+        return study
+
+    def _save_results(self, study: optuna.Study):
+        """Save results and create visualizations with robust CSV handling"""
+        completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        if not completed:
+            logger.error("No completed trials!")
+            return
+        
+        best_mcc = study.best_value if study.best_value > -1 else -1  
+        best_trial_from_optuna = study.best_trial.number
+
         try:
-            config = self.suggest_params(trial)
-            
-            if not self._validate_config(config):
-                logger.warning(f"Trial {trial.number}: Invalid configuration, pruning")
-                if trial_run:
-                    wandb.log({"status": "invalid_config"})
-                    wandb.finish()
-                raise optuna.TrialPruned()
-            
-            if trial_run:
-                wandb.config.update(config)
-            
-            # Create model and data
-            model, train_loader, val_loader, criterion = self._setup_training(config)
-            if model is None:
-                if trial_run:
-                    wandb.log({"status": "failed_setup"})
-                    wandb.finish()
-                return -1.0 
-            
-            model_params = sum(p.numel() for p in model.parameters())
-            logger.info(f"Trial {trial.number}: Config valid, Model params: {model_params:,}")
-            
-            optimizer = optim.Adam(model.parameters(), 
-                                lr=config['learning_rate'], 
-                                weight_decay=config['weight_decay'])
-
-            lambda_dict = {
-                'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
-                'lambda_mask': config.get('lambda_mask', 0.01),
-                'lambda_connectivity': config.get('lambda_connectivity', 0.05),
-                'lambda_radiality': config.get('lambda_radiality', 0.05),
-                'normalization_type': config.get('normalization_type', 'adaptive'),
-                'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
-            }
-            
-            starting_val_loss = float('inf')
-            best_train_loss = float('inf')
-            best_val_loss = float('inf')
-            best_minority_f1 = 0.0
-            best_mcc = -1.0 
-            best_balanced_accuracy = 0.0
-        
-            patience = 0
-            max_epochs = min(config.get('epochs', 100), 80)
-            max_patience = config.get('patience', 25)
-            
-            print(f"Starting training for {max_epochs} epochs with patience {max_patience}")
-            print("config:", config)
-            print(f"Lambda dict: {lambda_dict}")  
-            
-            for epoch in range(max_epochs):
-                train_loss, train_dict = train(model, train_loader, optimizer, criterion, self.device, **lambda_dict)
-                val_loss, val_dict = test(model, val_loader, criterion, self.device, **lambda_dict)
+            if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
+                try:
+                    df = pd.read_csv(self.csv_file, quoting=1)
+                except:
+                    try:
+                        df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
+                    except:
+                        df = pd.read_csv(self.csv_file, on_bad_lines='skip')
                 
-                if epoch == 0: 
-                    starting_val_loss = val_loss
-                    starting_train_loss = train_loss
-                    
-                print(f"Epoch {epoch+1}/{max_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-                if epoch % 5 == 0 or epoch ==0:
-                    print(f"\n Epoch {epoch+1}- Train Metrics: {train_dict}\n ")
-                    print(f"Epoch {epoch+1} - Val Metrics: {val_dict} \n ")
-                    
-
-                current_f1_minority = val_dict.get('test_f1_minority', 0.0)
-                current_mcc = val_dict.get('test_mcc', 0.0)
-                current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
-                
-                if current_mcc > best_mcc:
-                    best_mcc = current_mcc
-                    best_minority_f1 = current_f1_minority
-                    best_balanced_accuracy = current_balanced_accuracy
-                    best_train_loss = train_loss
-                    best_val_loss = val_loss
-                    patience = 0
+                completed_df = df[df['status'] == 'completed']
+                if len(completed_df) > 0:
+                    best_row = completed_df.loc[completed_df['best_mcc'].idxmax()]
+                    best_mcc_from_csv = best_row['best_mcc'] 
+                    best_trial_num = best_row['trial_number']
                 else:
-                    patience += 1
-
-                if trial_run:
-                    wandb.log({
-                        "epoch": epoch,
-                        "train_loss": train_loss,
-                        "val_loss": val_loss,
-                        "val_f1_minority": current_f1_minority,
-                        "val_mcc": current_mcc,
-                        "val_balanced_accuracy": current_balanced_accuracy,
-                        "patience": patience,
-                        **lambda_dict  
-                    })
-                
-                trial.report(current_mcc, epoch)
-                if trial.should_prune() or patience >= max_patience:
-                    break
-
-            metrics = {
-                "starting_val_loss": starting_val_loss,
-                "starting_train_loss": starting_train_loss,
-                'best_mcc': best_mcc,  
-                'best_train_loss': best_train_loss,
-                'best_val_loss': best_val_loss,
-                "best_f1_minority": best_minority_f1,
-                "best_balanced_accuracy": best_balanced_accuracy,
-                "final_train_loss": train_loss,
-                "final_val_loss" : val_loss,
-                "final_f1_minority" : current_f1_minority,
-                "final_mcc" : current_mcc,
-                "final_balanced_accuracy" : current_balanced_accuracy,
-                'final_epoch': epoch,
-                'converged': patience < max_patience,
-                'model_parameters': model_params,
-                'status': 'completed',
-                'config_valid': True
-            }
-            
-            for key, value in metrics.items():
-                trial.set_user_attr(key, value)
-
-            if trial_run:
-                wandb.log(metrics)
-                wandb.log({"trial_score": best_mcc})  
-                wandb.finish()
-
-            self._log_trial_to_csv(trial.number, config, metrics)
-            logger.info(f"Trial {trial.number}: MCC={best_mcc:.4f}, Val_Loss={best_val_loss:.4f}, Epoch={epoch}, Params={model_params:,}")
-            
-            return best_mcc 
-            
-        except optuna.TrialPruned:
-            pruned_metrics = {
-                "starting_val_loss": float('inf'),
-                "starting_train_loss": float('inf'),
-                'best_mcc': 0.0,  
-                "best_f1_minority": 0.0,
-                "best_balanced_accuracy": 0.0,
-                'best_train_loss': float('inf'),
-                'best_val_loss': float('inf'),
-                'final_train_loss': float('inf'),
-                'final_val_loss': float('inf'),
-                'final_f1_minority': 0.0,
-                'final_mcc': 0.0,  
-                'final_balanced_accuracy': 0.0,
-                'final_epoch': 0,
-                'converged': False,
-                'model_parameters': 0,
-                'status': 'pruned',
-                'config_valid': True
-            }
-            
-            if trial_run:
-                wandb.log(pruned_metrics)
-                wandb.finish()
-            
-            self._log_trial_to_csv(trial.number, self.suggest_params(trial), pruned_metrics)
-            logger.info(f"Trial {trial.number}: Pruned")
-            raise
-            
-        except Exception as e:
-            logger.error(f"Trial {trial.number} failed: {e}")
-            return -1.0
-    
-    def _load_data_once(self):
-        """Load data once during initialization with default batch size"""
-        try:
-            logger.info("Loading data once for all trials...")
-
-            # Use a default batch size for initial data loading
-            # This will be overridden per trial if batch_size is in search_space
-            default_batch_size = self.config.get('batch_size', 128)
-            
-            # If batch_size is in search_space, use a reasonable default
-            if 'batch_size' in self.search_space:
-                default_batch_size = 128  # Safe default
-                logger.info(f"batch_size is tunable, using default {default_batch_size} for initial load")
-
-            dataloaders = create_data_loaders(
-                dataset_names=self.config['dataset_names'],
-                folder_names=self.config['folder_names'],
-                dataset_type=self.config.get('dataset_type', 'default'),
-                batch_size=default_batch_size,  # Use default batch size
-                max_nodes=self.config.get('max_nodes', 1000),
-                max_edges=self.config.get('max_edges', 5000),
-                train_ratio=self.config.get('train_ratio', 0.85),
-                seed=self.seed,
-                num_workers=self.config.get('num_workers', 0),
-                batching_type=self.config.get('batching_type', 'dynamic'),
-            )
-            
-            self.train_loader = dataloaders.get("train")
-            self.val_loader = dataloaders.get("validation")
-            self.default_batch_size = default_batch_size  # Store for reference
-            
-            if not self.train_loader or not self.val_loader:
-                raise ValueError("Failed to create data loaders")
-            
-            self.data_sample = self.train_loader.dataset[0]
-            
-            logger.info(f"Data loaded successfully: {len(self.train_loader)} train batches, {len(self.val_loader)} val batches")
-            
-        except Exception as e:
-            logger.error(f"Failed to load data: {e}")
-            raise
-    
-    def _create_dynamic_data_loader(self, batch_size: int):
-        """Create new data loaders with different batch size if needed"""
-        # Always create new loaders if batch_size is tunable or different from current
-        current_batch_size = getattr(self, 'default_batch_size', self.config.get('batch_size', 128))
-        
-        if batch_size == current_batch_size and 'batch_size' not in self.search_space:
-            return self.train_loader, self.val_loader
-        
-        # Create new loaders with the specified batch size
-        try:
-            dataloaders = create_data_loaders(
-                dataset_names=self.config['dataset_names'],
-                folder_names=self.config['folder_names'],
-                dataset_type=self.config.get('dataset_type', 'default'),
-                batch_size=batch_size,  
-                max_nodes=self.config.get('max_nodes', 1000),
-                max_edges=self.config.get('max_edges', 5000),
-                train_ratio=self.config.get('train_ratio', 0.85),
-                seed=self.seed,
-                num_workers=self.config.get('num_workers', 0),
-                batching_type=self.config.get('batching_type', 'dynamic'),
-            )
-            
-            return dataloaders.get("train"), dataloaders.get("validation")
-        
-        except Exception as e:
-            logger.warning(f"Failed to create data loader with batch_size={batch_size}: {e}")
-            return None, None
-
-    def _setup_training(self, config: dict):
-        """Setup model and criterion (data is already loaded)"""
-        try:
-            # Load model
-            model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
-            model_class = getattr(model_module, config['model_module'])
-
-            batch_size = config.get('batch_size', self.config.get('batch_size', 128))
-            
-            # Get data loaders 
-            train_loader, val_loader = self._create_dynamic_data_loader(batch_size)
-            
-            if not train_loader or not val_loader:
-                return None, None, None, None
-
-            model_kwargs = {
-                'node_input_dim': self.data_sample.x.shape[1],
-                'edge_input_dim': self.data_sample.edge_attr.shape[1],
-            }
-
-            for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
-                'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
-                'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
-                'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
-                'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
-                'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
-                'loss_scaling_strategy', 'enforce_radiality']:
-                if key in config:
-                    value = config[key]
-                    
-                    # Skip empty lists or zero values for optional parameters
-                    if key == 'node_hidden_dims' and (not value or value == []):
-                        if config.get('use_node_mlp', True):
-                            model_kwargs[key] = [128]  # Default fallback
-                        else:
-                            continue  # Skip if node MLP is disabled
-                    elif key == 'edge_hidden_dims' and (not value or value == []):
-                        if config.get('use_edge_mlp', True):
-                            model_kwargs[key] = [128]  # Default fallback
-                        else:
-                            continue  # Skip if edge MLP is disabled
-                    elif key in ['gat_heads', 'gat_dropout', 'gin_eps', 'gin_mlp_layers', 
-                                'switch_attention_heads', 'phyr_k_ratio'] and value == 0:
-                        # Skip zero values for conditional parameters
-                        continue
-                    elif key == 'gin_train_eps' and not config.get('gnn_type') == 'GIN':
-                        continue
-                    elif key == 'gnn_hidden_dim' and value == 0:
-                        continue  # Skip if no GNN
-                    else:
-                        model_kwargs[key] = value
-            
-            model = model_class(**model_kwargs).to(self.device)
-
-            criterion_name = config.get('criterion_name', 'MSELoss')
-            if criterion_name == "WeightedBCELoss":
-                criterion = WeightedBCELoss(pos_weight=2.0)
-            elif criterion_name == "FocalLoss":
-                criterion = FocalLoss(alpha=1.0, gamma=2.0)
-            elif criterion_name == "MSELoss":
-                criterion = nn.MSELoss()
-            elif criterion_name == "CrossEntropyLoss":
-                criterion = nn.CrossEntropyLoss()
+                    best_mcc_from_csv = best_mcc
+                    best_trial_num = best_trial_from_optuna
             else:
-                criterion = getattr(nn, criterion_name)()
-            
-            return model, train_loader, val_loader, criterion
-            
+                best_mcc_from_csv = best_mcc
+                best_trial_num = best_trial_from_optuna
         except Exception as e:
-            logger.error(f"Setup failed: {e}")
-            return None, None, None, None
-    
+            logger.warning(f"Could not read CSV file: {e}. Using Optuna data.")
+            best_mcc_from_csv = best_mcc
+            best_trial_num = best_trial_from_optuna
+        
+        # Save best config
+        best_config = self.config.copy()
+        best_config.update(self.fixed_params)
+        best_config.update(study.best_params)
+        best_config['_hpo_metadata'] = {
+            'best_mcc': best_mcc,  
+            'best_trial': best_trial_num,
+            'total_trials': len(study.trials),
+            'completed_trials': len(completed),
+            'experiment_id': self.experiment_id,
+            'csv_file': str(self.csv_file.name)
+        }
+        
+        config_file = self.results_dir / "best_config.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump(best_config, f)
+
+        # Create parallel plot
+        fig = self.create_parallel_plot(study)
+        if fig:
+            plot_file = self.results_dir / "parallel_coordinates.html"
+            fig.write_html(plot_file)
+            logger.info(f"Interactive plot saved: {plot_file}")
+
+        # Save study
+        with open(self.results_dir / "study.pkl", 'wb') as f:
+            pickle.dump(study, f)
+       
+        logger.info(f"\nHPO Experiment Complete!")
+        logger.info(f"Experiment ID: {self.experiment_id}")
+        logger.info(f"Best MCC Score: {best_mcc:.4f} (Trial #{best_trial_num})")  
+        logger.info(f"Completed Trials: {len(completed)}/{len(study.trials)}")
+        logger.info(f"Results saved to: {self.results_dir}")
+        logger.info(f"CSV data: {self.csv_file}")
+        logger.info(f"Best config: {config_file}")
+        if fig:
+            logger.info(f"Interactive plot: {plot_file}")
+
+        # Show top trials
+        try:
+            if self.csv_file.exists():
+                df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
+                completed_df = df[df['status'] == 'completed']
+                if len(completed_df) > 0:
+                    top_5 = completed_df.nlargest(5, 'best_mcc')[['trial_number', 'best_mcc', "starting_val_loss", 'best_val_loss', 'final_epoch']]
+                    logger.info(f"\nTop 5 Trials from CSV:")
+                    logger.info(top_5.to_string(index=False))
+                else:
+                    raise ValueError("No completed trials in CSV")
+            else:
+                raise FileNotFoundError("CSV file not found")
+        except Exception as e:
+            logger.warning(f"Could not show top trials from CSV: {e}")
+            logger.info(f"\nTop 5 Trials from Optuna:")
+            completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            top_trials = sorted(completed_trials, key=lambda t: t.user_attrs.get('best_mcc', t.value), reverse=True)[:5]
+            for i, trial in enumerate(top_trials):
+                mcc = trial.user_attrs.get('best_mcc', trial.value)  
+                val_loss = trial.user_attrs.get('best_val_loss', 'N/A')
+                epoch = trial.user_attrs.get('final_epoch', 'N/A')
+                logger.info(f"  Trial {trial.number}: MCC={mcc:.4f}, Val_Loss={val_loss}, Epoch={epoch}")
+
     def create_parallel_plot(self, study: optuna.Study) -> go.Figure:
         """Create parallel coordinates plot with robust CSV handling"""
         try:
             if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
                 try:
                     df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
-                    df = df[df['status'] == 'completed'].sort_values('best_mcc', ascending=False)  # Changed: Sort by MCC
+                    df = df[df['status'] == 'completed'].sort_values('best_mcc', ascending=False)  
                     
                     if len(df) >= 5:
                         return self._create_plot_from_dataframe(df)
@@ -823,7 +737,6 @@ class SimpleHPO:
         if len(completed_trials) < 5:
             return None
         
-
         data = []
         for trial in completed_trials:
             row = trial.params.copy()
@@ -892,7 +805,6 @@ class SimpleHPO:
                         range=[df[col].min(), df[col].max()]
                     ))
         
-
         fig = go.Figure(data=go.Parcoords(
             line=dict(color=df[eval_metric], colorscale='Viridis', showscale=True,
                      colorbar=dict(title="MCC Score")), 
@@ -906,202 +818,203 @@ class SimpleHPO:
         )
         
         return fig
-    
-    def run(self, n_trials: int = 100, use_wandb: bool = False) -> optuna.Study:
-        """Run optimization with experiment-level W&B tracking"""
 
-        if use_wandb:
-            self.wandb_run = wandb.init(
-                project=self.config.get('wandb_project', 'HPO'),
-                group=None,  # This is the parent experiment
-                name=self.experiment_id,
-                job_type="hpo_experiment", 
-                tags=[self.study_name, "hpo_experiment"],
-                config={
-                    **self.config, 
-                    'search_space': self.search_space,
-                    'fixed_params': self.fixed_params,
-                    'n_trials': n_trials,
-                    'experiment_id': self.experiment_id
-                }
-            )
-        
-        logger.info(f"Starting HPO Experiment: {self.experiment_id}")
-        logger.info(f"Study: {self.study_name} with {n_trials} trials")
-        logger.info(f"Results directory: {self.results_dir}")
-        logger.info(f"CSV tracking: {self.csv_file}")
-        
-        sampler = optuna.samplers.TPESampler(
-            seed=self.seed,
-            n_startup_trials=self.n_startup_trials,
-            constraints_func=self._optuna_constraints,
-        )
-        study = optuna.create_study(
-            direction="maximize", 
-            pruner=optuna.pruners.MedianPruner(
-                n_startup_trials=self.pruner_startup,
-                n_warmup_steps=self.pruner_warmup,
-            ),
-            sampler=sampler,
-        )
-        
-        def experiment_callback(study, trial):
-            if (trial.state == optuna.trial.TrialState.COMPLETE and 
-                self.wandb_run is not None and 
-                not self.wandb_run._backend and  
-                wandb.run is not None):
-                
-                try:
-                    completed_trials = len([t for t in study.trials 
-                                        if t.state == optuna.trial.TrialState.COMPLETE])
-                    best_mcc = study.best_value if study.best_value > -1 else -1  
- 
-                    wandb.log({
-                        "experiment/completed_trials": completed_trials,
-                        "experiment/best_mcc_so_far": best_mcc,  
-                        "experiment/trial_number": trial.number,
-                        "experiment/current_trial_mcc": trial.user_attrs.get('best_mcc', -1),  
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to log to W&B in callback: {e}")
-        
-        # Run optimization
-        study.optimize(self.objective, n_trials=n_trials, callbacks=[experiment_callback])
-     
-        completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-        if self.wandb_run and completed:
-            try:
-                # Log final experiment summary
-                all_mccs = [t.user_attrs.get('best_mcc', -1) for t in completed]  
-                wandb.log({
-                    "experiment/final_best_mcc": max(all_mccs),  
-                    "experiment/mean_mcc": np.mean(all_mccs),  
-                    "experiment/std_mcc": np.std(all_mccs), 
-                    "experiment/total_completed": len(completed),
-                    "experiment/success_rate": len(completed) / len(study.trials)
-                })
-            except Exception as e:
-                logger.warning(f"Failed to log final summary to W&B: {e}")
-        self._save_results(study)
-    
-        
-        if self.wandb_run and wandb.run is not None:
-            try:
-                wandb.finish()
-            except Exception as e:
-                logger.warning(f"Failed to finish W&B run: {e}")
-    
-        return study
-    
-    def _save_results(self, study: optuna.Study):
-        """Save results and create visualizations with robust CSV handling"""
-        completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-        
-        if not completed:
-            logger.error("No completed trials!")
-            return
-        
-        best_mcc = study.best_value if study.best_value > -1 else -1  
-        best_trial_from_optuna = study.best_trial.number
 
-        try:
-            if self.csv_file.exists() and self.csv_file.stat().st_size > 0:
-                try:
-                    df = pd.read_csv(self.csv_file, quoting=1)
-                except:
-                    try:
-                        df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
-                    except:
-                        df = pd.read_csv(self.csv_file, on_bad_lines='skip')
+def _trial_worker(config_path: str, study_name: str, trial_id: int, 
+                  complete_config: Dict[str, Any], seed: int, 
+                  base_config: dict, fixed_params: dict) -> dict:
+    """Worker function that runs in separate process - receives complete config"""
+    try:
+        # Force CPU and limit threads in worker
+        device = torch.device("cpu")
+        torch.set_num_threads(1)
+        
+        # Set environment variables for this worker
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        os.environ['OPENBLAS_NUM_THREADS'] = '1'
+        os.environ['NUMEXPR_NUM_THREADS'] = '1'
+        
+        # The config is already complete with all defaults applied
+        config = complete_config
+        
+        # Load model module
+        model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
+        model_class = getattr(model_module, config['model_module'])
+        
+        # Create data loaders for this worker
+        batch_size = config.get('batch_size', 128)
+        dataloaders = create_data_loaders(
+            dataset_names=config.get('dataset_names', base_config['dataset_names']),
+            folder_names=config.get('folder_names', base_config['folder_names']),
+            dataset_type=config.get('dataset_type', 'default'),
+            batch_size=batch_size,
+            max_nodes=config.get('max_nodes', 1000),
+            max_edges=config.get('max_edges', 5000),
+            train_ratio=config.get('train_ratio', 0.85),
+            seed=seed,
+            num_workers=0,  # Important: Set to 0 for multiprocessing
+            batching_type=config.get('batching_type', 'dynamic'),
+        )
+        
+        train_loader = dataloaders.get("train")
+        val_loader = dataloaders.get("validation")
+        
+        if not train_loader or not val_loader:
+            return {'objective_value': float('-inf'), 'metrics': {'status': 'failed_data_loading'}}
+
+        data_sample = train_loader.dataset[0]
+        
+        # Build model kwargs
+        model_kwargs = {
+            'node_input_dim': data_sample.x.shape[1],
+            'edge_input_dim': data_sample.edge_attr.shape[1],
+        }
+
+        # Add all model parameters from config
+        for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
+            'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
+            'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
+            'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
+            'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
+            'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
+            'loss_scaling_strategy', 'enforce_radiality']:
+            if key in config:
+                value = config[key]
                 
-                completed_df = df[df['status'] == 'completed']
-                if len(completed_df) > 0:
-                    best_row = completed_df.loc[completed_df['best_mcc'].idxmax()]
-                    best_mcc_from_csv = best_row['best_mcc'] 
-                    best_trial_num = best_row['trial_number']
+                # Skip empty lists or zero values for optional parameters
+                if key == 'node_hidden_dims' and (not value or value == []):
+                    if config.get('use_node_mlp', True):
+                        model_kwargs[key] = [128]  # Default fallback
+                    else:
+                        continue  
+                elif key == 'edge_hidden_dims' and (not value or value == []):
+                    if config.get('use_edge_mlp', True):
+                        model_kwargs[key] = [128]  # Default fallback
+                    else:
+                        continue  
+                elif key in ['gat_heads', 'gat_dropout', 'gin_eps', 'gin_mlp_layers', 
+                            'switch_attention_heads', 'phyr_k_ratio'] and value == 0:
+                    continue
+                elif key == 'gin_train_eps' and not config.get('gnn_type') == 'GIN':
+                    continue
+                elif key == 'gnn_hidden_dim' and value == 0:
+                    continue  
                 else:
-                    best_mcc_from_csv = best_mcc
-                    best_trial_num = best_trial_from_optuna
-            else:
-                best_mcc_from_csv = best_mcc
-                best_trial_num = best_trial_from_optuna
-        except Exception as e:
-            logger.warning(f"Could not read CSV file: {e}. Using Optuna data.")
-            best_mcc_from_csv = best_mcc
-            best_trial_num = best_trial_from_optuna
+                    model_kwargs[key] = value
         
+        model = model_class(**model_kwargs).to(device)
+        model_params = sum(p.numel() for p in model.parameters())
 
-        best_config = self.config.copy()
-        best_config.update(self.fixed_params)
-        best_config.update(study.best_params)
-        best_config['_hpo_metadata'] = {
-            'best_mcc': best_mcc,  
-            'best_trial': best_trial_num,
-            'total_trials': len(study.trials),
-            'completed_trials': len(completed),
-            'experiment_id': self.experiment_id,
-            'csv_file': str(self.csv_file.name)
+        # Setup criterion
+        criterion_name = config.get('criterion_name', 'MSELoss')
+        if criterion_name == "WeightedBCELoss":
+            criterion = WeightedBCELoss(pos_weight=2.0)
+        elif criterion_name == "FocalLoss":
+            criterion = FocalLoss(alpha=1.0, gamma=2.0)
+        elif criterion_name == "MSELoss":
+            criterion = nn.MSELoss()
+        elif criterion_name == "CrossEntropyLoss":
+            criterion = nn.CrossEntropyLoss()
+        else:
+            criterion = getattr(nn, criterion_name)()
+        
+        optimizer = optim.Adam(model.parameters(), 
+                             lr=config['learning_rate'], 
+                             weight_decay=config['weight_decay'])
+
+        lambda_dict = {
+            'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
+            'lambda_mask': config.get('lambda_mask', 0.01),
+            'lambda_connectivity': config.get('lambda_connectivity', 0.05),
+            'lambda_radiality': config.get('lambda_radiality', 0.05),
+            'normalization_type': config.get('normalization_type', 'adaptive'),
+            'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
         }
         
-        config_file = self.results_dir / "best_config.yaml"
-        with open(config_file, 'w') as f:
-            yaml.dump(best_config, f)
-
-        fig = self.create_parallel_plot(study)
-        if fig:
-            plot_file = self.results_dir / "parallel_coordinates.html"
-            fig.write_html(plot_file)
-            logger.info(f"Interactive plot saved: {plot_file}")
-
-        with open(self.results_dir / "study.pkl", 'wb') as f:
-            pickle.dump(study, f)
-       
-        logger.info(f"\nHPO Experiment Complete!")
-        logger.info(f"Experiment ID: {self.experiment_id}")
-        logger.info(f"Best MCC Score: {best_mcc:.4f} (Trial #{best_trial_num})")  
-        logger.info(f"Completed Trials: {len(completed)}/{len(study.trials)}")
-        logger.info(f"Results saved to: {self.results_dir}")
-        logger.info(f"CSV data: {self.csv_file}")
-        logger.info(f"Best config: {config_file}")
-        if fig:
-            logger.info(f"Interactive plot: {plot_file}")
-
-        try:
-            if self.csv_file.exists():
-                df = pd.read_csv(self.csv_file, quoting=1, on_bad_lines='skip')
-                completed_df = df[df['status'] == 'completed']
-                if len(completed_df) > 0:
-                    top_5 = completed_df.nlargest(5, 'best_mcc')[['trial_number', 'best_mcc', "starting_val_loss", 'best_val_loss', 'final_epoch']]
-                    logger.info(f"\nTop 5 Trials from CSV:")
-                    logger.info(top_5.to_string(index=False))
-                else:
-                    raise ValueError("No completed trials in CSV")
+        # Training loop
+        starting_val_loss = float('inf')
+        starting_train_loss = float('inf')
+        best_train_loss = float('inf')
+        best_val_loss = float('inf')
+        best_minority_f1 = 0.0
+        best_mcc = -1.0 
+        best_balanced_accuracy = 0.0
+        patience = 0
+        max_epochs = min(config.get('epochs', 100), 80)
+        max_patience = config.get('patience', 25)
+        
+        for epoch in range(max_epochs):
+            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
+            val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
+            print(f"Epoch: {epoch}  ->      train loss: {train_loss},       val loss: {val_loss}")
+            if epoch == 0: 
+                starting_val_loss = val_loss
+                starting_train_loss = train_loss
+                
+            current_f1_minority = val_dict.get('test_f1_minority', 0.0)
+            current_mcc = val_dict.get('test_mcc', 0.0)
+            current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
+            
+            if current_mcc > best_mcc:
+                best_mcc = current_mcc
+                best_minority_f1 = current_f1_minority
+                best_balanced_accuracy = current_balanced_accuracy
+                best_train_loss = train_loss
+                best_val_loss = val_loss
+                patience = 0
             else:
-                raise FileNotFoundError("CSV file not found")
-        except Exception as e:
-            logger.warning(f"Could not show top trials from CSV: {e}")
-            logger.info(f"\nTop 5 Trials from Optuna:")
-            completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            top_trials = sorted(completed_trials, key=lambda t: t.user_attrs.get('best_mcc', t.value), reverse=True)[:5]
-            for i, trial in enumerate(top_trials):
-                mcc = trial.user_attrs.get('best_mcc', trial.value)  
-                val_loss = trial.user_attrs.get('best_val_loss', 'N/A')
-                epoch = trial.user_attrs.get('final_epoch', 'N/A')
-                logger.info(f"  Trial {trial.number}: MCC={mcc:.4f}, Val_Loss={val_loss}, Epoch={epoch}")  
+                patience += 1
+            
+            # Early stopping
+            if patience >= max_patience:
+                break
+        
+        metrics = {
+            "starting_val_loss": starting_val_loss,
+            "starting_train_loss": starting_train_loss,
+            'best_mcc': best_mcc,
+            'best_train_loss': best_train_loss,
+            'best_val_loss': best_val_loss,
+            "best_f1_minority": best_minority_f1,
+            "best_balanced_accuracy": best_balanced_accuracy,
+            "final_train_loss": train_loss,
+            "final_val_loss" : val_loss,
+            "final_f1_minority" : current_f1_minority,
+            "final_mcc" : current_mcc,
+            "final_balanced_accuracy" : current_balanced_accuracy,
+            'final_epoch': epoch,
+            'converged': patience < max_patience,
+            'model_parameters': model_params,
+            'status': 'completed',
+            'config_valid': True
+        }
+        
+        return {'objective_value': best_mcc, 'metrics': metrics}
+        
+    except Exception as e:
+        logger.error(f"Trial {trial_id} failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'objective_value': float('-inf'), 'metrics': {'status': 'failed', 'error': str(e)}}
 
 
 def main():
+    # Set proper multiprocessing start method for cluster
+    mp.set_start_method('spawn', force=True)
+    
     parser = argparse.ArgumentParser(description="Simplified HPO")
     parser.add_argument("--config", type=str, required=True, help="Config YAML path")
     parser.add_argument("--study_name", type=str, default="hpo", help="Study name")
+    parser.add_argument("--n_parallel", type=int, default=2, help="Number of parallel trials")
     parser.add_argument("--trials", type=int, default=100, help="Number of trials")
     parser.add_argument("--wandb", action="store_true", help="Use W&B")
     
     args = parser.parse_args()
     
     config_path = Path("model_search/config_files") / args.config
-    hpo = SimpleHPO(config_path, args.study_name)
-    hpo.run(args.trials, args.wandb)
+    hpo = HPO(config_path, args.study_name, n_parallel=args.n_parallel)
+    hpo.run_async_optimization(args.trials, args.wandb)
 
 
 if __name__ == "__main__":

@@ -486,7 +486,24 @@ class HPO:
             return False
 
         return True
-    
+    def objective(self, trial: optuna.Trial) -> float:
+        # 1) build config
+        config = self.suggest_params(trial)
+        # 2) run exactly what _trial_worker does, but in‐process
+        result = _trial_worker(
+            str(self.config_path),
+            self.study_name,
+            trial._trial_id,
+            config,
+            self.seed,
+            self.config,
+            self.fixed_params
+        )
+        # 3) push metrics into trial attrs
+        for k, v in result['metrics'].items():
+            trial.set_user_attr(k, v)
+        # 4) return the objective
+        return result['objective_value']
     def run_parallel_batch(self, study: optuna.Study, batch_size: int = None) -> list:
         """Run a batch of trials in parallel - FIXED version"""
         if batch_size is None:
@@ -585,37 +602,47 @@ class HPO:
             )
         )
 
-        completed_trials = 0
-        start_time = time.time()
+        # completed_trials = 0
+        # start_time = time.time()
         
-        while completed_trials < n_trials:
-            remaining_trials = n_trials - completed_trials
-            current_batch_size = min(batch_size, remaining_trials)
+        # while completed_trials < n_trials:
+        #     remaining_trials = n_trials - completed_trials
+        #     current_batch_size = min(batch_size, remaining_trials)
             
-            logger.info(f"Running batch of {current_batch_size} trials ({completed_trials}/{n_trials} completed)")
+        #     logger.info(f"Running batch of {current_batch_size} trials ({completed_trials}/{n_trials} completed)")
             
-            batch_results = self.run_parallel_batch(study, current_batch_size)
-            completed_trials += len(batch_results)
+        #     batch_results = self.run_parallel_batch(study, current_batch_size)
+        #     completed_trials += len(batch_results)
             
-            # Log progress
-            if self.wandb_run:
-                best_value = study.best_value if study.trials else -1
-                elapsed_time = time.time() - start_time
-                wandb.log({
-                    "experiment/completed_trials": completed_trials,
-                    "experiment/best_mcc_so_far": best_value,
-                    "experiment/elapsed_time": elapsed_time,
-                    "experiment/trials_per_minute": completed_trials / (elapsed_time / 60)
-                })
+        #     # Log progress
+        #     if self.wandb_run:
+        #         best_value = study.best_value if study.trials else -1
+        #         elapsed_time = time.time() - start_time
+        #         wandb.log({
+        #             "experiment/completed_trials": completed_trials,
+        #             "experiment/best_mcc_so_far": best_value,
+        #             "experiment/elapsed_time": elapsed_time,
+        #             "experiment/trials_per_minute": completed_trials / (elapsed_time / 60)
+        #         })
             
-            logger.info(f"Batch completed. Best MCC so far: {study.best_value:.4f}")
+        #     logger.info(f"Batch completed. Best MCC so far: {study.best_value:.4f}")
 
-        # Save results
+        # # Save results
+        # self._save_results(study)
+        
+        # if self.wandb_run:
+        #     wandb.finish()
+        
+        # return study
+        # fire n_trials asynchronously on n_parallel workers:
+        study.optimize(
+            self.objective,
+            n_trials=n_trials,
+            n_jobs=self.n_parallel,
+            catch=(Exception,),
+        )
+        # once done, save & exit
         self._save_results(study)
-        
-        if self.wandb_run:
-            wandb.finish()
-        
         return study
 
     def _save_results(self, study: optuna.Study):
@@ -947,7 +974,7 @@ def _trial_worker(config_path: str, study_name: str, trial_id: int,
         for epoch in range(max_epochs):
             train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
             val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
-            
+            print(f"Epoch: {epoch}  ->      train loss: {train_loss},       val loss: {val_loss}")
             if epoch == 0: 
                 starting_val_loss = val_loss
                 starting_train_loss = train_loss
