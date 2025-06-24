@@ -7,6 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 import sys 
 from pathlib import Path
+import os 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "model_search")])
@@ -31,7 +32,7 @@ def build_cvx_layer(max_n: int, max_e: int):
     y_warm       = cp.Parameter(max_e, nonneg=True)
     v_warm       = cp.Parameter(max_n, nonneg=True)
     
-    # CVX parameters (already padded in your data pipeline)
+    # CVX parameters 
     p_inj_full   = cp.Parameter(max_n)
     q_inj_full   = cp.Parameter(max_n)
     y0_full      = cp.Parameter(max_e, nonneg=True)
@@ -128,8 +129,6 @@ def build_cvx_layer(max_n: int, max_e: int):
         qe <=  Mbal*sub_mask_full, -qe <=  Mbal*sub_mask_full
     ]
 
-
-
     # Add a new parameter for the penalty weight
     lambda_penalty = cp.Parameter(nonneg=True)
 
@@ -139,20 +138,15 @@ def build_cvx_layer(max_n: int, max_e: int):
     loss += 0.001*cp.sum_squares(v_sq - v_warm)
     loss += 0.01*cp.norm1(y_line - y0_full)
 
-    # Add the convex penalty to encourage binary line states (soft radiality)
-    # This term is convex and pushes y_line values towards 0 or 1.
+
     penalty = -cp.sum(y_line - cp.square(y_line)) 
     loss += lambda_penalty * penalty
 
-    # We also still need the spanning tree constraint, but in a relaxed form.
-    # This ensures the correct number of lines are active, which is a necessary
-    # condition for radiality.
     cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
 
 
     problem = cp.Problem(cp.Minimize(loss), cons)
-    
-    # Verify DPP compliance
+
     if not problem.is_dcp(dpp=True):
         print("Warning: Problem is not DPP compliant!")
         for i, constraint in enumerate(cons):
@@ -219,15 +213,19 @@ class cvx(nn.Module):
         # 1) one big GNN pass
         gnn_out = self.gnn(data)
         
-        # ←—— USE THE RAW GNN SCORES HERE
-        all_switch  = gnn_out["switch_logits"]    # ∑edges
-        all_voltage = gnn_out["voltage_scores"]   # ∑nodes
+        all_switch  = gnn_out["switch_logits"]      # ∑edges
+        # node-level warm start must come from "node_v", not the edge-based voltage_predictions
+        if "node_v" in gnn_out:
+            all_voltage = gnn_out["node_v"]        # ∑nodes
+        else:
+            # fallback if you ever swap key names
+            all_voltage = gnn_out["voltage_predictions"]
 
         # 2) get per‐subproblem sizes
         edge_counts = data.cvx_E.tolist()   
         
         # ptr‐based node counts (safest)
-        ptr = data.ptr.tolist()  # e.g. [0, 95, 190]
+        ptr = data.ptr.tolist()  
         node_counts = [ptr[i+1] - ptr[i] for i in range(len(ptr)-1)]
 
         # 3) split
@@ -270,13 +268,14 @@ class cvx(nn.Module):
                 S_nodes, S_edges,
                 v_t, z_t, y_t, f_t, I_t,
                 torch.tensor(self.lambda_penalty,
+                             dtype=sw_full.dtype,
                              device=sw_full.device)
             ]
             cvx_args.append(params)
 
         # 5) parallel CVX solves (threads keep autograd)
         def _solve(args):
-            (y_full, v_sq_full), = self.cvx_layer(*args)
+            y_full, v_sq_full = self.cvx_layer(*args)
             return y_full, v_sq_full
 
         max_workers = min(len(cvx_args), os.cpu_count() or 1)
@@ -295,6 +294,12 @@ class cvx(nn.Module):
         switch_preds  = torch.cat(switch_out,  dim=0)
         voltage_preds = torch.cat(voltage_out, dim=0)
 
+        print(f"Switch predictions shape: {switch_preds.shape}")
+        print(f"Voltage predictions shape: {voltage_preds.shape}")
+        print(f"switch predictions: {torch.mean(switch_preds):.4f}, ")
+        print(f"voltage predictions: {torch.mean(voltage_preds):.4f}")
+        print(f"Switch predictions min: {switch_preds.min():.4f}, "
+              f"max: {switch_preds.max():.4f}")
         # 7) return GNN dict + CVX overrides
         return {
             **gnn_out,

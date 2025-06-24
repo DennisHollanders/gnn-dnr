@@ -135,8 +135,8 @@ def process_single_graph(gid, pp_all, dataset_type):
         logger.warning(f"No optimized net for {gid}, skipping")
         return None
 
-    # 1) pick original vs post_mst for X-features
-    phase = "mst" #if random.random() < feature_phase_prob else "original"
+
+    phase = "mst" 
     data_x = create_pyg_from_pp(pp_all[phase][gid])
 
     # 2) build y-labels from optimized net
@@ -144,19 +144,17 @@ def process_single_graph(gid, pp_all, dataset_type):
     data_x.edge_y = data_y.edge_attr[:, 2]    # switch_state
     data_x.node_y_voltage = data_y.x[:, 2]    # vm_pu
     data_x.graph_id = gid
+    
     if dataset_type == "cvx":
         try:
             cvx_feat = cxv_features(pp_all[phase][gid])
-            
-            # ENSURE CONSISTENT SHAPES FROM THE START
+
             N, E = cvx_feat['N'], cvx_feat['E']
-            
-            # All scalars as [1] tensors
+
             data_x.cvx_N = torch.tensor([N], dtype=torch.long)
             data_x.cvx_E = torch.tensor([E], dtype=torch.long) 
             data_x.cvx_bigM_v = torch.tensor([float(cvx_feat['bigM_v'])], dtype=torch.float32)
-            
-            # All 1D features as [1, length] tensors
+
             data_x.cvx_from_idx = cvx_feat['from_idx'].unsqueeze(0)
             data_x.cvx_to_idx = cvx_feat['to_idx'].unsqueeze(0)
             data_x.cvx_r_pu = cvx_feat['r_pu'].unsqueeze(0)
@@ -166,17 +164,18 @@ def process_single_graph(gid, pp_all, dataset_type):
             data_x.cvx_bigM_flow = cvx_feat['bigM_flow'].unsqueeze(0)
             data_x.cvx_y0 = cvx_feat['y0'].unsqueeze(0)
             
-            # Handle sub_idx carefully - it can be empty!
             sub_idx = cvx_feat['sub_idx']
-            if len(sub_idx) == 0:
-                # Create empty tensor with proper batch dim
-                data_x.cvx_sub_idx = torch.empty((1, 0), dtype=torch.long)
-            else:
-                data_x.cvx_sub_idx = sub_idx.unsqueeze(0)
+            data_x.cvx_sub_idx = sub_idx
+            # if len(sub_idx) == 0:
+            #     data_x.cvx_sub_idx = torch.empty((1, 0), dtype=torch.long)
+            # else:
+            #     data_x.cvx_sub_idx = sub_idx.unsqueeze(0)
                 
         except Exception as e:
             logger.error(f"CVX processing failed for {gid}: {e}")
             return None
+    
+    return data_x
 
 def create_pyg_dataset(
     base_directory,
@@ -406,8 +405,12 @@ def create_data_loaders(
             else:
                 raise ValueError(f"pad_1d_tensor only supports 1D or 2D, got ndim={t.ndim}")
 
-
-        # 3) Pad every Data object’s CVX fields up to (max_N, max_E)
+        max_substations = max(
+            len(d.cvx_sub_idx) if hasattr(d, 'cvx_sub_idx') else 0
+            for d in all_data
+        )
+        logger.info(f"Max substations: {max_substations}")
+        
         for ds_name, ds in datasets.items():
             if ds is None: continue
             logger.info(f"Padding dataset: {ds_name}")
@@ -426,7 +429,7 @@ def create_data_loaders(
 
                 # --- Create substation and non-substation masks ---
                 sub_mask = torch.zeros(max_N, dtype=torch.float32)
-                sub_indices = data.cvx_sub_idx.long().squeeze(0)
+                sub_indices = data.cvx_sub_idx.long()  # No squeeze needed now
                 valid_sub_indices = sub_indices[sub_indices < Ni]
                 if len(valid_sub_indices) > 0:
                     sub_mask[valid_sub_indices] = 1.0
@@ -460,13 +463,25 @@ def create_data_loaders(
                 data.cvx_A_from = A_from.unsqueeze(0)
                 data.cvx_A_to = A_to.unsqueeze(0)
 
-                # --- Finally, overwrite old size and index tensors ---
+                # --- Pad sub_idx to consistent size ---
+                if max_substations > 0:
+                    num_subs = len(sub_indices)
+                    if num_subs < max_substations:
+                        # Pad with -1 or max_N to indicate invalid indices
+                        padding = torch.full((max_substations - num_subs,), -1, dtype=torch.long)
+                        sub_indices_padded = torch.cat([sub_indices, padding])
+                    else:
+                        sub_indices_padded = sub_indices[:max_substations]
+                else:
+                    sub_indices_padded = torch.empty(0, dtype=torch.long)
+                
+                data.cvx_sub_idx = sub_indices_padded.unsqueeze(0)
+
+                # --- Finally, overwrite old size tensors ---
                 data.cvx_N = torch.tensor([max_N], dtype=torch.long)
                 data.cvx_E = torch.tensor([max_E], dtype=torch.long)
                 data.cvx_from_idx = from_idx_padded
                 data.cvx_to_idx = to_idx_padded
-                data.cvx_sub_idx = torch.tensor(sub_indices, dtype=torch.long).unsqueeze(0)
-
     for dataset_name, dataset in datasets.items():
         if dataset:
             dataloaders[dataset_name] = _create_loader(dataset)
@@ -497,14 +512,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
     parser.add_argument("--dataset_names", type=str, nargs="+", default= [
                                                                         "train",
-                                                                         "validation",
-                                                                         "test"
+                                                                         #"validation",
+                                                                         #"test"
                                                                           ]
                                                                           , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
                 r"data\split_datasets\train",
-                r"data\split_datasets\validation",
-                r"data\split_datasets\test",
+                
+                #r"data\split_datasets\validation",
+                #r"data\split_datasets\test",
                 #r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test"
                 #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
@@ -513,7 +529,7 @@ if __name__ == "__main__":
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="dynamic",
                         choices =["standard", "dynamic", "neighbor"],)
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--max_nodes", type=int, default=1000, help="Maximum number of nodes in a batch (for dynamic batching)")
     parser.add_argument("--max_edges", type=int, default=5000, help="Maximum number of edges in a batch (for dynamic batching)")
     parser.add_argument("--train_ratio", type=float, default=0.85, help="Ratio of training set")
