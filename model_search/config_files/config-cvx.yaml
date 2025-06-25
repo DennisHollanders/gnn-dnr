@@ -11,7 +11,7 @@ folder_names:
 # -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
 # -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
 dataset_type: "cvx"
-batching_type: "dynamic"
+batching_type: "standard"
 max_nodes: 20000
 max_edges: 50000
 batch_size: 8

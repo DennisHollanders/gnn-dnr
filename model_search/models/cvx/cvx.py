@@ -210,104 +210,124 @@ class cvx(nn.Module):
         return S_nodes, S_edges, v_target, z_target, y_target, flow_target, I_target
 
     def forward(self, data):
-        # 1) one big GNN pass
+        # 1) GNN forward pass
         gnn_out = self.gnn(data)
         
-        all_switch  = gnn_out["switch_logits"]      # ∑edges
-        # node-level warm start must come from "node_v", not the edge-based voltage_predictions
-        if "node_v" in gnn_out:
-            all_voltage = gnn_out["node_v"]        # ∑nodes
-        else:
-            # fallback if you ever swap key names
-            all_voltage = gnn_out["voltage_predictions"]
-
-        # 2) get per‐subproblem sizes
-        edge_counts = data.cvx_E.tolist()   
+        all_switch = gnn_out["switch_logits"]
+        all_voltage = gnn_out.get("node_v", gnn_out.get("voltage_predictions"))
         
-        # ptr‐based node counts (safest)
-        ptr = data.ptr.tolist()  
+        # 2) Get actual edge and node counts
+        ptr = data.ptr.tolist()
         node_counts = [ptr[i+1] - ptr[i] for i in range(len(ptr)-1)]
-
-        # 3) split
-        switch_splits  = torch.split(all_switch,  edge_counts)
+        
+        edge_batch = data.batch[data.edge_index[0]]
+        num_graphs = len(node_counts)
+        edge_counts = []
+        
+        for i in range(num_graphs):
+            edges_in_graph_i = (edge_batch == i).sum().item()
+            edge_counts.append(edges_in_graph_i)
+        
+        # 3) Split based on actual counts
+        switch_splits = torch.split(all_switch, edge_counts)
         voltage_splits = torch.split(all_voltage, node_counts)
-
-        # 4) build CVX args per subproblem
+        
+        # 4) Prepare CVX arguments
         cvx_args = []
-        for i, (n_e, n_n) in enumerate(zip(edge_counts, node_counts)):
+        for i, (n_e_actual, n_n_actual) in enumerate(zip(edge_counts, node_counts)):
             sw_i = switch_splits[i]
             vw_i = voltage_splits[i]
-
-            pad_e = self.max_e - n_e
-            pad_n = self.max_n - n_n
-
-            sw_full = torch.cat([sw_i, sw_i.new_zeros(pad_e)], dim=0)\
-                          .clone().requires_grad_()
-            vw_full = torch.cat([vw_i, torch.ones(pad_n, device=vw_i.device)],
+            
+            n_e_padded = data.cvx_E[i].item()
+            n_n_padded = data.cvx_N[i].item()
+            
+            pad_e = n_e_padded - n_e_actual
+            pad_n = n_n_padded - n_n_actual
+            
+            # Apply sigmoid to get valid probabilities in [0, 1]
+            sw_probs = torch.sigmoid(sw_i)
+            sw_full = torch.cat([sw_probs, torch.zeros(pad_e, device=sw_probs.device)], dim=0)\
+                        .clone().requires_grad_()
+            
+            # Ensure voltages are in reasonable range
+            vw_clamped = torch.clamp(vw_i, 0.95, 1.05)
+            vw_full = torch.cat([vw_clamped, torch.ones(pad_n, device=vw_i.device)],
                                 dim=0).clone().requires_grad_()
-
+            
             S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t = \
-                self.create_selection_matrices_and_targets(n_n, n_e,
-                                                          sw_full.device)
-
+                self.create_selection_matrices_and_targets(n_n_actual, n_e_actual,
+                                                        sw_full.device)
+            
             params = [
                 sw_full, vw_full,
-                data.cvx_p_inj   [i],
-                data.cvx_q_inj   [i],
-                data.cvx_y0      [i],
-                data.cvx_r_pu    [i],
-                data.cvx_x_pu    [i],
-                data.cvx_bigM_flow   [i],
-                data.cvx_bigM_v      [i].squeeze(),
-                data.cvx_A_from  [i],
-                data.cvx_A_to    [i],
-                data.cvx_sub_mask     [i],
-                data.cvx_non_sub_mask [i],
-                data.cvx_bigM_flow_sq [i],
-                data.cvx_z_line_sq    [i],
+                data.cvx_p_inj[i],
+                data.cvx_q_inj[i],
+                data.cvx_y0[i],
+                data.cvx_r_pu[i],
+                data.cvx_x_pu[i],
+                data.cvx_bigM_flow[i],
+                data.cvx_bigM_v[i].squeeze(),
+                data.cvx_A_from[i],
+                data.cvx_A_to[i],
+                data.cvx_sub_mask[i],
+                data.cvx_non_sub_mask[i],
+                data.cvx_bigM_flow_sq[i],
+                data.cvx_z_line_sq[i],
                 S_nodes, S_edges,
                 v_t, z_t, y_t, f_t, I_t,
                 torch.tensor(self.lambda_penalty,
-                             dtype=sw_full.dtype,
-                             device=sw_full.device)
+                        dtype=sw_full.dtype,
+                        device=sw_full.device)
             ]
             cvx_args.append(params)
-
-        # 5) parallel CVX solves (threads keep autograd)
+        
+        # 5) Parallel CVX solves with simple try/except
         def _solve(args):
-            y_full, v_sq_full = self.cvx_layer(*args)
-            return y_full, v_sq_full
-
+            try:
+                y_opt, v_sq_opt = self.cvx_layer(*args)
+                return y_opt, v_sq_opt, True  # Success flag
+            except Exception as e:
+                # Return warm start values as fallback
+                y_fallback = args[0]  # sw_full (already sigmoid applied)
+                v_fallback_sq = args[1] ** 2  # vw_full squared
+                
+                if "infeasible" in str(e).lower():
+                    logger.debug(f"CVX infeasible, using warm start values")
+                else:
+                    logger.warning(f"CVX error: {e}, using warm start values")
+                
+                return y_fallback, v_fallback_sq, False  # Failure flag
+        
         max_workers = min(len(cvx_args), os.cpu_count() or 1)
         with ThreadPoolExecutor(max_workers=max_workers) as exe:
             results = list(exe.map(_solve, cvx_args))
-
-        # 6) stitch outputs back into flat tensors
+        
+        # Track success rate
+        successes = sum(1 for _, _, success in results if success)
+        if successes < len(results):
+            logger.info(f"CVX solve rate: {successes}/{len(results)} successful")
+        
+        # 6) Stitch outputs back
         switch_out = []
         voltage_out = []
-        for (y_full, v_sq_full), n_e, n_n in zip(results,
-                                                 edge_counts,
-                                                 node_counts):
-            switch_out .append(y_full   [:n_e])
-            voltage_out.append(torch.sqrt(v_sq_full[:n_n]))
-
-        switch_preds  = torch.cat(switch_out,  dim=0)
+        for (y_full, v_sq_full, _), n_e_actual, n_n_actual in zip(results,
+                                                                edge_counts,
+                                                                node_counts):
+            switch_out.append(y_full[:n_e_actual])
+            # Take square root of v_sq to get voltage
+            voltage_out.append(torch.sqrt(torch.clamp(v_sq_full[:n_n_actual], min=0.0)))
+        
+        switch_preds = torch.cat(switch_out, dim=0)
         voltage_preds = torch.cat(voltage_out, dim=0)
-
-        print(f"Switch predictions shape: {switch_preds.shape}")
-        print(f"Voltage predictions shape: {voltage_preds.shape}")
-        print(f"switch predictions: {torch.mean(switch_preds):.4f}, ")
-        print(f"voltage predictions: {torch.mean(voltage_preds):.4f}")
-        print(f"Switch predictions min: {switch_preds.min():.4f}, "
-              f"max: {switch_preds.max():.4f}")
-        # 7) return GNN dict + CVX overrides
+        
+        # Ensure switch predictions are in [0, 1]
+        switch_preds = torch.clamp(switch_preds, 0.0, 1.0)
+        
         return {
             **gnn_out,
-            "switch_predictions":  switch_preds,
+            "switch_predictions": switch_preds,
             "voltage_predictions": voltage_preds,
         }
-
-
     def log_warmstart_grads(self, stage="After backward"):
         """Call this *after* loss.backward() to log .grad norms on the warm‐starts."""
         if hasattr(self, 'last_yw') and self.last_yw.grad is not None:

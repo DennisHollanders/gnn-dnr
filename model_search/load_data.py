@@ -527,11 +527,11 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_type", type=str, default="cvx", 
                         choices=["default", "cvx"],
                         help="Type of dataloader to create")
-    parser.add_argument("--batching_type", type=str, default="dynamic",
+    parser.add_argument("--batching_type", type=str, default="standard",
                         choices =["standard", "dynamic", "neighbor"],)
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
-    parser.add_argument("--max_nodes", type=int, default=1000, help="Maximum number of nodes in a batch (for dynamic batching)")
-    parser.add_argument("--max_edges", type=int, default=5000, help="Maximum number of edges in a batch (for dynamic batching)")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--max_nodes", type=int, default=10000, help="Maximum number of nodes in a batch (for dynamic batching)")
+    parser.add_argument("--max_edges", type=int, default=50000, help="Maximum number of edges in a batch (for dynamic batching)")
     parser.add_argument("--train_ratio", type=float, default=0.85, help="Ratio of training set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for dataset splitting")
     parser.add_argument("--multiprocessing", default=False, help="Use multiprocessing for dataset creation")
