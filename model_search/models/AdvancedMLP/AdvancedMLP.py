@@ -642,41 +642,42 @@ class AdvancedMLP(nn.Module):
     """
     
     def __init__(self, 
-                 node_input_dim: int,
-                 edge_input_dim: int,
-                 # Output Configuration
-                 output_type: str = "multiclass",  
-                 num_classes: int = 2,
-                 # GNN Configuration
-                 gnn_type: Optional[str] = None,
-                 gnn_layers: int = 2,
-                 gnn_hidden_dim: int = 64,
-                 gat_heads: int = 4,
-                 gat_dropout: float = 0.1,
-                 gin_eps: float = 0.0,
-                 # MLP Configuration
-                 use_node_mlp: bool = True,
-                 use_edge_mlp: bool = True,
-                 node_hidden_dims: List[int] = [64, 32],
-                 edge_hidden_dims: List[int] = [64, 32],
-                 # General Configuration
-                 activation: str = "relu",
-                 dropout_rate: float = 0.1,
-                 use_batch_norm: bool = True,
-                 use_residual: bool = False,
-                 use_skip_connections: bool = False,
-                 pooling: str = "mean",
-                 # Switch Head Configuration
-                 switch_head_type: str = "mlp",
-                 switch_head_layers: int = 3,
-                 switch_attention_heads: int = 4,  
-                 use_gated_mp: bool = False,
-                 use_phyr: bool = False,
-                 enforce_radiality: bool = True,
+            node_input_dim: int,
+            edge_input_dim: int,
+            # Output Configuration
+            output_type: str = "multiclass",  
+            num_classes: int = 2,
+            # GNN Configuration
+            gnn_type: Optional[str] = None,
+            gnn_layers: int = 2,
+            gnn_hidden_dim: int = 64,
+            gat_heads: int = 4,
+            gat_dropout: float = 0.1,
+            gin_eps: float = 0.0,
+            # MLP Configuration
+            use_node_mlp: bool = True,
+            use_edge_mlp: bool = True,
+            node_hidden_dims: List[int] = [64, 32],
+            edge_hidden_dims: List[int] = [64, 32],
+            # General Configuration
+            activation: str = "relu",
+            dropout_rate: float = 0.1,
+            use_batch_norm: bool = True,
+            use_residual: bool = False,
+            use_skip_connections: bool = False,
+            pooling: str = "mean",
+            # Switch Head Configuration
+            switch_head_type: str = "mlp",
+            switch_head_layers: int = 3,
+            switch_attention_heads: int = 4,
+            switch_head_hidden_dim: int = 256,
+            use_gated_mp: bool = False,
+            use_phyr: bool = False,
+            enforce_radiality: bool = True,
 
-                 **kwargs):
+            **kwargs):
         super().__init__()
-        
+
         self.output_type = output_type.lower()
         self.num_classes = num_classes
         self.gnn_type = gnn_type
@@ -783,13 +784,22 @@ class AdvancedMLP(nn.Module):
             )
         elif switch_head_type == "attention":
             self.switch_head = self._create_attention_head(
-                combined_dim, switch_attention_heads, combined_dim, 
-                activation, dropout_rate, switch_output_dim
+                input_dim=combined_dim, 
+                num_heads=switch_attention_heads, 
+                hidden_dim=switch_head_hidden_dim,  # Use the new dimension
+                activation=activation, 
+                dropout=dropout_rate, 
+                output_dim=switch_output_dim
             )
             self.voltage_head = self._create_attention_head(
-                combined_dim, switch_attention_heads, combined_dim, 
-                activation, dropout_rate, 1
+                input_dim=combined_dim, 
+                num_heads=switch_attention_heads, 
+                hidden_dim=switch_head_hidden_dim,  # Use the new dimension
+                activation=activation, 
+                dropout=dropout_rate, 
+                output_dim=1
             )
+        
         elif switch_head_type == "graph_attention":
             self.switch_head = self._create_graph_attention_head(
                 self.node_output_dim, self.edge_output_dim, switch_attention_heads, 

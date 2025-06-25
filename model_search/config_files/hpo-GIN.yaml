@@ -44,7 +44,6 @@ fixed_params:
   normalization_type: "paper_based"
   
   # General Configuration (fixed)
-  activation: "leaky_relu"
   dropout_rate: 0.0
   use_batch_norm: true
   use_residual: true
@@ -56,10 +55,7 @@ fixed_params:
   enforce_radiality: false
   
   # GIN-specific fixed params
-  gin_eps: 0.1
-  gin_train_eps: false
-  gat_heads: 4
-  gat_dropout: 0.1
+
 
 # STAGE 1: ARCHITECTURE SEARCH SPACE
 search_space:
@@ -94,6 +90,10 @@ search_space:
     dim_min: 64
     dim_max: 1024
   
+  activation:
+    search_type: "categorical"
+    choices: ["relu", "leaky_relu", "elu", "tanh"]
+  
   # Edge MLP Architecture
   use_edge_mlp:
     search_type: "categorical"
@@ -119,6 +119,20 @@ search_space:
   switch_attention_heads:
     search_type: "categorical"
     choices: [1, 2, 4, 8]
+    
+  switch_dim_per_head:
+    search_type: "categorical"
+    choices: [16, 32, 64]
+
+  gin_train_eps:
+    search_type: "categorical"
+    choices: [true, false]
+  
+  gin_eps:
+    search_type: "float"
+    min: 0.0
+    max: 0.5
+
 
 # STAGE 2: HYPERPARAMETER TUNING (COMMENTED OUT)
 # Uncomment and replace search_space above for Stage 2

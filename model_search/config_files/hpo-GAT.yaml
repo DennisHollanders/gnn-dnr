@@ -43,8 +43,7 @@ fixed_params:
   loss_scaling_strategy: "fixed"
   normalization_type: "paper_based"
   
-  # General Configuration (fixed)
-  activation: "leaky_relu"
+  # General Configuration 
   dropout_rate: 0.1
   use_batch_norm: true
   use_residual: true
@@ -68,6 +67,10 @@ search_space:
     search_type: "int"
     min: 1
     max: 4
+
+  activation:
+    search_type: "categorical"
+    choices: ["relu", "leaky_relu", "elu", "tanh"]
   
   # GAT-specific architecture
   gat_heads:
@@ -115,7 +118,10 @@ search_space:
   switch_attention_heads:
     search_type: "categorical"
     choices: [1, 2, 4, 8]
-
+    
+  switch_dim_per_head:
+    search_type: "categorical"
+    choices: [16, 32, 64]
 # STAGE 2: HYPERPARAMETER TUNING (COMMENTED OUT)
 # Uncomment and replace search_space above for Stage 2
 # search_space:

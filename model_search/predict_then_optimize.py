@@ -1185,114 +1185,165 @@ if __name__ == "__main__":
         )
         predictions, gnn_times = predictor.run(test_loader, graph_ids=graph_ids)
 
-        # print(f"Prediction keys: {sorted(predictions.keys())}")
-        # print(f"Graph IDs: {sorted(graph_ids)}")
-        # print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
-        # print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
-        # # Convert to numpy arrays
-        # class_0_preds = np.array(predictor.class_0_predictions)
-        # class_1_preds = np.array(predictor.class_1_predictions)
+        print(f"Prediction keys: {sorted(predictions.keys())}")
+        print(f"Graph IDs: {sorted(graph_ids)}")
+        print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
+        print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
+        # Convert to numpy arrays
+        class_0_preds = np.array(predictor.class_0_predictions)
+        class_1_preds = np.array(predictor.class_1_predictions)
 
-        # class_0_high_conf = class_0_preds[class_0_preds > 0.5]
-        # class_1_high_conf = class_1_preds[class_1_preds > 0.5]
+        class_0_high_conf = class_0_preds[class_0_preds > 0.5]
+        class_1_high_conf = class_1_preds[class_1_preds > 0.5]
 
-        # conf0 = class_0_preds[class_0_preds > 0.5]
-        # conf1 = class_1_preds[class_1_preds > 0.5]
+        conf0 = class_0_preds[class_0_preds > 0.5]
+        conf1 = class_1_preds[class_1_preds > 0.5]
 
-        # # create 50 bins in [0.5, 1.0]
-        # bins = np.linspace(0.5, 1.0, 51)
+        # create 50 bins in [0.5, 1.0]
+        bins = np.linspace(0.5, 1.0, 51)
 
-        # plt.rcParams.update({
-        # 'font.size':         14,
-        # 'axes.titlesize':    16,
-        # 'axes.labelsize':    14,
-        # 'xtick.labelsize':   12,
-        # 'ytick.labelsize':   12,
-        # 'legend.fontsize':   12,
-        # 'figure.titlesize':  16,
-        # 'colorbar.labelsize':12,
-        #     })
+        # IEEE column width plotting setup
+        column_width_pt = 246.0  # IEEE single column width in points
+        inches_per_pt = 1.0/72.27
+        fig_w = column_width_pt * inches_per_pt
+        fig_h = fig_w * 0.6  # Slightly taller aspect ratio for better readability
 
-        # # ── Your existing code ──────────────────────────────────────
-        # fig, ax0 = plt.subplots(figsize=(10, 5))
-        # ax1 = ax0.twinx()
+        # Set up matplotlib for IEEE style
+        plt.rcParams.update({
+            'text.usetex': True,
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'Times', 'Liberation Serif'],
+            'font.size':      10,           # Reduced from 20 to 8
+            'axes.titlesize': 10,      # Reduced from 20 to 9
+            'axes.labelsize': 10,      # Reduced from 20 to 8
+            'xtick.labelsize': 10,     # Reduced from 20 to 7
+            'ytick.labelsize': 10,     # Reduced from 20 to 7
+            'legend.fontsize': 10,     # Reduced from 20 to 7
+            'figure.titlesize': 10,
+            # 'lines.linewidth': 1.0,
+            # 'patch.linewidth': 0.5,
+            # 'axes.linewidth': 0.5,
+            # 'grid.linewidth': 0.5,
+            # 'xtick.major.width': 0.5,
+            # 'ytick.major.width': 0.5,
+            # 'xtick.minor.width': 0.3,
+            # 'ytick.minor.width': 0.3,
+        })
 
-        # # histograms
-        # ax0.hist(conf0, bins=bins, alpha=0.5, edgecolor='red', label='Class 0')
-        # ax1.hist(conf1, bins=bins, alpha=0.5, edgecolor='blue', label='Class 1')
+        # Create figure with single axis (remove dual y-axis for clarity)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-        # # ── Option B: per‐call overrides ─────────────────────────────
-        # ax0.set_xlabel('Confidence',                   fontsize=14)
-        # ax0.set_ylabel('Frequency (Class 0)', color='red', fontsize=14)
-        # ax1.set_ylabel('Frequency (Class 1)', color='blue', fontsize=14)
+        # Create bins for histogram
+        bins = np.linspace(0.5, 1.0, 26)  # Reduced number of bins for clarity
 
-        # ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=16)
-        # ax0.tick_params(axis='both', labelsize=12)
+        # Plot both histograms on same axis with different alpha and colors
+        n0, bins0, patches0 = ax.hist(conf0, bins=bins, alpha=0.7, 
+                                    color='red', edgecolor='darkred', 
+                                    linewidth=0.5, label='Class 0 (Open)')
+        n1, bins1, patches1 = ax.hist(conf1, bins=bins, alpha=0.7, 
+                                    color='blue', edgecolor='darkblue', 
+                                    linewidth=0.5, label='Class 1 (Closed)')
 
-        # # custom legend font size
-        # h0, l0 = ax0.get_legend_handles_labels()
-        # h1, l1 = ax1.get_legend_handles_labels()
-        # leg = ax0.legend(h0 + h1, l0 + l1, loc='upper center')
-        # for text in leg.get_texts():
-        #     text.set_fontsize(12)
+        # Set labels and title with appropriate font sizes
+        ax.set_xlabel('Confidence', fontsize=8)
+        ax.set_ylabel('Frequency', fontsize=8)
+        ax.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
 
-        # plt.tight_layout()
-        # #plt.show()
-        # plt.savefig(saver.predictions_folder / f"confidence_histograms.png")
+        # Improve tick formatting
+        ax.tick_params(axis='both', labelsize=7, width=0.5, length=3)
+
+        # Add grid for better readability
+        ax.grid(True, alpha=0.3, linewidth=0.3)
+
+        # Legend with smaller font and better positioning
+        legend = ax.legend(loc='upper right', fontsize=7, frameon=True, 
+                        fancybox=False, shadow=False, framealpha=0.9,
+                        edgecolor='black', linewidth=0.5)
+
+        # Adjust layout to prevent clipping
+        plt.tight_layout(pad=0.5)
+
+        # Save with high DPI and tight bounding box
+        fig.savefig('confidence_histograms.pdf', dpi=300, bbox_inches='tight', 
+                    pad_inches=0.05, facecolor='white', edgecolor='none')
+
+        # Alternative version with stacked histogram for even better clarity
+        fig2, ax2 = plt.subplots(figsize=(fig_w, fig_h))
+
+        # Stacked histogram
+        ax2.hist([conf0, conf1], bins=bins, alpha=0.8, 
+                color=['red', 'blue'], edgecolor=['darkred', 'darkblue'],
+                linewidth=0.5, label=['Class 0 (Open)', 'Class 1 (Closed)'],
+                stacked=False)  # Set to True for stacked, False for overlapping
+
+        ax2.set_xlabel('Confidence', fontsize=8)
+        ax2.set_ylabel('Frequency', fontsize=8)
+        ax2.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
+        ax2.tick_params(axis='both', labelsize=7, width=0.5, length=3)
+        ax2.grid(True, alpha=0.3, linewidth=0.3)
+        ax2.legend(loc='upper right', fontsize=7, frameon=True, 
+                fancybox=False, shadow=False, framealpha=0.9,
+                edgecolor='black', linewidth=0.5)
+
+        plt.tight_layout(pad=0.5)
+        fig2.savefig('confidence_histograms_alt.pdf', dpi=300, bbox_inches='tight', 
+                    pad_inches=0.05, facecolor='white', edgecolor='none')
+
+        plt.show()
                             
         
-    if args.optimize and predictions is not None:
-        print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
-        print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
+    # if args.optimize and predictions is not None:
+    #     print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
+    #     print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
 
-        optimizer = Optimizer(
-            folder_name=args.folder_names[0],  
-            predictions=predictions,
-            saver=saver,
-            warmstart_mode=args.warmstart_mode,
-            confidence_threshold=args.confidence_threshold,
-            gnn_times=gnn_times,
-        )
-        final_results, csv_path = optimizer.run(num_workers=args.num_workers)
+    #     optimizer = Optimizer(
+    #         folder_name=args.folder_names[0],  
+    #         predictions=predictions,
+    #         saver=saver,
+    #         warmstart_mode=args.warmstart_mode,
+    #         confidence_threshold=args.confidence_threshold,
+    #         gnn_times=gnn_times,
+    #     )
+    #     final_results, csv_path = optimizer.run(num_workers=args.num_workers)
         
-        # if args.visualize:
-        #     # Save visualizations for all graphs
-        #     print("\nSaving visualizations for all graphs...")
-        #     saver.save_all_visualizations()
-        #     print(f"Visualizations saved to: {saver.visualization_folder}")
+    #     # if args.visualize:
+    #     #     # Save visualizations for all graphs
+    #     #     print("\nSaving visualizations for all graphs...")
+    #     #     saver.save_all_visualizations()
+    #     #     print(f"Visualizations saved to: {saver.visualization_folder}")
 
-        print(f"Optimization completed with {len(final_results)} results.")
-        print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
-        if csv_path:
-            print(f"Results saved to CSV: {csv_path}")
-        print(f"Warmstart networks saved to: {saver.warmstart_networks_folder}")
-        print(f"Final optimized networks saved to: {saver.prediction_networks_folder}")
+    #     print(f"Optimization completed with {len(final_results)} results.")
+    #     print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
+    #     if csv_path:
+    #         print(f"Results saved to CSV: {csv_path}")
+    #     print(f"Warmstart networks saved to: {saver.warmstart_networks_folder}")
+    #     print(f"Final optimized networks saved to: {saver.prediction_networks_folder}")
         
-        # Print summary statistics
-        successful = sum(1 for r in final_results.values() if r.get('success', False))
-        total = len(final_results)
-        if successful > 0:
-            avg_solve_time = sum(r.get('solve_time', 0) for r in final_results.values() if r.get('success')) / successful
-            avg_switches_changed = sum(r.get('switches_changed', 0) for r in final_results.values() if r.get('success')) / successful
-        else:
-            avg_solve_time = 0
-            avg_switches_changed = 0
+    #     # Print summary statistics
+    #     successful = sum(1 for r in final_results.values() if r.get('success', False))
+    #     total = len(final_results)
+    #     if successful > 0:
+    #         avg_solve_time = sum(r.get('solve_time', 0) for r in final_results.values() if r.get('success')) / successful
+    #         avg_switches_changed = sum(r.get('switches_changed', 0) for r in final_results.values() if r.get('success')) / successful
+    #     else:
+    #         avg_solve_time = 0
+    #         avg_switches_changed = 0
     
-        print(f"\nOptimization Summary ({args.warmstart_mode} warmstart):")
-        print(f"  Successful solves: {successful}/{total}")
-        if total > successful:
-            print(f"  Failed solves: {total - successful}")
-        print(f"  Average solve time: {avg_solve_time:.2f}s")
-        print(f"  Average switches changed: {avg_switches_changed:.1f}")
-        if args.warmstart_mode == "hard":
-            print(f"  Confidence threshold: {args.confidence_threshold}")
+    #     print(f"\nOptimization Summary ({args.warmstart_mode} warmstart):")
+    #     print(f"  Successful solves: {successful}/{total}")
+    #     if total > successful:
+    #         print(f"  Failed solves: {total - successful}")
+    #     print(f"  Average solve time: {avg_solve_time:.2f}s")
+    #     print(f"  Average switches changed: {avg_switches_changed:.1f}")
+    #     if args.warmstart_mode == "hard":
+    #         print(f"  Confidence threshold: {args.confidence_threshold}")
         
-        print(f"\nFolder structure created:")
-        print(f"  Root predictions folder: {saver.predictions_folder}")
-        print(f"  Warmstart folder: {saver.warmstart_folder}")
-        print(f"  Final predictions folder: {saver.prediction_folder}")
-        if csv_path:
-            print(f"  CSV file: {csv_path}")
+    #     print(f"\nFolder structure created:")
+    #     print(f"  Root predictions folder: {saver.predictions_folder}")
+    #     print(f"  Warmstart folder: {saver.warmstart_folder}")
+    #     print(f"  Final predictions folder: {saver.prediction_folder}")
+    #     if csv_path:
+    #         print(f"  CSV file: {csv_path}")
     
-    elif args.optimize and predictions is None:
-        print("Cannot run optimization without predictions. Run prediction step first.")
+    # elif args.optimize and predictions is None:
+    #     print("Cannot run optimization without predictions. Run prediction step first.")
