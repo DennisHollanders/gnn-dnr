@@ -228,5 +228,5 @@ search_space:
 #   criterion_name: "FocalLoss"
 
 # Logging
-wandb: fals
+wandb: false
 wandb_project: "GAT_HPO_TwoStage"
