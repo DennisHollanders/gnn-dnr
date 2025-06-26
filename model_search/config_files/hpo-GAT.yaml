@@ -1,7 +1,7 @@
-description: "Two-stage HPO for GAT: Architecture search then hyperparameter tuning"
-job_name: "GAT-two-stage-HPO"
+description: "Stage 1 HPO for GAT: Architecture search"
+job_name: "GAT-stage1-architecture-search"
 
-# Data Configuration
+# --- Data Configuration ---
 dataset_names: ["train", "validation", "test"]
 folder_names: 
   - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
@@ -11,210 +11,95 @@ dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
-batch_size: 128
 train_ratio: 0.85
 seed: 0
 num_workers: 0
 
-# Model Configuration (fixed for all trials)
+# --- Model Configuration ---
 model_module: "AdvancedMLP"
 
-# Fixed Parameters (Stage 1: Architecture Search)
+# --- Fixed Parameters for Stage 1 ---
 fixed_params:
-  # Output Configuration
   output_type: "multiclass"
   num_classes: 2
-  
-  # GNN Type (fixed for GAT experiments)
   gnn_type: "GAT"
-  
-  # Training Configuration (fixed during architecture search)
   learning_rate: 0.001
   weight_decay: 0.0001
   epochs: 100
   patience: 15
   criterion_name: "FocalLoss"
-  
-  # Physics Loss Configuration (fixed during architecture search)
   lambda_phy_loss: 0.5
   lambda_mask: 0.01
   lambda_connectivity: 0.01
   lambda_radiality: 0.01
   loss_scaling_strategy: "fixed"
   normalization_type: "paper_based"
-  
-  # General Configuration 
-  dropout_rate: 0.1
   use_batch_norm: true
-  use_residual: true
-  use_skip_connections: true
-  pooling: "add"
-  
   use_phyr: false
   enforce_radiality: false
-  
-  # GAT-specific fixed params
-  gat_dropout: 0.0
   gin_eps: 0.0
+  gat_dropout: 0.0 
 
-# STAGE 1: ARCHITECTURE SEARCH SPACE
+# --- STAGE 1: ARCHITECTURE SEARCH SPACE ---
 search_space:
+  # General Architecture Choices
+  activation:
+    search_type: "categorical"
+    choices: ["relu", "leaky_relu", "elu"]
+  use_residual:
+    search_type: "categorical"
+    choices: [true, false]
+  use_skip_connections:
+    search_type: "categorical"
+    choices: [true, false]
   use_gated_mp:
     search_type: "categorical"
     choices: [true, false]
+
   # GNN Architecture
   gnn_layers:
     search_type: "int"
     min: 1
     max: 4
-
-  activation:
+  gnn_hidden_dim:
     search_type: "categorical"
-    choices: ["relu", "leaky_relu", "elu", "tanh"]
-  
-  # GAT-specific architecture
+    choices: [64, 128, 192, 256, 384, 512] 
   gat_heads:
     search_type: "categorical"
     choices: [1, 2, 4, 8]
-  
-  gnn_hidden_dim:
+
+  # Node MLP Architecture (dim=0 means layer is not used)
+  node_hidden_dim_0:
     search_type: "categorical"
-    choices: [64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024]
-  
-  # Node MLP Architecture
-  use_node_mlp:
+    choices: [0,32, 64, 128, 256, 512]
+  node_hidden_dim_1:
     search_type: "categorical"
-    choices: [true, false]
-  
-  node_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 64
-    dim_max: 1024
-  
-  # Edge MLP Architecture
-  use_edge_mlp:
+    choices: [0, 64, 128, 256, 512]
+  node_hidden_dim_2:
     search_type: "categorical"
-    choices: [true, false]
+    choices: [0, 64, 128, 256]
   
-  edge_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 64
-    dim_max: 1024
+  # Edge MLP Architecture (dim=0 means layer is not used)
+  edge_hidden_dim_0:
+    search_type: "categorical"
+    choices: [0,32, 64, 128, 256, 512]
+  edge_hidden_dim_1:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
+  edge_hidden_dim_2:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256]
   
   # Switch Head Architecture
   switch_head_type:
     search_type: "categorical"
     choices: ["mlp", "attention", "graph_attention"]
-  
+
   switch_head_layers:
     search_type: "int"
     min: 1
     max: 5
-  
+
   switch_attention_heads:
     search_type: "categorical"
-    choices: [1, 2, 4, 8]
-    
-  switch_dim_per_head:
-    search_type: "categorical"
-    choices: [16, 32, 64]
-# STAGE 2: HYPERPARAMETER TUNING (COMMENTED OUT)
-# Uncomment and replace search_space above for Stage 2
-# search_space:
-#   # Training Hyperparameters
-#   learning_rate:
-#     search_type: "float"
-#     min: 0.0001
-#     max: 0.01
-#     log: true
-#   
-#   weight_decay:
-#     search_type: "float"
-#     min: 1e-6
-#     max: 1e-2
-#     log: true
-#   
-#   dropout_rate:
-#     search_type: "float"
-#     min: 0.0
-#     max: 0.5
-#   
-#   # GAT-specific hyperparameters
-#   gat_dropout:
-#     search_type: "float"
-#     min: 0.0
-#     max: 0.5
-#   
-#   # Physics Loss Hyperparameters
-#   lambda_phy_loss:
-#     search_type: "float"
-#     min: 0.1
-#     max: 2.0
-#   
-#   lambda_mask:
-#     search_type: "float"
-#     min: 0.001
-#     max: 0.1
-#   
-#   lambda_connectivity:
-#     search_type: "float"
-#     min: 0.001
-#     max: 0.1
-#   
-#   lambda_radiality:
-#     search_type: "float"
-#     min: 0.001
-#     max: 0.1
-#   
-#   # Loss scaling strategy
-#   loss_scaling_strategy:
-#     search_type: "categorical"
-#     choices: ["fixed", "adaptive", "adaptive_ratio"]
-#   
-#   normalization_type:
-#     search_type: "categorical"
-#     choices: ["adaptive", "standard", "robust"]
-#   
-#   # Batch size optimization
-#   batch_size:
-#     search_type: "categorical"
-#     choices: [32, 64, 128, 256]
-
-# Stage 2 Fixed Parameters (use best architecture from Stage 1)
-# fixed_params:
-#   # Best architecture from Stage 1 (example values - replace with actual best)
-#   gnn_layers: 2
-#   gat_heads: 4
-#   gnn_hidden_dim: 384
-#   use_node_mlp: true
-#   node_hidden_dims: [256, 512, 256]
-#   use_edge_mlp: true
-#   edge_hidden_dims: [128, 256]
-#   switch_head_type: "attention"
-#   switch_head_layers: 3
-#   switch_attention_heads: 4
-#   
-#   # Fixed model configuration
-#   output_type: "multiclass"
-#   num_classes: 2
-#   gnn_type: "GAT"
-#   activation: "leaky_relu"
-#   use_batch_norm: true
-#   use_residual: true
-#   use_skip_connections: true
-#   pooling: "add"
-#   use_gated_mp: true
-#   use_phyr: false
-#   enforce_radiality: false
-#   gin_eps: 0.0
-#   epochs: 200
-#   patience: 20
-#   criterion_name: "FocalLoss"
-
-# Logging
-wandb: true
-wandb_project: "GAT_HPO_TwoStage"
+    choices: [1, 2, 4, 8] 

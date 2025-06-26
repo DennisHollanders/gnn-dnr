@@ -85,7 +85,14 @@ class HPO:
         
         # Initialize CSV tracking with thread safety
         self.csv_file = self.results_dir / "hpo_results.csv"
-        self.csv_file.touch()
+        self._csv_headers = ['trial_number', 'state', 'value', 'datetime_start', 'datetime_complete']
+        self._csv_headers += sorted(self.search_space.keys())
+        self._csv_headers += ['best_mcc', 'final_val_loss', 'final_epoch', 'model_parameters', 'elapsed_time']
+        self._csv_headers = list(dict.fromkeys(self._csv_headers))
+        with open(self.csv_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self._csv_headers)
+            writer.writeheader()
+        self.csv_lock = threading.Lock()
 
         self.wandb_run = None
         self.experiment_id = f"{study_name}_{timestamp}"
@@ -105,220 +112,149 @@ class HPO:
         row_data = {
             'trial_number': trial.number,
             'state': trial.state.name,
-            'value': trial.value,  
+            'value': trial.value,
             'datetime_start': trial.datetime_start,
             'datetime_complete': trial.datetime_complete,
         }
-        
-        # Add the hyperparameters that were searched
+
+        # Explicitly update with all suggested parameters
         row_data.update(trial.params)
-        
+
+        # Add user-set metrics if they exist
         if "metrics" in trial.user_attrs:
             row_data.update(trial.user_attrs["metrics"])
 
-        df = pd.DataFrame([row_data])
-        
-        header = not (self.csv_file.exists() and self.csv_file.stat().st_size > 0)
-        
-        df.to_csv(self.csv_file, mode='a', header=header, index=False, quoting=1)
+        # Ensure all headers are present, filling with None if a value is missing for a given trial
+        # This prevents KeyError and ensures consistent CSV structure
+        final_row = {header: row_data.get(header) for header in self._csv_headers}
+
+        with self.csv_lock:
+            with open(self.csv_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=self._csv_headers)
+                writer.writerow(final_row)
     
     def suggest_params(self, trial: optuna.Trial) -> dict:
-        """Suggest parameters with FIXED feasibility checks using YAML config"""
+        """Suggests hyperparameters using a 'suggest then prune' strategy for dependencies."""
         config = self.config.copy()
         config.update(self.fixed_params)
-        
-        # Remove any existing GAT/GIN params to ensure clean slate
-        for p in [
-            'gat_heads','gat_dropout','gat_v2','gat_edge_dim',
-            'gin_layers','gin_hidden_dim','gin_eps'
-        ]:
-            config.pop(p, None)
-            
-        logger.info("\n inside suggest_params \n")
-        logger.info("gnn_type: %s", config.get('gnn_type', 'NONE'))
 
-        # Phase 1: GAT params only if using GAT, else set defaults
-        if config.get('gnn_type') == 'GAT':
-            logger.info("Using GAT parameters")
-            
-            # Step 1: Suggest the number of attention heads
-            if 'gat_heads' not in config and 'gat_heads' in self.search_space:
-                spec = self.search_space['gat_heads']
-                config['gat_heads'] = trial.suggest_categorical('gat_heads', spec['choices'])
-            else:
-                # Ensure a default value if not in search space
-                config.setdefault('gat_heads', 4)
-
-            # Step 2: Suggest the dimension for each head and construct gnn_hidden_dim
-            if 'dim_per_head' in self.search_space:
-                spec = self.search_space['dim_per_head']
-                dim_per_head = trial.suggest_categorical('dim_per_head', spec['choices'])
-                config['dim_per_head'] = dim_per_head # Store for logging
-
-                # Step 3: Construct gnn_hidden_dim to be inherently divisible
-                config['gnn_hidden_dim'] = config['gat_heads'] * dim_per_head
-                logger.debug(f"Constructed gnn_hidden_dim: {config['gnn_hidden_dim']} ({config['gat_heads']} heads * {dim_per_head} dim/head)")
-            
-            # Suggest other GAT parameters as before
-            if 'gat_dropout' not in config and 'gat_dropout' in self.search_space:
-                spec = self.search_space['gat_dropout']
-                config['gat_dropout'] = trial.suggest_float('gat_dropout', spec['min'], spec['max'], log=spec.get('log', False))
-            if 'gat_v2' not in config and 'gat_v2' in self.search_space:
-                spec = self.search_space['gat_v2']
-                config['gat_v2'] = trial.suggest_categorical('gat_v2', spec['choices'])
-            if 'gat_edge_dim' not in config and 'gat_edge_dim' in self.search_space:
-                spec = self.search_space['gat_edge_dim']
-                config['gat_edge_dim'] = trial.suggest_int('gat_edge_dim', spec['min'], spec['max'])
-        else:
-            config['gat_heads']    = 0
-            config['gat_dropout']  = 0.0
-            config['gat_v2']       = False
-            config['gat_edge_dim'] = 0
-
-        # Phase 2: GIN params only if using GIN, else set defaults
-        if config.get('gnn_type') == 'GIN':
-            if 'gin_layers' not in config and 'gin_layers' in self.search_space:
-                spec = self.search_space['gin_layers']
-                config['gin_layers'] = trial.suggest_int('gin_layers', spec['min'], spec['max'])
-            if 'gin_hidden_dim' not in config and 'gin_hidden_dim' in self.search_space:
-                spec = self.search_space['gin_hidden_dim']
-                config['gin_hidden_dim'] = trial.suggest_int('gin_hidden_dim', spec['min'], spec['max'])
-            if 'gin_eps' not in config and 'gin_eps' in self.search_space:
-                spec = self.search_space['gin_eps']
-                config['gin_eps'] = trial.suggest_float('gin_eps', spec['min'], spec['max'], log=spec.get('log', False))
-        else:
-            config['gin_layers']     = 0
-            config['gin_hidden_dim'] = 0
-            config['gin_eps']        = 0.0
-        
-        # Phase 3: Suggest switch head type
-        if 'switch_head_type' not in config and 'switch_head_type' in self.search_space:
-            spec = self.search_space['switch_head_type']
-            config['switch_head_type'] = trial.suggest_categorical('switch_head_type', spec['choices'])
-        
-        # FIX 1: Better handling of attention heads constraint
-        # First determine gnn_hidden_dim which is needed for attention heads constraint
-        if 'gnn_hidden_dim' not in config and 'gnn_hidden_dim' in self.search_space:
+        # Suggest gnn_hidden_dim first, as it's a dependency for attention heads.
+        gnn_hidden_dim = None
+        if 'gnn_hidden_dim' in self.search_space:
             spec = self.search_space['gnn_hidden_dim']
-            # For attention models, ensure gnn_hidden_dim is divisible by common head counts
-            if 'attention' in config.get('switch_head_type', '').lower():
-                # Choose from multiples of common head counts (1, 2, 4, 8)
-                min_dim = spec['min']
-                max_dim = spec['max']
-                valid_dims = []
-                for dim in range(min_dim, max_dim + 1):
-                    # Check if divisible by common head counts
-                    if all(dim % heads == 0 for heads in [1, 2, 4, 8]):
-                        valid_dims.append(dim)
-                if not valid_dims:
-                    # Fallback to powers of 2
-                    valid_dims = [d for d in [32, 64, 128, 256, 512, 1024] if min_dim <= d <= max_dim]
-                config['gnn_hidden_dim'] = trial.suggest_categorical('gnn_hidden_dim_constrained', valid_dims)
-            else:
-                config['gnn_hidden_dim'] = trial.suggest_int('gnn_hidden_dim', spec['min'], spec['max'])
-        
-        # Phase 4: Suggest switch attention heads and construct a valid hidden dimension
-        if 'attention' in config.get('switch_head_type', ''):
-            # Step 1: Suggest number of heads for the switch
-            if 'switch_attention_heads' not in config and 'switch_attention_heads' in self.search_space:
-                spec = self.search_space['switch_attention_heads']
-                config['switch_attention_heads'] = trial.suggest_categorical('switch_attention_heads', spec['choices'])
-            else:
-                config.setdefault('switch_attention_heads', 4)
-
-            # Step 2: Suggest dimension per head
-            if 'switch_dim_per_head' in self.search_space:
-                spec = self.search_space['switch_dim_per_head']
-                dim_per_head = trial.suggest_categorical('switch_dim_per_head', spec['choices'])
-
-                # Step 3: Construct the total hidden dimension to be inherently divisible
-                config['switch_head_hidden_dim'] = config['switch_attention_heads'] * dim_per_head
-            else:
-                # Fallback if not in search space
-                config['switch_head_hidden_dim'] = 256
+            gnn_hidden_dim = trial.suggest_categorical('gnn_hidden_dim', spec['choices'])
+            config['gnn_hidden_dim'] = gnn_hidden_dim
         else:
-            # If not using attention, set to 0
-            config['switch_attention_heads'] = 0
-            config['switch_head_hidden_dim'] = 0
-        
-        # Phase 5: Process all other parameters with proper separation
-        for param, spec in self.search_space.items():
-            if param in config:
-                continue  # Already handled above
+            # Fallback to fixed params or a default value
+            gnn_hidden_dim = config.get('gnn_hidden_dim', 256)
+
+        # --- GNN Specific Parameters ---
+        if config.get('gnn_type') == 'GAT':
+            # Suggest GAT heads from the static list of choices
+            if 'gat_heads' in self.search_space:
+                spec = self.search_space['gat_heads']
+                gat_heads = trial.suggest_categorical('gat_heads', spec['choices'])
+
+                # Prune the trial if the combination of parameters is invalid
+                if gnn_hidden_dim % gat_heads != 0:
+                    raise optuna.exceptions.TrialPruned(
+                        f"GAT heads ({gat_heads}) must be a divisor of gnn_hidden_dim ({gnn_hidden_dim})."
+                    )
+                config['gat_heads'] = gat_heads
+
+            # Suggest other GAT-specific parameters
+            for param in ['gat_dropout', 'gat_v2', 'gat_edge_dim']:
+                if param in self.search_space:
+                    spec = self.search_space[param]
+                    if spec.get('search_type') == 'float':
+                        config[param] = trial.suggest_float(param, spec['min'], spec['max'], log=spec.get('log', False))
+                    elif spec.get('search_type') == 'categorical':
+                        config[param] = trial.suggest_categorical(param, spec['choices'])
+                    elif spec.get('search_type') == 'int':
+                        config[param] = trial.suggest_int(param, spec['min'], spec['max'])
+        else:
+            # Set default values for GAT if not used
+            config['gat_heads'] = 0
+            config['gat_dropout'] = 0.0
+
+        if config.get('gnn_type') == 'GIN':
+            # Suggest GIN-specific parameters
+            for param in ['gin_layers', 'gin_hidden_dim', 'gin_eps']:
+                if param in self.search_space:
+                    spec = self.search_space[param]
+                    if spec.get('search_type') == 'float':
+                        config[param] = trial.suggest_float(param, spec['min'], spec['max'], log=spec.get('log', False))
+                    elif spec.get('search_type') == 'int':
+                        config[param] = trial.suggest_int(param, spec['min'], spec['max'])
+        else:
+            # Set default values for GIN if not used
+            config['gin_layers'] = 0
+            config['gin_hidden_dim'] = 0
+            config['gin_eps'] = 0.0
             
-            # Handle boolean flags BEFORE their associated parameters
-            if param in ['use_node_mlp', 'use_edge_mlp'] and spec['search_type'] == 'categorical':
-                config[param] = trial.suggest_categorical(param, spec['choices'])
+        # --- Switch Head Parameters ---
+        if 'switch_head_type' in self.search_space:
+            config['switch_head_type'] = trial.suggest_categorical(
+                'switch_head_type', self.search_space['switch_head_type']['choices']
+            )
+        
+        if 'attention' in config.get('switch_head_type', ''):
+            # Suggest switch attention heads from the static list of choices
+            if 'switch_attention_heads' in self.search_space:
+                spec = self.search_space['switch_attention_heads']
+                switch_heads = trial.suggest_categorical('switch_attention_heads', spec['choices'])
+
+                # Prune the trial if the combination is invalid
+                if gnn_hidden_dim % switch_heads != 0:
+                    raise optuna.exceptions.TrialPruned(
+                        f"Switch heads ({switch_heads}) must be a divisor of gnn_hidden_dim ({gnn_hidden_dim})."
+                    )
+                config['switch_attention_heads'] = switch_heads
+        else:
+            config['switch_attention_heads'] = 0
+
+        # --- Suggest all other parameters from search_space ---
+        handled_params = {
+            'gnn_hidden_dim', 'gat_heads', 'gat_dropout', 'gat_v2', 'gat_edge_dim',
+            'gin_layers', 'gin_hidden_dim', 'gin_eps', 'switch_head_type', 
+            'switch_attention_heads'
+        }
+        mlp_prefixes = ('node_hidden_dim_', 'edge_hidden_dim_')
+        
+        for param, spec in self.search_space.items():
+            if param in config or param in handled_params or param.startswith(mlp_prefixes):
                 continue
-                
-            if spec['search_type'] == 'float':
-                config[param] = trial.suggest_float(
-                    param, spec['min'], spec['max'], 
-                    log=spec.get('log', False)
-                )
-            elif spec['search_type'] == 'int':
-                config[param] = trial.suggest_int(
-                    param, spec['min'], spec['max'], 
-                    step=spec.get('step', 1)
-                )
-            elif spec['search_type'] == 'categorical':
+
+            search_type = spec.get('search_type')
+            if search_type == 'categorical':
                 config[param] = trial.suggest_categorical(param, spec['choices'])
-            elif spec['search_type'] == 'dynamic_list':
-                # Only suggest dynamic lists for the actual list parameters
-                if param in ['node_hidden_dims', 'edge_hidden_dims']:
-                    # Check if the corresponding MLP is enabled
-                    if param == 'node_hidden_dims' and config.get('use_node_mlp', True):
-                        config[param] = self._suggest_dynamic_list(trial, param, spec)
-                    elif param == 'edge_hidden_dims' and config.get('use_edge_mlp', True):
-                        config[param] = self._suggest_dynamic_list(trial, param, spec)
-                    # If MLP is disabled, don't set the hidden_dims at all
-                else:
-                    config[param] = self._suggest_dynamic_list(trial, param, spec)
-        
-        # Phase 6: Final constraint validation and fixes
-        config = self._apply_constraints(trial, config)
-        
-        # Phase 7: Ensure boolean parameters remain boolean
-        for bool_param in ['use_node_mlp', 'use_edge_mlp']:
-            if bool_param in config and not isinstance(config[bool_param], bool):
-                # If somehow a non-boolean value got assigned, fix it
-                logger.warning(f"Non-boolean value {config[bool_param]} found for {bool_param}, converting to boolean")
-                config[bool_param] = bool(config[bool_param])
+            elif search_type == 'int':
+                config[param] = trial.suggest_int(param, spec['min'], spec['max'])
+            elif search_type == 'float':
+                config[param] = trial.suggest_float(param, spec['min'], spec['max'], log=spec.get('log', False))
 
-        return config
-    
-    def _suggest_dynamic_list(self, trial: optuna.Trial, param: str, spec: dict) -> list:
-        """Handle dynamic list parameters like hidden_dims - constrained to powers of 2"""
-        n_layers = trial.suggest_int(f'n_{param}_layers', 
-                                   spec.get('n_layers_min', 1), 
-                                   spec.get('n_layers_max', 3))
-        
-        # Generate valid powers of 2 within the specified range
-        dim_min = spec.get('dim_min', 32)
-        dim_max = spec.get('dim_max', 1024)
+        # --- MLP Architecture ---
+        def suggest_mlp_layers(trial, prefix):
+            layer_params = sorted([
+                key for key in self.search_space.keys() if key.startswith(f'{prefix}_dim_')
+            ])
+            dims = []
+            for param_name in layer_params:
+                if param_name in self.search_space:
+                    spec = self.search_space[param_name]
+                    dim = trial.suggest_categorical(param_name, spec['choices'])
+                    dims.append(dim)
+            
+            while dims and dims[-1] == 0:
+                dims.pop()
+            
+            return [d for d in dims if d > 0]
 
-        # Find powers of 2 within range
-        valid_powers = []
-        power = 1
-        while power <= dim_max:
-            if power >= dim_min:
-                valid_powers.append(power)
-            power *= 2
-        
-        # Fallback if no valid powers found
-        if not valid_powers:
-            valid_powers = [32, 64, 128, 256, 512, 1024]  
-            valid_powers = [p for p in valid_powers if dim_min <= p <= dim_max]
-            if not valid_powers:
-                valid_powers = [dim_min] 
-        
-        dims = []
-        for i in range(n_layers):
-            dim = trial.suggest_categorical(f'{param}_{i}', valid_powers)
-            dims.append(dim)
-        
-        return dims
-    
+        config['node_hidden_dims'] = suggest_mlp_layers(trial, 'node_hidden')
+        config['edge_hidden_dims'] = suggest_mlp_layers(trial, 'edge_hidden')
+
+        # Apply final constraints and return
+        return self._apply_constraints(trial, config)
     def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
         """Apply comprehensive feasibility constraints with standardized null values"""
         
@@ -499,7 +435,7 @@ class HPO:
 
         return True
     
-    def objective(self, trial: optuna.Trial) -> float:
+    def objective(self, trial: optuna.Trial, train_loader, val_loader) -> float:
         """The all-in-one objective function for a single HPO trial."""
         # Force CPU and limit threads in each worker process
         device = torch.device("cpu")
@@ -507,25 +443,10 @@ class HPO:
         os.environ['OMP_NUM_THREADS'] = '1'
         os.environ['MKL_NUM_THREADS'] = '1'
 
-        # 1. Suggest a configuration for this trial
+
         config = self.suggest_params(trial)
         
-        # 2. Setup data loaders
-        dataloaders = create_data_loaders(
-            dataset_names=config.get('dataset_names', self.config['dataset_names']),
-            folder_names=config.get('folder_names', self.config['folder_names']),
-            batch_size=config.get('batch_size', 128),
-            seed=self.seed,
-            num_workers=0, # Crucial for nested parallelism
-            # ... other data parameters from your config
-        )
-        train_loader = dataloaders.get("train")
-        val_loader = dataloaders.get("validation")
-        
-        if not train_loader or not val_loader:
-            raise RuntimeError("Data loaders could not be created.")
 
-        # 3. Build model, optimizer, and criterion from config
         data_sample = train_loader.dataset[0]
         model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
         model_class = getattr(model_module, config['model_module'])
@@ -534,13 +455,13 @@ class HPO:
         model_kwargs = {
             'node_input_dim': data_sample.x.shape[1],
             'edge_input_dim': data_sample.edge_attr.shape[1],
-            **config  # Pass the entire config
+            **config  
         }
         model = model_class(**model_kwargs).to(device)
         model_params = sum(p.numel() for p in model.parameters())
 
         optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-        criterion = FocalLoss(alpha=1.0, gamma=2.0) # Assuming FocalLoss or fetch from config
+        criterion = FocalLoss(alpha=1.0, gamma=2.0) 
         
         lambda_dict = {k: config[k] for k in config if k.startswith('lambda_')}
 
@@ -569,10 +490,9 @@ class HPO:
             'final_val_loss': val_loss,
             'final_epoch': epoch,
             'model_parameters': model_params,
-            # Add any other final metrics you want to save
         }
         trial.set_user_attr("metrics", final_metrics)
-        trial.set_user_attr("hyperparameters", config) # Save config for easy access later
+        trial.set_user_attr("hyperparameters", config) 
 
         return best_mcc
 
@@ -608,13 +528,29 @@ class HPO:
             )
         )
 
-        # Run optimization with timeout support
+        logger.info("Loading and creating dataloaders once...")
+        dataloaders = create_data_loaders(
+            dataset_names=self.config.get('dataset_names'),
+            folder_names=self.config.get('folder_names'),
+            batch_size=self.fixed_params.get('batch_size', 128), 
+            seed=self.seed,
+            num_workers=0, 
+        )
+        train_loader = dataloaders.get("train")
+        val_loader = dataloaders.get("validation")
+        
+        if not train_loader or not val_loader:
+            raise RuntimeError("Data loaders could not be created for the main process.")
+
+        objective_with_data = partial(self.objective, train_loader=train_loader, val_loader=val_loader)
+
+        # Run optimization 
         study.optimize(
-            self.objective,
+            objective_with_data, 
             n_trials=n_trials,
             n_jobs=self.n_parallel,
             catch=(Exception,),
-            callbacks=[self._log_trial_to_csv_callback]  # Use the new callback
+            callbacks=[self._log_trial_to_csv_callback]
         )
         
         # Log final results to wandb if enabled
@@ -741,7 +677,8 @@ class HPO:
                        'final_recall', 'final_accuracy', 'final_epoch', 'converged', "starting_val_loss",
                        'model_parameters', 'status', 'error_message', 'config_valid', 'Trial', 'F1_Score',
                        'best_mcc', 'final_mcc', 'best_f1_minority', 'final_f1_minority', 
-                       'best_balanced_accuracy', 'final_balanced_accuracy'}
+                       'best_balanced_accuracy', 'final_balanced_accuracy', "datetime_start",
+                       "datetime_complete", "elapsed_time", "wandb_run_id", "wandb_run", "value"}
         
         param_cols = [col for col in df.columns if col not in exclude_cols]
         
@@ -787,217 +724,6 @@ class HPO:
         )
         
         return fig
-
-
-def _trial_worker(config_path: str, study_name: str, trial_id: int, 
-                  complete_config: Dict[str, Any], seed: int, 
-                  base_config: dict, fixed_params: dict, timeout: int) -> dict:
-    """Worker function that runs in separate process with timeout support"""
-    try:
-        # Force CPU and limit threads in worker
-        device = torch.device("cpu")
-        torch.set_num_threads(1)
-        
-        # Set environment variables for this worker
-        os.environ['OMP_NUM_THREADS'] = '1'
-        os.environ['MKL_NUM_THREADS'] = '1'
-        os.environ['OPENBLAS_NUM_THREADS'] = '1'
-        os.environ['NUMEXPR_NUM_THREADS'] = '1'
-        
-        # The config is already complete with all defaults applied
-        config = complete_config
-        
-        # Load model module
-        model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
-        model_class = getattr(model_module, config['model_module'])
-        
-        # Create data loaders for this worker
-        batch_size = config.get('batch_size', 128)
-        dataloaders = create_data_loaders(
-            dataset_names=config.get('dataset_names', base_config['dataset_names']),
-            folder_names=config.get('folder_names', base_config['folder_names']),
-            dataset_type=config.get('dataset_type', 'default'),
-            batch_size=batch_size,
-            max_nodes=config.get('max_nodes', 1000),
-            max_edges=config.get('max_edges', 5000),
-            train_ratio=config.get('train_ratio', 0.85),
-            seed=seed,
-            num_workers=0,  # Important: Set to 0 for multiprocessing
-            batching_type=config.get('batching_type', 'dynamic'),
-        )
-        
-        train_loader = dataloaders.get("train")
-        val_loader = dataloaders.get("validation")
-        
-        if not train_loader or not val_loader:
-            return {'objective_value': float('-inf'), 'metrics': {'status': 'failed_data_loading'}}
-
-        data_sample = train_loader.dataset[0]
-        
-        # Build model kwargs
-        model_kwargs = {
-            'node_input_dim': data_sample.x.shape[1],
-            'edge_input_dim': data_sample.edge_attr.shape[1],
-        }
-
-        # Add all model parameters from config
-        for key in ['activation', 'dropout_rate', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
-            'gat_heads', 'gat_dropout', 'gin_eps', 'use_node_mlp', 'use_edge_mlp',
-            'node_hidden_dims', 'edge_hidden_dims', 'use_batch_norm', 'use_residual',
-            'use_skip_connections', 'switch_head_type', 'switch_head_layers', 
-            'switch_attention_heads', 'output_type', 'num_classes', 'use_gated_mp',
-            'use_phyr', 'phyr_k_ratio', 'pooling', 'normalization_type', 
-            'loss_scaling_strategy', 'enforce_radiality']:
-            if key in config:
-                value = config[key]
-                
-                # Skip empty lists or zero values for optional parameters
-                if key == 'node_hidden_dims' and (not value or value == []):
-                    if config.get('use_node_mlp', True):
-                        model_kwargs[key] = [128]  # Default fallback
-                    else:
-                        continue  
-                elif key == 'edge_hidden_dims' and (not value or value == []):
-                    if config.get('use_edge_mlp', True):
-                        model_kwargs[key] = [128]  # Default fallback
-                    else:
-                        continue  
-                elif key in ['gat_heads', 'gat_dropout', 'gin_eps', 'gin_mlp_layers', 
-                            'switch_attention_heads', 'phyr_k_ratio'] and value == 0:
-                    continue
-                elif key == 'gin_train_eps' and not config.get('gnn_type') == 'GIN':
-                    continue
-                elif key == 'gnn_hidden_dim' and value == 0:
-                    continue  
-                else:
-                    model_kwargs[key] = value
-        
-        model = model_class(**model_kwargs).to(device)
-        model_params = sum(p.numel() for p in model.parameters())
-
-        # Setup criterion
-        criterion_name = config.get('criterion_name', 'MSELoss')
-        if criterion_name == "WeightedBCELoss":
-            criterion = WeightedBCELoss(pos_weight=2.0)
-        elif criterion_name == "FocalLoss":
-            criterion = FocalLoss(alpha=1.0, gamma=2.0)
-        elif criterion_name == "MSELoss":
-            criterion = nn.MSELoss()
-        elif criterion_name == "CrossEntropyLoss":
-            criterion = nn.CrossEntropyLoss()
-        else:
-            criterion = getattr(nn, criterion_name)()
-        
-        optimizer = optim.Adam(model.parameters(), 
-                             lr=config['learning_rate'], 
-                             weight_decay=config['weight_decay'])
-
-        lambda_dict = {
-            'lambda_phy_loss': config.get('lambda_phy_loss', 0.1),
-            'lambda_mask': config.get('lambda_mask', 0.01),
-            'lambda_connectivity': config.get('lambda_connectivity', 0.05),
-            'lambda_radiality': config.get('lambda_radiality', 0.05),
-            'normalization_type': config.get('normalization_type', 'adaptive'),
-            'loss_scaling_strategy': config.get('loss_scaling_strategy', 'adaptive_ratio')
-        }
-        
-        # Training loop with timeout tracking
-        start_time = time.time()
-        starting_val_loss = float('inf')
-        starting_train_loss = float('inf')
-        best_train_loss = float('inf')
-        best_val_loss = float('inf')
-        best_minority_f1 = 0.0
-        best_mcc = -1.0 
-        best_balanced_accuracy = 0.0
-        patience = 0
-        max_epochs = min(config.get('epochs', 100), 80)
-        max_patience = config.get('patience', 25)
-        
-        for epoch in range(max_epochs):
-            # Check timeout before each epoch
-            elapsed = time.time() - start_time
-            if elapsed > timeout:
-                logger.warning(f"Trial {trial_id} timed out at epoch {epoch} after {elapsed:.1f}s")
-                # Return current best results
-                return {
-                    'objective_value': best_mcc, 
-                    'metrics': {
-                        "starting_val_loss": starting_val_loss,
-                        "starting_train_loss": starting_train_loss,
-                        'best_mcc': best_mcc,
-                        'best_train_loss': best_train_loss,
-                        'best_val_loss': best_val_loss,
-                        "best_f1_minority": best_minority_f1,
-                        "best_balanced_accuracy": best_balanced_accuracy,
-                        "final_train_loss": best_train_loss,
-                        "final_val_loss" : best_val_loss,
-                        "final_f1_minority" : best_minority_f1,
-                        "final_mcc" : best_mcc,
-                        "final_balanced_accuracy" : best_balanced_accuracy,
-                        'final_epoch': epoch,
-                        'converged': False,
-                        'model_parameters': model_params,
-                        'status': 'timeout',
-                        'config_valid': True,
-                        'elapsed_time': elapsed
-                    }
-                }
-            
-            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
-            val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
-            print(f"Epoch: {epoch}  ->      train loss: {train_loss},       val loss: {val_loss}")
-            if epoch == 0: 
-                starting_val_loss = val_loss
-                starting_train_loss = train_loss
-                
-            current_f1_minority = val_dict.get('test_f1_minority', 0.0)
-            current_mcc = val_dict.get('test_mcc', 0.0)
-            current_balanced_accuracy = val_dict.get('test_balanced_acc', 0.0)
-            
-            if current_mcc > best_mcc:
-                best_mcc = current_mcc
-                best_minority_f1 = current_f1_minority
-                best_balanced_accuracy = current_balanced_accuracy
-                best_train_loss = train_loss
-                best_val_loss = val_loss
-                patience = 0
-            else:
-                patience += 1
-            
-            # Early stopping
-            if patience >= max_patience:
-                break
-        
-        elapsed = time.time() - start_time
-        metrics = {
-            "starting_val_loss": starting_val_loss,
-            "starting_train_loss": starting_train_loss,
-            'best_mcc': best_mcc,
-            'best_train_loss': best_train_loss,
-            'best_val_loss': best_val_loss,
-            "best_f1_minority": best_minority_f1,
-            "best_balanced_accuracy": best_balanced_accuracy,
-            "final_train_loss": train_loss,
-            "final_val_loss" : val_loss,
-            "final_f1_minority" : current_f1_minority,
-            "final_mcc" : current_mcc,
-            "final_balanced_accuracy" : current_balanced_accuracy,
-            'final_epoch': epoch,
-            'converged': patience < max_patience,
-            'model_parameters': model_params,
-            'status': 'completed',
-            'config_valid': True,
-            'elapsed_time': elapsed
-        }
-        
-        return {'objective_value': best_mcc, 'metrics': metrics}
-        
-    except Exception as e:
-        logger.error(f"Trial {trial_id} failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return {'objective_value': float('-inf'), 'metrics': {'status': 'failed', 'error': str(e)}}
 
 
 def main():

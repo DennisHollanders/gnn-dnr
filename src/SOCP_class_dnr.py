@@ -508,108 +508,71 @@ class SOCP_class:
         # --- Radiality Constraints ---
         if self.toggles["include_radiality_constraints"]:
             def bus_connectivity_rule(m, b):
-                 if b in m.partitionedbuses: 
-                     inc = [l_idx for l_idx in m.lines if m.from_bus[l_idx] == b or m.to_bus[l_idx] == b]
-                     if not inc:
-                         self.logger.warning(f"BusConnectivity for Bus {b}: No incident lines. Constraint implies 0 >= 1.")
-                         return Constraint.Skip # 0 == m.is_up[b] 
-                     return sum(m.line_status[l_idx] for l_idx in inc) >= m.is_up[b]
-                 return Constraint.Skip
+                    if b in m.partitionedbuses:
+                        inc = [l_idx for l_idx in m.lines if m.from_bus[l_idx] == b or m.to_bus[l_idx] == b]
+                        if not inc:
+                            self.logger.warning(f"BusConnectivity for Bus {b}: No incident lines. Constraint implies 0 >= 1.")
+                            return m.is_up[b] == 0 
+                        return sum(m.line_status[l_idx] for l_idx in inc) >= m.is_up[b]
+                    return Constraint.Skip
             model.BusConnectivity = Constraint(model.partitionedbuses, rule=bus_connectivity_rule)
             self.enabled_constraints["BusConnectivity"] = True
-             
             
+            # This toggle enables (SCF) 
             if self.toggles["use_root_flow"]:
                 self.logger.info("Using single commodity flow for radiality constraints")
+
+                # Define arcs for the flow model: (from, to, line_index) for both directions
                 model.arcs = Set(initialize=[(i, j, l) for l in model.lines
-                        for (i,j) in ((model.from_bus[l], model.to_bus[l]),
-                                      (model.to_bus[l],   model.from_bus[l]))], dimen=3)
-                # --- SCF Flow Variable ---
+                            for (i,j) in ((model.from_bus[l], model.to_bus[l]),
+                                          (model.to_bus[l],   model.from_bus[l]))], dimen=3)
+                
                 # scf_flow_var[i,j,l] is the commodity flow from bus i to bus j over line l
                 model.scf_flow_var = Var(model.arcs, within=NonNegativeReals, initialize=0)
 
                 # --- Designate a Single Root for Commodity Flow ---
                 active_model_substations = [s for s in self.substations if s in model.buses]
                 
+                designated_root = None
                 if not active_model_substations:
-                    if not list(model.buses): # Check if model.buses is empty
-                        self.logger.error("SCF Radiality: No buses in the model. Cannot designate a root.")
-                        designated_root = None 
+                    if list(model.buses):
+                        designated_root = model.buses.first()
+                        self.logger.warning(f"SCF Radiality: No active substations. Designated {designated_root} as root.")
                     else:
-                        designated_root = model.buses.first() 
-                        self.logger.warning(f"SCF Radiality: No active substations in the model. Designated {designated_root} as root.")
+                        self.logger.error("SCF Radiality: No buses in the model. Cannot designate a root.")
                 else:
                     designated_root = active_model_substations[0]
                     self.logger.info(f"SCF Radiality: Designated root for commodity flow is {designated_root}")
 
+                if designated_root is not None:
+                    # --- Flow Capacity Constraint ---
+                    n_buses_total = len(model.buses)
+                    def scf_capacity_rule(m, u, v, l):
+                        return m.scf_flow_var[u,v,l] <= (n_buses_total - 1) * m.line_status[l]
+                    model.SCFCapacity = Constraint(model.arcs, rule=scf_capacity_rule)
+                    self.enabled_constraints["SCFCapacity"] = True
 
-                    # Pre-calculate maximum possible downstream loads for each arc
-                    arc_max_flows = self._calculate_arc_max_flows(model, designated_root)
-                    M_scf = len(model.buses) - 1 if len(model.buses) > 0 else 0
-                    # --- Flow Capacity Constraints ---
-                    
-                    self.logger.info("Using single commodity flow for radiality constraints")
-                
-                    # --- Designate a Single Root for Commodity Flow ---
-                    active_model_substations = [s for s in self.substations if s in model.buses]
-                    
-                    if not active_model_substations:
-                        if not list(model.buses): # Check if model.buses is empty
-                            self.logger.error("SCF Radiality: No buses in the model. Cannot designate a root.")
-                            # This is a critical error, model building should probably stop or handle this.
-                            # For now, let's assume this won't happen if preprocessing is correct.
-                            designated_root = None 
+                    # --- Flow Conservation Constraint ---
+                    def scf_flow_conservation_rule(m, b):
+                        inflow = sum(m.scf_flow_var[u,b_val,l_idx] for (u,b_val,l_idx) in m.arcs if b_val == b)
+                        outflow = sum(m.scf_flow_var[b_val,v,l_idx] for (b_val,v,l_idx) in m.arcs if b_val == b)
+
+            
+                        if b == designated_root:
+                            num_other_energized_sinks = sum(m.is_up[n_bus] for n_bus in m.buses if n_bus != designated_root)
+                            return outflow - inflow == num_other_energized_sinks
                         else:
-                            designated_root = model.buses.first() # Pick the first bus in the set if no substations
-                            self.logger.warning(f"SCF Radiality: No active substations in the model. Designated {designated_root} as root.")
-                    else:
-                        designated_root = active_model_substations[0]
-                        self.logger.info(f"SCF Radiality: Designated root for commodity flow is {designated_root}")
-
-                    if designated_root is not None:
-                        # --- Flow Capacity Constraint ---
-                        # Flow on an arc is only possible if the underlying line is active (line_status[l]=1)
-                        # Max flow on an arc is N_buses (or N_energized_buses - 1)
-                        # (ensures flow variable goes to zero if line is off)
-                        n_buses_total = len(model.buses) # Max possible demand
-                        def scf_capacity_rule(m, u, v, l):
-                            return m.scf_flow_var[u,v,l] <= (n_buses_total -1) * m.line_status[l]
-                        model.SCFCapacity = Constraint(model.arcs, rule=scf_capacity_rule)
-                        self.enabled_constraints["SCFCapacity"] = True
-
-                        # --- Flow Conservation Constraint ---
-                        def scf_flow_conservation_rule(m, b):
-                            # Sum of commodity flows into bus b
-                            inflow = sum(m.scf_flow_var[u,b_val,l_idx] for (u,b_val,l_idx) in m.arcs if b_val == b)
-                            # Sum of commodity flows out of bus b
-                            outflow = sum(m.scf_flow_var[b_val,v,l_idx] for (b_val,v,l_idx) in m.arcs if b_val == b)
-
-                            if b == designated_root:
-                                # The designated root supplies 1 unit of commodity for each *other* energized bus.
-                                # These other energized buses become the "sinks" in the commodity flow model.
-                                num_other_energized_sinks = sum(m.is_up[n_bus] for n_bus in m.buses if n_bus != designated_root)
-                                return outflow - inflow == num_other_energized_sinks
-                            else:
-                                # Any other bus (non-root substations or partitioned buses) demands 1 unit of commodity if energized.
-                                return inflow - outflow == 1 * m.is_up[b]
-                        
-                        model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
-                    # --- Spanning Tree Constraint with Load Shedding Support ---
-                    def spanning_tree_rule(m):
-                        total_energized_buses = sum(m.is_up[b] for b in m.buses)
-                        return sum(m.line_status[l] for l in m.lines) == total_energized_buses - 1
+                            return inflow - outflow == 1 * m.is_up[b]
                     
-                    model.SpanningTree = Constraint(rule=spanning_tree_rule)
-                
+                    model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
+                    self.enabled_constraints["SCFFlowConservation"] = True
 
-                    # --- Bus Energization Logic ---
+                    # --- Bus Energization Logic---
                     if not self.toggles.get("allow_load_shed", False):
-                        # Force energization of all reachable buses
                         def bus_forced_energization_rule(m, b):
                             if b in m.partitionedbuses:
                                 return m.is_up[b] == 1
                             return Constraint.Skip
-                        
                         model.SCFBusForcedEnergization = Constraint(model.buses, rule=bus_forced_energization_rule)
                         self.enabled_constraints["SCFBusForcedEnergization"] = True
         

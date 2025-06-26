@@ -60,52 +60,60 @@ fixed_params:
 
 # STAGE 1: ARCHITECTURE SEARCH SPACE
 search_space:
+  # GNN Architecture
+search_space:
+  use_residual:
+    search_type: "categorical"
+    choices: [true, false]
+  use_skip_connections:
+    search_type: "categorical"
+    choices: [true, false]
   use_gated_mp:
     search_type: "categorical"
     choices: [true, false]
+
   # GNN Architecture
   gnn_layers:
     search_type: "int"
     min: 1
     max: 4
   
-  # GAT-specific architecture
   gat_heads:
     search_type: "categorical"
     choices: [1, 2, 4, 8]
   
-  # gnn_hidden_dim:
-  #   search_type: "categorical"
-  #   choices: [64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024]
-  # gnn_hidden_dim is now constructed from gat_heads and dim_per_head, so we remove it from the search.
-
-  dim_per_head:
+  # CORRECT: gnn_hidden_dim is now defined, with choices divisible by all head counts
+  gnn_hidden_dim:
     search_type: "categorical"
-    choices: [16, 32, 64, 96, 128]
+    choices: [64, 128, 192, 256, 384, 512]
 
   # Node MLP Architecture
-  use_node_mlp:
+  node_hidden_dim_0:
     search_type: "categorical"
-    choices: [true, false]
-  
-  node_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 64
-    dim_max: 1024
+    choices: [32, 64, 128, 256, 512]
+  node_hidden_dim_1:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
+  node_hidden_dim_2:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
+  node_hidden_dim_3:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
   
   # Edge MLP Architecture
-  use_edge_mlp:
+  edge_hidden_dim_0:
     search_type: "categorical"
-    choices: [true, false]
-  
-  edge_hidden_dims:
-    search_type: "dynamic_list"
-    n_layers_min: 1
-    n_layers_max: 4
-    dim_min: 64
-    dim_max: 1024
+    choices: [0, 64, 128, 256, 512]
+  edge_hidden_dim_1:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
+  edge_hidden_dim_2:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
+  edge_hidden_dim_3:
+    search_type: "categorical"
+    choices: [0, 64, 128, 256, 512]
   
   # Switch Head Architecture
   switch_head_type:
@@ -119,11 +127,12 @@ search_space:
   
   switch_attention_heads:
     search_type: "categorical"
-    choices: [1, 2, 4, 8]
-    
+    choices: [1, 2, 4, 6, 8]
+
   switch_dim_per_head:
     search_type: "categorical"
-    choices: [16, 32, 64]
+    choices: [16, 24, 32, 48, 64]
+    
 
 # STAGE 2: HYPERPARAMETER TUNING (COMMENTED OUT)
 # Uncomment and replace search_space above for Stage 2
@@ -219,5 +228,5 @@ search_space:
 #   criterion_name: "FocalLoss"
 
 # Logging
-wandb: true
+wandb: fals
 wandb_project: "GAT_HPO_TwoStage"

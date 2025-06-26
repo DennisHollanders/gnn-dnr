@@ -1,7 +1,7 @@
 description: "Stage 2 HPO for GCN: Hyperparameter tuning with best architecture from Stage 1"
 job_name: "GCN-stage2-hyperparameter-tuning"
 
-# Data Configuration
+# --- Data Configuration ---
 dataset_names: ["train", "validation", "test"]
 folder_names: 
   - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
@@ -15,10 +15,10 @@ train_ratio: 0.85
 seed: 0
 num_workers: 0
 
-# Model Configuration (fixed for all trials)
+# --- Model Configuration ---
 model_module: "AdvancedMLP"
 
-# STAGE 2: Fixed Parameters (Best Architecture from Stage 1)
+# --- STAGE 2: Fixed Parameters (Best Architecture from Stage 1) ---
 fixed_params:
   # Output Configuration
   output_type: "multiclass"
@@ -26,41 +26,36 @@ fixed_params:
   
   # Best GCN Architecture from Stage 1
   gnn_type: "GCN"
-  gnn_layers: 2
-  gnn_hidden_dim: 256
-  gin_eps: 0.0
-  gat_heads: 4
-  gat_dropout: 0.1
+  gnn_layers: <PLACEHOLDER> # e.g., 3
+  gnn_hidden_dim: <PLACEHOLDER> # e.g., 256
+  activation: <PLACEHOLDER> # e.g., "leaky_relu"
   
   # Best MLP Architecture from Stage 1
-  use_node_mlp: true
-  node_hidden_dims: [128]  # From node_hidden_dims_0: 128, n_node_hidden_dims_layers: 1
-  use_edge_mlp: true
-  edge_hidden_dims: [32]   # From edge_hidden_dims_0: 32, n_edge_hidden_dims_layers: 1
+  node_hidden_dims: [<PLACEHOLDER>] # e.g., [256, 128] or []
+  edge_hidden_dims: [<PLACEHOLDER>] # e.g., [128, 64] or []
   
   # Best Switch Head Architecture from Stage 1
-  switch_head_type: "mlp"
-  switch_head_layers: 4
-  switch_attention_heads: 1
+  switch_head_type: <PLACEHOLDER> # e.g., "mlp"
+  switch_head_layers: <PLACEHOLDER> # e.g., 2
+  switch_attention_heads: <PLACEHOLDER> # e.g., 4 (if switch_head_type is attention)
   
-  # General Configuration (keep fixed)
-  activation: "leaky_relu"
-  use_batch_norm: true
-  use_residual: true
-  use_skip_connections: true
-  pooling: "add"
+  # Best General Configuration from Stage 1
+  use_batch_norm: <PLACEHOLDER> # e.g., true
+  use_residual: <PLACEHOLDER> # e.g., true
+  use_skip_connections: <PLACEHOLDER> # e.g., false
+  use_gated_mp: <PLACEHOLDER> # e.g., true
   
-  # Physics Configuration (keep fixed)
-  use_gated_mp: true
-  use_phyr: false
-  enforce_radiality: false
-  
-  # Training Configuration (keep some fixed)
-  epochs: 200  # Increase for final training
-  patience: 25  # Increase patience for final training
+  # Default GAT/GIN params
+  gat_heads: 0
+  gat_dropout: 0.0
+  gin_eps: 0.0
+
+  # Training Configuration (partially fixed)
+  epochs: 200
+  patience: 25
   criterion_name: "FocalLoss"
 
-# STAGE 2: HYPERPARAMETER TUNING SEARCH SPACE
+# --- STAGE 2: HYPERPARAMETER TUNING SEARCH SPACE ---
 search_space:
   # Training Hyperparameters
   learning_rate:
@@ -68,56 +63,46 @@ search_space:
     min: 0.0001
     max: 0.01
     log: true
-  
   weight_decay:
     search_type: "float"
-    min: 0.000001
-    max: 0.001
+    min: 1.0e-6
+    max: 1.0e-3
     log: true
-  
   dropout_rate:
     search_type: "float"
     min: 0.0
     max: 0.5
-  
+    
   # Physics Loss Hyperparameters
   lambda_phy_loss:
     search_type: "float"
     min: 0.1
     max: 2.0
-  
   lambda_mask:
     search_type: "float"
     min: 0.001
     max: 0.1
     log: true
-  
   lambda_connectivity:
     search_type: "float"
     min: 0.001
     max: 0.1
     log: true
-  
   lambda_radiality:
     search_type: "float"
     min: 0.001
     max: 0.1
     log: true
   
-  # Loss scaling strategy
+  # Strategy Hyperparameters
   loss_scaling_strategy:
     search_type: "categorical"
     choices: ["fixed", "adaptive_ratio", "adaptive_magnitude"]
-
   normalization_type:
     search_type: "categorical"
     choices: ["adaptive", "simple", "injection_scale", "per_node", "paper_based"]
   
-  # Batch size optimization
+  # Batch size
   batch_size:
     search_type: "categorical"
     choices: [32, 64, 128, 256]
-
-# Logging
-wandb: true
-wandb_project: "GCN_HPO_Stage2"

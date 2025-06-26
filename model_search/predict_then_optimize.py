@@ -11,6 +11,7 @@ from pathlib import Path
 from tqdm import tqdm
 import argparse
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import logging
 import pandas as pd
 import json
@@ -1195,11 +1196,8 @@ if __name__ == "__main__":
 
         class_0_high_conf = class_0_preds[class_0_preds > 0.5]
         class_1_high_conf = class_1_preds[class_1_preds > 0.5]
-
-        conf0 = class_0_preds[class_0_preds > 0.5]
-        conf1 = class_1_preds[class_1_preds > 0.5]
-
         # create 50 bins in [0.5, 1.0]
+
         bins = np.linspace(0.5, 1.0, 51)
 
         # IEEE column width plotting setup
@@ -1208,89 +1206,50 @@ if __name__ == "__main__":
         fig_w = column_width_pt * inches_per_pt
         fig_h = fig_w * 0.6  # Slightly taller aspect ratio for better readability
 
-        # Set up matplotlib for IEEE style
-        plt.rcParams.update({
-            'text.usetex': True,
-            'font.family': 'serif',
-            'font.serif': ['Times New Roman', 'Times', 'Liberation Serif'],
-            'font.size':      10,           # Reduced from 20 to 8
-            'axes.titlesize': 10,      # Reduced from 20 to 9
-            'axes.labelsize': 10,      # Reduced from 20 to 8
-            'xtick.labelsize': 10,     # Reduced from 20 to 7
-            'ytick.labelsize': 10,     # Reduced from 20 to 7
-            'legend.fontsize': 10,     # Reduced from 20 to 7
-            'figure.titlesize': 10,
-            # 'lines.linewidth': 1.0,
-            # 'patch.linewidth': 0.5,
-            # 'axes.linewidth': 0.5,
-            # 'grid.linewidth': 0.5,
-            # 'xtick.major.width': 0.5,
-            # 'ytick.major.width': 0.5,
-            # 'xtick.minor.width': 0.3,
-            # 'ytick.minor.width': 0.3,
-        })
+        fig, ax0 = plt.subplots(figsize=(fig_w, fig_h))
 
-        # Create figure with single axis (remove dual y-axis for clarity)
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        # Class 0 (Open) on left
+        n0, bins0, patches0 = ax0.hist(
+            class_0_high_conf, bins=bins,
+            alpha=0.5, color='red', edgecolor='red', linewidth=0.5,
+            label='Class 0 (Open)'
+        )
+        ax0.set_xlabel('Confidence', fontsize=8)
+        ax0.set_ylabel('Freq Class 0', fontsize=8, color='red')
+        ax0.tick_params(axis='y', labelcolor='red', labelsize=7, width=0.5, length=3)
+        ax0.yaxis.set_major_locator(ticker.MultipleLocator(10))
 
-        # Create bins for histogram
-        bins = np.linspace(0.5, 1.0, 26)  # Reduced number of bins for clarity
+        # Class 1 (Closed) on right
+        ax1 = ax0.twinx()
+        n1, bins1, patches1 = ax1.hist(
+            class_1_high_conf, bins=bins,
+            alpha=0.5, color='blue', edgecolor='blue', linewidth=0.5,
+            label='Class 1 (Closed)'
+        )
+        ax1.set_ylabel('Freq Class 1', fontsize=8, color='blue')
+        ax1.tick_params(axis='y', labelcolor='blue', labelsize=7, width=0.5, length=3)
+        #ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.1))
 
-        # Plot both histograms on same axis with different alpha and colors
-        n0, bins0, patches0 = ax.hist(conf0, bins=bins, alpha=0.7, 
-                                    color='red', edgecolor='darkred', 
-                                    linewidth=0.5, label='Class 0 (Open)')
-        n1, bins1, patches1 = ax.hist(conf1, bins=bins, alpha=0.7, 
-                                    color='blue', edgecolor='darkblue', 
-                                    linewidth=0.5, label='Class 1 (Closed)')
+        # X-axis ticks every 0.1
+        ax0.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
 
-        # Set labels and title with appropriate font sizes
-        ax.set_xlabel('Confidence', fontsize=8)
-        ax.set_ylabel('Frequency', fontsize=8)
-        ax.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
+        # Title
+        ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
 
-        # Improve tick formatting
-        ax.tick_params(axis='both', labelsize=7, width=0.5, length=3)
-
-        # Add grid for better readability
-        ax.grid(True, alpha=0.3, linewidth=0.3)
-
-        # Legend with smaller font and better positioning
-        legend = ax.legend(loc='upper right', fontsize=7, frameon=True, 
-                        fancybox=False, shadow=False, framealpha=0.9,
-                        edgecolor='black', linewidth=0.5)
-
-        # Adjust layout to prevent clipping
-        plt.tight_layout(pad=0.5)
-
-        # Save with high DPI and tight bounding box
-        fig.savefig('confidence_histograms.pdf', dpi=300, bbox_inches='tight', 
-                    pad_inches=0.05, facecolor='white', edgecolor='none')
-
-        # Alternative version with stacked histogram for even better clarity
-        fig2, ax2 = plt.subplots(figsize=(fig_w, fig_h))
-
-        # Stacked histogram
-        ax2.hist([conf0, conf1], bins=bins, alpha=0.8, 
-                color=['red', 'blue'], edgecolor=['darkred', 'darkblue'],
-                linewidth=0.5, label=['Class 0 (Open)', 'Class 1 (Closed)'],
-                stacked=False)  # Set to True for stacked, False for overlapping
-
-        ax2.set_xlabel('Confidence', fontsize=8)
-        ax2.set_ylabel('Frequency', fontsize=8)
-        ax2.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
-        ax2.tick_params(axis='both', labelsize=7, width=0.5, length=3)
-        ax2.grid(True, alpha=0.3, linewidth=0.3)
-        ax2.legend(loc='upper right', fontsize=7, frameon=True, 
-                fancybox=False, shadow=False, framealpha=0.9,
-                edgecolor='black', linewidth=0.5)
+        # Legend centered top
+        h0, l0 = ax0.get_legend_handles_labels()
+        h1, l1 = ax1.get_legend_handles_labels()
+        ax0.legend(h0 + h1, l0 + l1,
+                loc='upper center',
+                bbox_to_anchor=(0.5, 1.0),
+                fontsize=7,
+                ncol=1)
 
         plt.tight_layout(pad=0.5)
-        fig2.savefig('confidence_histograms_alt.pdf', dpi=300, bbox_inches='tight', 
-                    pad_inches=0.05, facecolor='white', edgecolor='none')
-
-        plt.show()
-                            
+        fig.savefig('confidence_histograms_double_axis_png.png',
+                    bbox_inches='tight',
+                    pad_inches=0.05)
+                                                
         
     # if args.optimize and predictions is not None:
     #     print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")

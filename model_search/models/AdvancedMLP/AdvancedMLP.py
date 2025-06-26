@@ -739,19 +739,20 @@ class AdvancedMLP(nn.Module):
         # ====================================================================
         # MLP Processing
         # ====================================================================
-        if use_node_mlp:
+        if node_hidden_dims: 
             self.node_mlp = MLPBlock(
-                self.node_features_dim, node_hidden_dims, activation, 
+                self.node_features_dim, node_hidden_dims, activation,
                 dropout_rate, use_batch_norm, use_residual
             )
             self.node_output_dim = node_hidden_dims[-1]
         else:
             self.node_mlp = None
             self.node_output_dim = self.node_features_dim
+
         
-        if use_edge_mlp:
+        if edge_hidden_dims:  
             self.edge_mlp = MLPBlock(
-                edge_input_dim, edge_hidden_dims, activation, 
+                edge_input_dim, edge_hidden_dims, activation,
                 dropout_rate, use_batch_norm, use_residual
             )
             self.edge_output_dim = edge_hidden_dims[-1]
