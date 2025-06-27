@@ -9,7 +9,7 @@ mkdir -p "$LOG_DIR"
 submit_hpo_job() {
     local MODEL=$1
     local CONFIG=$2
-    local JOB_NAME="HPO-${MODEL}-CPU"
+    local JOB_NAME="HPO-${MODEL}-16"
     
     cat > "$LOG_DIR/${JOB_NAME}.slurm" <<EOF
 #!/bin/bash
@@ -19,9 +19,9 @@ submit_hpo_job() {
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=16G
+#SBATCH --mem=8G
 #SBATCH --time=1-00:00:00
-#SBATCH --partition=tue.default.q
+#SBATCH --partition=elec-ees-empso.cpu.q 
 
 # Load modules
 module purge
@@ -47,10 +47,10 @@ mkdir -p ./data ./logs
 # Using 16 parallel workers (half of 32 CPUs to avoid oversubscription)
 poetry run python -I model_search/hpo.py \\
     --config ${CONFIG} \\
-    --trials 250 \\
-    --wandb \\
-    --study_name ${MODEL}-CPU \\
-    --n_parallel 4
+    --trials 100 \\
+    --study_name ${MODEL}-CPU
+  #   --n_parallel 16 \\
+  #  --trial_timeout 54000
 
 echo "Job completed at: \$(date)"
 EOF
@@ -59,8 +59,8 @@ EOF
 }
 
 # Submit all three jobs
-submit_hpo_job "GAT" "hpo-GAT-stage2.yaml"
-submit_hpo_job "GCN" "hpo-GCN-stage2.yaml"
-submit_hpo_job "GIN" "hpo-GIN-stage2.yaml"
+submit_hpo_job "GAT-16" "hpo-GAT.yaml"
+submit_hpo_job "GCN-16" "hpo-GCN.yaml"
+submit_hpo_job "GIN-16" "hpo-GIN.yaml"
 
 echo "Submitted 3 CPU-optimized HPO jobs: GAT, GCN, GIN"

@@ -194,7 +194,7 @@ def create_pyg_dataset(
     graph_ids = list(pp_all["mst"].keys())
     
     if multiprocessing:
-        num_workers = os.cpu_count() or 1
+        num_workers = min(os.cpu_count(), 1)
         logger.info(f"Using {num_workers} CPU workers for multiprocessing")
         logger.info("Using multiprocessing to create Data objects")
         
@@ -512,20 +512,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
     parser.add_argument("--dataset_names", type=str, nargs="+", default= [
                                                                         "train",
-                                                                         #"validation",
-                                                                         #"test"
+                                                                         "validation",
+                                                                         "test"
                                                                           ]
                                                                           , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
                 r"data\split_datasets\train",
                 
-                #r"data\split_datasets\validation",
-                #r"data\split_datasets\test",
+                r"data\split_datasets\validation",
+                r"data\split_datasets\test",
                 #r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\source_datasets\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\test"
                 #r"data\split_datasets\test",
     ], help="Names of folders to look for datasets in")
     parser.add_argument("--dataset_type", type=str, default="cvx", 
-                        choices=["default", "cvx"],
+                        choices=["default", "default"],
                         help="Type of dataloader to create")
     parser.add_argument("--batching_type", type=str, default="standard",
                         choices =["standard", "dynamic", "neighbor"],)

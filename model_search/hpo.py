@@ -43,7 +43,7 @@ sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "src")])
 
 from loss_functions import FocalLoss, WeightedBCELoss
 
-
+WORKER_DATALOADERS = {}
 class HPO:
     """Parallelized HPO with multi-process execution and async TPE updates"""
     
@@ -435,18 +435,36 @@ class HPO:
 
         return True
     
-    def objective(self, trial: optuna.Trial, train_loader, val_loader) -> float:
+
+
+    def objective(self, trial: optuna.Trial) -> float:
         """The all-in-one objective function for a single HPO trial."""
+        global WORKER_DATALOADERS
+        
         # Force CPU and limit threads in each worker process
         device = torch.device("cpu")
         torch.set_num_threads(1)
         os.environ['OMP_NUM_THREADS'] = '1'
         os.environ['MKL_NUM_THREADS'] = '1'
 
+        # Load data only if not already loaded in this worker process
+        if not WORKER_DATALOADERS:
+            logger.info(f"Worker (PID: {os.getpid()}) loading data for the first time.")
+            dataloaders = create_data_loaders(
+                dataset_names=self.config.get('dataset_names'),
+                folder_names=self.config.get('folder_names'),
+                batch_size=self.fixed_params.get('batch_size', 128),
+                seed=self.seed,
+                num_workers=0, # Important for this pattern
+            )
+            WORKER_DATALOADERS['train'] = dataloaders.get("train")
+            WORKER_DATALOADERS['val'] = dataloaders.get("validation")
+
+        train_loader = WORKER_DATALOADERS['train']
+        val_loader = WORKER_DATALOADERS['val']
 
         config = self.suggest_params(trial)
         
-
         data_sample = train_loader.dataset[0]
         model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
         model_class = getattr(model_module, config['model_module'])
@@ -528,25 +546,11 @@ class HPO:
             )
         )
 
-        logger.info("Loading and creating dataloaders once...")
-        dataloaders = create_data_loaders(
-            dataset_names=self.config.get('dataset_names'),
-            folder_names=self.config.get('folder_names'),
-            batch_size=self.fixed_params.get('batch_size', 128), 
-            seed=self.seed,
-            num_workers=0, 
-        )
-        train_loader = dataloaders.get("train")
-        val_loader = dataloaders.get("validation")
-        
-        if not train_loader or not val_loader:
-            raise RuntimeError("Data loaders could not be created for the main process.")
+        logger.info("Dataloaders will be created once per worker process.")
 
-        objective_with_data = partial(self.objective, train_loader=train_loader, val_loader=val_loader)
-
-        # Run optimization 
+        # Run optimization. The objective function now handles its own data loading.
         study.optimize(
-            objective_with_data, 
+            self.objective, 
             n_trials=n_trials,
             n_jobs=self.n_parallel,
             catch=(Exception,),

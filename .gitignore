@@ -32,6 +32,8 @@
 .pyproject.toml
 *.png
 /data_generated/
+/history/
+/model_search/baseline_ml.py
 
 # In data_used, ignore all files, then explicitly track selected ones (placeholders)
 /data_used/*

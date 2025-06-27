@@ -50,7 +50,6 @@ src_path = ROOT_DIR / "src"
 if str(src_path) not in sys.path:
     sys.path.append(str(src_path))
 
-from gradient_tracker import *
 from loss_functions import WeightedBCELoss, FocalLoss
 
 DEFAULT_DESCRIPTION = "Graph Neural Network Model Search for Distribution Network Reconfiguration"
@@ -173,6 +172,12 @@ def main():
         model_kwargs['max_n'] = max_n_val
         model_kwargs['max_e'] = max_e_val
         model_kwargs['cvx_layer'] = build_cvx_layer(max_n_val, max_e_val)
+
+        import torch.multiprocessing as mp
+        mp.set_start_method("spawn", force=True)
+
+        # enforce a sane DataLoader num_workers
+        args.num_workers = min(args.num_workers, 4)
 
     model = model_class(**model_kwargs)
 
