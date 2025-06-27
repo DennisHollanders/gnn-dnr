@@ -512,10 +512,8 @@ def physics_loss(output, data, device, normalization_type="adaptive"):
             physics_loss.Q_running_var = current_Q_var.detach()
         else:
             # Update with detached values
-            physics_loss.P_running_var = (1 - physics_loss.momentum) * physics_loss.P_running_var + \
-                                    physics_loss.momentum * current_P_var.detach()
-            physics_loss.Q_running_var = (1 - physics_loss.momentum) * physics_loss.Q_running_var + \
-                                    physics_loss.momentum * current_Q_var.detach()
+            physics_loss.P_running_var = (1 - physics_loss.momentum) * physics_loss.P_running_var + physics_loss.momentum * current_P_var.detach()
+            physics_loss.Q_running_var = (1 - physics_loss.momentum) * physics_loss.Q_running_var + physics_loss.momentum * current_Q_var.detach()
         
         kcl_loss_P = (kcl_P.pow(2) / physics_loss.P_running_var).mean()
         kcl_loss_Q = (kcl_Q.pow(2) / physics_loss.Q_running_var).mean()

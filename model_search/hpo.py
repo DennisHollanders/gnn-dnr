@@ -556,7 +556,7 @@ class HPO:
             catch=(Exception,),
             callbacks=[self._log_trial_to_csv_callback]
         )
-        
+
         # Log final results to wandb if enabled
         if use_wandb and self.wandb_run:
             best_value = study.best_value if study.trials else -1

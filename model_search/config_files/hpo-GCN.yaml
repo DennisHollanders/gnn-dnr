@@ -77,7 +77,7 @@ search_space:
     choices: [0, 64, 128, 256, 512]
   node_hidden_dim_2:
     search_type: "categorical"
-    choices: [0, 64, 128, 256]
+    choices: [0, 64, 128, 256, 512]
   
   # Edge MLP Architecture
   edge_hidden_dim_0:
@@ -88,7 +88,7 @@ search_space:
     choices: [0, 64, 128, 256, 512]
   edge_hidden_dim_2:
     search_type: "categorical"
-    choices: [0, 64, 128, 256]
+    choices: [0, 64, 128, 256, 512]
   
   # Switch Head Architecture
   switch_head_type:
