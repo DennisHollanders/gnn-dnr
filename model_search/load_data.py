@@ -31,7 +31,7 @@ def load_pp_networks(base_directory):
     nets = {"mst": {}, "mst_opt": {}}
     for phase in ["mst", "mst_opt"]:
         logger.info(f"Loading {phase} networks from {base_directory}")
-        folder = os.path.join(base_directory, phase, "pandapower_networks")
+        folder = os.path.join(base_directory, phase)
         if not os.path.isdir(folder):
             continue
         for fn in tqdm(os.listdir(folder), desc=f"Loading {phase} networks from {folder}"):
@@ -50,6 +50,7 @@ def load_pp_networks(base_directory):
                 except:
                     net = from_json_dict(json.loads(raw))
             if net.bus.empty:
+                logger.warning(f"Skipping empty network: {fn} in {phase}")
                 continue
             nets[phase][fn] = net
     return nets
@@ -511,14 +512,14 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Create data loaders for power network data")
     parser.add_argument("--dataset_names", type=str, nargs="+", default= [
+                                                                        "validation",
                                                                         "train",
-                                                                         "validation",
                                                                          "test",
                                                                           ]
                                                                           , help="Names of datasets to create loaders for")
     parser.add_argument("--folder_names", type=str, nargs="+", default=[
-                r"data\split_datasets\train",
                 r"data\split_datasets\validation",
+                r"data\split_datasets\train",
                 r"data\split_datasets\test",]
                 , help="Names of folders to look for datasets in")
     parser.add_argument("--dataset_type", type=str, default="cvx", 
