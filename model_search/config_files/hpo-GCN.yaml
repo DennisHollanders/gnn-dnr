@@ -1,5 +1,5 @@
-description: "Stage 1 HPO for GCN: Architecture search"
-job_name: "GCN-stage1-architecture-search"
+description: "GIN model with hyperparameter optimization"
+job_name: "None"
 
 # --- Data Configuration ---
 dataset_names: ["train", "validation", "test"]
@@ -11,6 +11,7 @@ dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
+batch_size: 128
 train_ratio: 0.85
 seed: 0
 num_workers: 0

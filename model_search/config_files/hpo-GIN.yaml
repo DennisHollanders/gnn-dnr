@@ -1,5 +1,5 @@
-description: "Stage 1 HPO for GIN: Architecture search"
-job_name: "GIN-stage1-architecture-search"
+description: "GIN model with hyperparameter optimization"
+job_name: "None"
 
 # --- Data Configuration ---
 dataset_names: ["train", "validation", "test"]

@@ -17,23 +17,20 @@ seed: 0
 num_workers: 0
 
 # Training Configuration
-learning_rate: 0.00035760499745340354
-weight_decay: 3.1083921460064515e-05
+learning_rate: 0.0004029976643955208
+weight_decay: 8.701448752941287e-06
 epochs: 200
 patience: 20
 criterion_name: "FocalLoss"
 
 # Physics Loss Configuration (used in training loop)
-lambda_phy_loss: 0.7459167213752221
-lambda_mask: 0.05936503481046906
-lambda_connectivity: 0.0022114859650502207
-lambda_radiality: 0.001644915684713298
-loss_scaling_strategy: "fixed"
-normalization_type: "adaptive"
+lambda_connectivity: 0.030008364467226708
+lambda_mask: 0.46073466660568596
+lambda_phy_loss: 7.58031640466716
+lambda_radiality: 0.012630952201391193
+# loss_scaling_strategy: "fixed"
+#normalization_type: "simple"
 
-# Hyperparameter Search
-hp_search: false
-hp_search_n_trials: 50
 
 # Model Configuration
 model_module: "AdvancedMLP"
@@ -44,35 +41,34 @@ model_kwargs:
   
   # GNN Configuration
   gnn_type: "GCN"
-  gnn_layers: 1
-  gnn_hidden_dim: 360  # Fixed from gnn_hidden_dim_multiple
-  gin_eps: 0.0  # Added (required parameter)
-  gat_heads: 4  # Added (default value)
-  gat_dropout: 0.1  # Added (default value)
+  gnn_layers: 4
+  gnn_hidden_dim: 128
+  gin_eps: 0.0
+  gat_heads: 0
+  gat_dropout: 0.0
 
   # MLP Configuration
-  use_node_mlp: true
-  node_hidden_dims: [256, 512, 512]
+  use_node_mlp: True
+  node_hidden_dims: [64]
   use_edge_mlp: true
-  edge_hidden_dims: [256, 512]
+  edge_hidden_dims: [32, 64, 128]
 
   # General Configuration
   activation: "leaky_relu"
-  dropout_rate: 0.0
+  dropout_rate: 0.014909725001545145
   use_batch_norm: true
-  use_residual: true
+  use_residual: false
   use_skip_connections: true
-  pooling: "add"
 
   # Switch Head Configuration
   switch_head_type: "mlp"
   switch_head_layers: 3
-  switch_attention_heads: 4  # Added
+  switch_attention_heads: 0
 
   # Physics Configuration
   use_gated_mp: true
   use_phyr: false
-  enforce_radiality: false  # Added
+  enforce_radiality: false  
 
 # Logging
 wandb: true

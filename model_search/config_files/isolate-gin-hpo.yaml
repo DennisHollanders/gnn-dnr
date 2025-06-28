@@ -1,0 +1,64 @@
+description: "Final model"
+job_name: "final modes"
+
+# --- Data Configuration ---
+dataset_names: ["train", "validation", "test"]
+folder_names: 
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+dataset_type: "default"
+batching_type: "dynamic"
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 0
+wandb: true
+
+# --- Model Configuration ---
+model_module: "AdvancedMLP"
+
+# --- ALL Parameters as Fixed (no search) ---
+fixed_params:
+  # Base Architecture (from hpo-GIN-stage2.yaml)
+  batch_size: 128
+  output_type: "multiclass"
+  num_classes: 2
+  gnn_type: "GIN"
+  gnn_layers: 2
+  gnn_hidden_dim: 256
+  gin_mlp_layers: 4
+  gin_train_eps: false
+  activation: "leaky_relu"
+  node_hidden_dims: [64]
+  edge_hidden_dims: [128, 128, 64]
+  switch_head_type: "mlp"
+  switch_head_layers: 5
+  use_residual: false
+  use_skip_connections: true
+  use_gated_mp: true
+  
+  # Tuned Hyperparameters (from config_GIN_trial_200.yaml)
+  learning_rate: 0.0003815391036050384
+  weight_decay: 0.00010249568796346252
+  use_batch_norm: true
+  dropout_rate: 0.029578210220025696
+  gin_eps: 0.31860447545419246
+  lambda_connectivity: 0.04900810891771042
+  lambda_mask: 0.09578878253826116
+  lambda_phy_loss: 5.85134810617389
+  lambda_radiality: 0.0029218223306799037
+  loss_scaling_strategy: "adaptive_magnitude"
+  normalization_type: "paper_based"
+  
+  # Default/Fixed params for consistency
+  gat_heads: 0
+  gat_dropout: 0.0
+  switch_attention_heads: 0
+  epochs: 200
+  patience: 25
+  criterion_name: "FocalLoss" # Set explicitly, ignoring '.nan' from trial file
+
+# Empty search space - everything is fixed
+search_space: {}

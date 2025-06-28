@@ -174,9 +174,9 @@ def generate_batch_configs():
 
     # Define models, their data folders, and trial numbers
     tasks = {
-        "GCN": {"folder": "hpo_GCN-100-CPU_20250627_182304", "trials": [159, 117, 76, 147, 113]},
-        "GAT": {"folder": "hpo_GAT-100-CPU_20250627_182503", "trials": [175, 189, 47, 109, 140]},
-        "GIN": {"folder": "hpo_GIN-100-CPU_20250627_182503", "trials": [158, 66, 115, 138, 125]}
+       # "GCN": {"folder": "hpo_GCN-2-CPU_20250628_101047", "trials": [173,212,137,1,162]},
+       # "GAT": {"folder": "hpo_GAT-2-CPU_20250628_101047", "trials": [175, 189, 47, 109, 140]},
+       "GIN": {"folder": "hpo_GIN-2-CPU_20250628_174111", "trials": [200]}
     }
 
     print("--- Running in Batch Mode ---")

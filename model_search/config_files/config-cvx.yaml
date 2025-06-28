@@ -3,10 +3,10 @@ job_name: "best-GCN"
 
 # Data Configuration
 dataset_names: ["train", "validation", "test"]
-folder_names:
-  - data\\split_datasets\\train
-  - data\\split_datasets\\validation
-  - data\\split_datasets\\test
+folder_names: 
+  - "data/split_datasets/train"
+  - "data/split_datasets/validation"
+  - "data/split_datasets/test"
 # -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
 # -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
 # -  data\\source_datasets\\test_val_real__range-30-150_nTest-10_nVal-10_2732025_32\\test
@@ -14,7 +14,7 @@ dataset_type: "cvx"
 batching_type: "standard"
 max_nodes: 20000
 max_edges: 50000
-batch_size: 8
+batch_size: 12
 train_ratio: 0.85
 seed: 0
 num_workers: 0

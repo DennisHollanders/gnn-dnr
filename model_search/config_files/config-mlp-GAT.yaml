@@ -17,27 +17,25 @@ seed: 0
 num_workers: 0
 
 # Training Configuration
-learning_rate: 0.00035760499745340354
-weight_decay: 3.1083921460064515e-05
-epochs: 200
-patience: 20
+learning_rate: 0.0004977456423587269
+weight_decay: 2.0808634647507578e-06
+epochs: 300
+patience: 10
 criterion_name: "FocalLoss"
 
 # Physics Loss Configuration (used in training loop)
-lambda_phy_loss: 0.96543480711283145
-lambda_mask: 0.01
-lambda_connectivity: 0.0028830179868523345
-lambda_radiality: 0.001834148675023315
-loss_scaling_strategy: "fixed"
-normalization_type: "adaptive"
+lambda_connectivity: 0.06497262554235322
+lambda_mask: 0.2333442569508463
+lambda_phy_loss: 6.125445116538297
+lambda_radiality: 1.124743240361359
+loss_scaling_strategy: adaptive_ratio
+normalization_type: adaptive
 
-# Hyperparameter Search
-hp_search: false
-hp_search_n_trials: 50
 
 # Model Configuration
 model_module: "AdvancedMLP"
 model_kwargs:
+  criterion_name: "FocalLoss"
   # Output Configuration
   output_type: "multiclass"
   num_classes: 2
@@ -45,16 +43,16 @@ model_kwargs:
   # GNN Configuration
   gnn_type: "GAT"
   gnn_layers: 2
-  gnn_hidden_dim: 224  # Fixed from gnn_hidden_dim_multiple
-  gat_heads: 2
-  gat_dropout: 0.05099716381479796
-  gin_eps: 0.0  # Added (for GIN layers)
+  gnn_hidden_dim: 384 
+  gat_heads: 4
+  dropout_rate: 0.005998322292205552
+  gat_dropout: 0.026125510066810693
+  gin_eps: 0.0  
 
   # MLP Configuration
-  use_node_mlp: true
-  node_hidden_dims: [256, 512, 512]
-  use_edge_mlp: true
-  edge_hidden_dims: [256, 512]
+  node_hidden_dims: []
+  use_node_mlp: false 
+  edge_hidden_dims: [64, 512, 64]
 
   # General Configuration
   activation: "leaky_relu"
@@ -64,16 +62,23 @@ model_kwargs:
   use_skip_connections: true
   pooling: "add"
 
-
   # Switch Head Configuration
-  switch_head_type: "graph_attention"
-  switch_head_layers: 4
-  switch_attention_heads: 4  # Added
+  switch_head_type: "mlp"
+  switch_head_layers: 5
+  switch_attention_heads: 0
 
   # Physics Configuration
   use_gated_mp: true
   use_phyr: false
-  enforce_radiality: false  # Added
+  enforce_radiality: false
+
+  # Physics Loss Configuration
+  lambda_connectivity: 0.06497262554235322
+  lambda_mask: 0.2333442569508463
+  lambda_phy_loss: 6.125445116538297
+  lambda_radiality: 1.124743240361359
+  loss_scaling_strategy: adaptive_ratio
+  normalization_type: adaptive
 
 # Logging
 wandb: true

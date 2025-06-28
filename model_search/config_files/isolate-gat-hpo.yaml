@@ -1,0 +1,73 @@
+description: "Final model"
+job_name: "final modes"
+
+# --- Data Configuration ---
+dataset_names: ["train", "validation", "test"]
+folder_names: 
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
+  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+dataset_type: "default"
+batching_type: "dynamic"
+max_nodes: 20000
+max_edges: 50000
+train_ratio: 0.85
+seed: 0
+num_workers: 0
+wandb: true
+
+# --- Model Configuration ---
+model_module: "AdvancedMLP"
+
+# --- ALL Parameters as Fixed (no search) ---
+fixed_params:
+  # General Configuration
+  batch_size: 128
+  output_type: "multiclass"
+  num_classes: 2
+  
+  # GNN Architecture (from config-mlp-GAT.yaml)
+  gnn_type: "GAT"
+  gnn_layers: 2
+  gnn_hidden_dim: 384
+  activation: "leaky_relu"
+  gat_heads: 4
+  gat_dropout: 0.026125510066810693
+  
+  # MLP Architecture
+  node_hidden_dims: []
+  use_node_mlp: false
+  edge_hidden_dims: [64, 512, 64]
+  
+  # Switch Head
+  switch_head_type: "mlp"
+  switch_head_layers: 5
+  
+  # General Model Config
+  use_residual: true
+  use_skip_connections: true
+  use_gated_mp: true
+  use_batch_norm: true
+  
+  # Training parameters
+  epochs: 300
+  patience: 10
+  learning_rate: 0.0004977456423587269
+  weight_decay: 2.0808634647507578e-06
+  dropout_rate: 0.005998322292205552
+  criterion_name: "FocalLoss"
+  
+  # Physics losses
+  lambda_connectivity: 0.06497262554235322
+  lambda_mask: 0.2333442569508463
+  lambda_phy_loss: 6.125445116538297
+  lambda_radiality: 1.124743240361359
+  loss_scaling_strategy: "adaptive_ratio"
+  normalization_type: "adaptive"
+
+  # Default/Unused params for consistency
+  switch_attention_heads: 0
+  gin_eps: 0.0
+
+# Empty search space - everything is fixed
+search_space: {}

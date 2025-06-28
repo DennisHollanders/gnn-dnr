@@ -95,26 +95,19 @@ def build_cvx_layer(max_n: int, max_e: int):
     cons += [y_line <= A_from_full @ z_bus]
     cons += [y_line <= A_to_full @ z_bus]
     
-    # The Big-M constraint on I_sq is retained to bound its value when a line is active.
-    cons += [I_sq <= cp.multiply(bigM_flow_sq_full, y_line)]
-    # Auxiliary variables for the perspective of squared flows.
-    s_p = cp.Variable(max_e, nonneg=True)
-    s_q = cp.Variable(max_e, nonneg=True)
+    # Flow constraints
+    cons += [
+        p_flow <= cp.multiply(bigM_flow_full, y_line),
+       -p_flow <= cp.multiply(bigM_flow_full, y_line),
+        q_flow <= cp.multiply(bigM_flow_full, y_line),
+       -q_flow <= cp.multiply(bigM_flow_full, y_line),
+        I_sq   <= cp.multiply(bigM_flow_sq_full, y_line)
+    ]
 
-    # New parameter for nominal voltage (approximating v_sq as 1.0 in this constraint).
-    v_sq_nom = cp.Parameter(max_e, nonneg=True)
-
-    # The perspective of p_flow^2 is constrained by s_p >= p_flow^2 / y_line.
-    # This is reformulated as a Second-Order Cone constraint: ||[y_line-s_p, 2*p_flow]||_2 <= y_line+s_p
-    X_p = cp.vstack([y_line - s_p, 2 * p_flow])
-    cons += [cp.SOC(y_line + s_p, X_p)]
-
-    # The perspective of q_flow^2 is constrained by s_q >= q_flow^2 / y_line.
-    X_q = cp.vstack([y_line - s_q, 2 * q_flow])
-    cons += [cp.SOC(y_line + s_q, X_q)]
-
+    # SOC constraint
     v_from = A_from_full @ v_sq
-    cons += [s_p + s_q <= cp.multiply(v_sq_nom, I_sq)]
+    soc_X = cp.vstack([2 * p_flow, 2 * q_flow, v_from - I_sq])
+    cons += [cp.SOC(v_from + I_sq, soc_X)]
 
     # Voltage drop equations
     vd = (A_to_full @ v_sq - v_from
@@ -136,44 +129,21 @@ def build_cvx_layer(max_n: int, max_e: int):
         qe <=  Mbal*sub_mask_full, -qe <=  Mbal*sub_mask_full
     ]
 
+    # Add a new parameter for the penalty weight
+    lambda_penalty = cp.Parameter(nonneg=True)
+
     # Objective function
     loss  = cp.sum(cp.multiply(r_pu_full, I_sq))
     loss += 0.001*cp.sum_squares(y_line - y_warm)
     loss += 0.001*cp.sum_squares(v_sq - v_warm)
     loss += 0.01*cp.norm1(y_line - y0_full)
 
-    # --- Add relaxed Single-Commodity Flow (SCF) constraints for radiality ---
-    scf_flow = cp.Variable(max_e)
-    scf_M = max_n 
 
-    # New parameter to define the root bus for the commodity flow (e.g., a substation)
-    root_bus_mask = cp.Parameter(max_n, nonneg=True)
+    penalty = -cp.sum(y_line - cp.square(y_line)) 
+    loss += lambda_penalty * penalty
 
-    # 1. Commodity flow is bounded by the line's operational status (y_line).
-    cons += [
-        scf_flow <= scf_M * y_line,
-       -scf_flow <= scf_M * y_line
-    ]
+    cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
 
-    # 2. Flow conservation for all buses to enforce a tree structure.
-    # To ensure DPP-compliance, we introduce a helper variable for the total supply.
-    scf_supply = cp.Variable()
-
-    # The demand at each non-root bus is z_bus (1 if energized, 0 otherwise).
-    demand = cp.multiply(1 - root_bus_mask, z_bus)
-
-    # The total supply from the root must equal the sum of all demands.
-    cons += [scf_supply == cp.sum(demand)]
-
-    # The supply/demand vector 'd' determines the net flow at each bus.
-    # For non-roots: d = -demand (inflow of 1 unit if energized)
-    # For root: d = scf_supply (outflow equal to total demand)
-    d = cp.multiply(root_bus_mask, scf_supply) - demand
-
-    # The net flow at each bus must match the supply/demand vector.
-    D_inc = (A_from_full - A_to_full).T
-    net_flow = D_inc @ scf_flow
-    cons += [net_flow == d]
 
     problem = cp.Problem(cp.Minimize(loss), cons)
 
@@ -190,7 +160,7 @@ def build_cvx_layer(max_n: int, max_e: int):
             bigM_flow_full, bigM_v, A_from_full, A_to_full, sub_mask_full, non_sub_mask_full,
             bigM_flow_sq_full, z_line_sq_full, S_nodes, S_edges,
             v_target, z_target, y_target, flow_target, I_target,
-            v_sq_nom, root_bus_mask # Swapped order to match problem discovery
+            lambda_penalty  # <-- Add here
         ],
         variables=[y_line, v_sq]
     )
@@ -201,7 +171,7 @@ class cvx(nn.Module):
         self.max_n = K['max_n']
         self.max_e = K['max_e']
         self.cvx_layer = K["cvx_layer"] 
-    
+        self.lambda_penalty = 2
      
         self.vl, self.vu = 0.9, 1.1
         
@@ -287,18 +257,7 @@ class cvx(nn.Module):
             S_nodes, S_edges, v_t, z_t, y_t, f_t, I_t = \
                 self.create_selection_matrices_and_targets(n_n_actual, n_e_actual,
                                                         sw_full.device)
-
-            sub_mask_i = data.cvx_sub_mask[i]
-            root_indices = (sub_mask_i > 0).nonzero(as_tuple=True)[0]
             
-            root_bus_mask = torch.zeros(self.max_n, device=sw_full.device)
-            if root_indices.numel() > 0:
-                root_bus_mask[root_indices[0]] = 1.0
-            else:
-                logger.warning(f"Graph {i}: No substation mask. Using bus 0 as root.")
-                root_bus_mask[0] = 1.0
-            v_sq_nom_val = torch.ones(self.max_e, device=sw_full.device)
-
             params = [
                 sw_full, vw_full,
                 data.cvx_p_inj[i],
@@ -316,8 +275,9 @@ class cvx(nn.Module):
                 data.cvx_z_line_sq[i],
                 S_nodes, S_edges,
                 v_t, z_t, y_t, f_t, I_t,
-                v_sq_nom_val,
-                root_bus_mask # Swapped order to match CvxpyLayer
+                torch.tensor(self.lambda_penalty,
+                        dtype=sw_full.dtype,
+                        device=sw_full.device)
             ]
             cvx_args.append(params)
         

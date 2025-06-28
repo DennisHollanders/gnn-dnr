@@ -124,8 +124,6 @@ class HPO:
         if "metrics" in trial.user_attrs:
             row_data.update(trial.user_attrs["metrics"])
 
-        # Ensure all headers are present, filling with None if a value is missing for a given trial
-        # This prevents KeyError and ensures consistent CSV structure
         final_row = {header: row_data.get(header) for header in self._csv_headers}
 
         with self.csv_lock:
@@ -488,23 +486,45 @@ class HPO:
         best_mcc = -1.0
         
         max_epochs = min(config.get('epochs', 100), 80)
-        for epoch in range(max_epochs):
+        for epoch in range(300):
             if time.time() - start_time > self.trial_timeout:
                 raise optuna.exceptions.TrialPruned("Trial timed out")
 
-            train_loss, _ = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
+            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
             val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
 
+            logger.info(f"Epoch {epoch+1}/{max_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            if epoch % 5 == 0:
+                logger.info(f"Epoch {epoch+1}/{max_epochs}, Train dict:{train_dict}, \n \n Val dict: {val_dict}")
+
             current_mcc = val_dict.get('test_mcc', -1.0)
-            best_mcc = max(best_mcc, current_mcc)
+
+            # If the current model is the best one so far in this trial, save its state
+            if current_mcc > best_mcc_in_trial:
+                best_mcc_in_trial = current_mcc
+                best_epoch = epoch + 1
+                best_model_state_dict = model.state_dict()
             
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
+        # After the trial, save the BEST model state if it exists
+        if best_model_state_dict is not None:
+            model_path = self.results_dir / f"model_trial_{trial.number}.pt"
+            torch.save({
+                'model_state_dict': best_model_state_dict,
+                'optimizer_state_dict': optimizer.state_dict(),
+                'config': config,
+                'model_params': model_params,
+                'best_mcc_in_trial': best_mcc_in_trial,
+                'best_epoch': best_epoch
+            }, model_path)
+            logger.info(f"Saved best model for trial {trial.number} to {model_path} (MCC: {best_mcc_in_trial:.4f} at epoch {best_epoch})")
+
         # 5. Log all metrics and return the objective value
         final_metrics = {
-            'best_mcc': best_mcc,
+            'best_mcc': best_mcc_in_trial,
             'final_val_loss': val_loss,
             'final_epoch': epoch,
             'model_parameters': model_params,
@@ -512,7 +532,7 @@ class HPO:
         trial.set_user_attr("metrics", final_metrics)
         trial.set_user_attr("hyperparameters", config) 
 
-        return best_mcc
+        return best_mcc_in_trial
 
     def run_async_optimization(self, n_trials: int = 100, use_wandb: bool = False):
         """Run asynchronous parallel optimization with fixed wandb support"""

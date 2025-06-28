@@ -181,7 +181,7 @@ def main():
 
     model = model_class(**model_kwargs)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     best_loss = float("inf")
     patience = 0
@@ -194,27 +194,47 @@ def main():
     except AttributeError:
         logger.info("No test dataset provided")
 
-    if hasattr(args, 'output_type') and args.output_type == "multiclass":
-        if args.criterion_name == "CrossEntropyLoss":
-            criterion = nn.CrossEntropyLoss()
-        if args.criterion_name == "WeightedBCELoss":
-            criterion = WeightedBCELoss(pos_weight=2.0)
-        else:
-            logger.warning(f"Using {args.criterion_name} with multiclass - may need adaptation")
-            criterion = getattr(nn, args.criterion_name)()
-    else:
-        # Existing binary criterion logic
-        if args.criterion_name == "WeightedBCELoss":
-            criterion = WeightedBCELoss(pos_weight=2.0)
-        elif args.criterion_name == "FocalLoss":
-            criterion = FocalLoss(alpha=1.0, gamma=2.0)
-        elif args.criterion_name == "MSELoss":
-            criterion = nn.MSELoss()
-        elif args.criterion_name == "CrossEntropyLoss":
-            criterion = nn.CrossEntropyLoss()
-        else:
-            criterion = getattr(nn, args.criterion_name)()
+    # if hasattr(args, 'output_type') and args.output_type == "multiclass":
+    #     if args.criterion_name == "CrossEntropyLoss":
+    #         criterion = nn.CrossEntropyLoss()
+    #     if args.criterion_name == "WeightedBCELoss":
+    #         criterion = WeightedBCELoss(pos_weight=2.0)
+    #     else:
+    #         logger.warning(f"Using {args.criterion_name} with multiclass - may need adaptation")
+    #         criterion = getattr(nn, args.criterion_name)()
+    # else:
+    #     # Existing binary criterion logic
+    #     if args.criterion_name == "WeightedBCELoss":
+    #         criterion = WeightedBCELoss(pos_weight=2.0)
+    #     elif args.criterion_name == "FocalLoss":
+    #         criterion = FocalLoss(alpha=1.0, gamma=2.0)
+    #     elif args.criterion_name == "MSELoss":
+    #         criterion = nn.MSELoss()
+    #     elif args.criterion_name == "CrossEntropyLoss":
+    #         criterion = nn.CrossEntropyLoss()
+    #     else:
+    #         criterion = getattr(nn, args.criterion_name)()
 
+    if args.criterion_name == "FocalLoss":
+        criterion = FocalLoss(alpha=1.0, gamma=2.0)
+    elif args.criterion_name == "WeightedBCELoss":
+        # This can be used for binary or multiclass (with proper targets)
+        criterion = WeightedBCELoss(pos_weight=2.0)
+    elif args.criterion_name == "CrossEntropyLoss":
+        criterion = nn.CrossEntropyLoss()
+    elif args.criterion_name == "MSELoss":
+        criterion = nn.MSELoss()
+    else:
+        # Fallback for any other standard nn loss
+        try:
+            criterion = getattr(nn, args.criterion_name)()
+            logger.info(f"Initialized criterion '{args.criterion_name}' from torch.nn")
+        except AttributeError:
+            logger.error(f"Criterion '{args.criterion_name}' not found in custom losses or torch.nn!")
+            raise
+
+    criterion = FocalLoss(alpha=1.0, gamma=2.0) 
+    
     lambda_dict = { 'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
                     'lambda_mask': getattr(args, 'lambda_mask', 0.01),
                     "lambda_connectivity": getattr(args, 'lambda_connectivity', 0.05),
