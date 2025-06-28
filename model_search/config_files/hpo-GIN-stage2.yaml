@@ -15,38 +15,38 @@ train_ratio: 0.85
 seed: 0
 num_workers: 0
 wandb: false
-
+batch_size: 128
 # --- Model Configuration ---
 model_module: "AdvancedMLP"
 
 # --- STAGE 2: Fixed Parameters (Best Architecture from Stage 1) ---
 fixed_params:
+  batch_size: 128
   # Output Configuration
   output_type: "multiclass"
   num_classes: 2
   
-  # Best GIN Architecture from Stage 1
+  # Best GIN Architecture from Stage 1 (Trial 138)
   gnn_type: "GIN"
-  gnn_layers: <PLACEHOLDER> # e.g., 3
-  gnn_hidden_dim: <PLACEHOLDER> # e.g., 256
-  gin_mlp_layers: <PLACEHOLDER> # e.g., 2
-  gin_train_eps: <PLACEHOLDER> # e.g., true
-  activation: <PLACEHOLDER> # e.g., "leaky_relu"
+  gnn_layers: 2
+  gnn_hidden_dim: 256
+  gin_mlp_layers: 4
+  gin_train_eps: false
+  activation: "leaky_relu"
   
-  # Best MLP Architecture from Stage 1
-  node_hidden_dims: [<PLACEHOLDER>] # e.g., [256, 128] or []
-  edge_hidden_dims: [<PLACEHOLDER>] # e.g., [128, 64] or []
+  # Best MLP Architecture from Stage 1 (Trial 138)
+  node_hidden_dims: [64]
+  edge_hidden_dims: [128, 128, 64]
   
-  # Best Switch Head Architecture from Stage 1
-  switch_head_type: <PLACEHOLDER> # e.g., "mlp"
-  switch_head_layers: <PLACEHOLDER> # e.g., 2
-  switch_attention_heads: <PLACEHOLDER> # e.g., 4
+  # Best Switch Head Architecture from Stage 1 (Trial 138)
+  switch_head_type: "mlp"
+  switch_head_layers: 5
+  switch_attention_heads: 0 # Not applicable for MLP head
   
-  # Best General Configuration from Stage 1
-  use_batch_norm: <PLACEHOLDER> # e.g., true
-  use_residual: <PLACEHOLDER> # e.g., true
-  use_skip_connections: <PLACEHOLDER> # e.g., false
-  use_gated_mp: <PLACEHOLDER> # e.g., true
+  # Best General Configuration from Stage 1 (Trial 138)
+  use_residual: false
+  use_skip_connections: true
+  use_gated_mp: true
   
   # Default GAT params
   gat_heads: 0
@@ -59,6 +59,12 @@ fixed_params:
 
 # --- STAGE 2: HYPERPARAMETER TUNING SEARCH SPACE ---
 search_space:
+  use_batch_norm:
+    search_type: "categorical"
+    choices: [true, false]
+  criterion_name:
+    search_type: "categorical"
+    choices: ["CrossEntropyLoss", "FocalLoss", "WeightedBCELoss"]
   # Training Hyperparameters
   learning_rate:
     search_type: "float"
@@ -82,24 +88,25 @@ search_space:
     max: 0.5
 
   # Physics Loss Hyperparameters
-  lambda_phy_loss:
+  lamlambda_phy_loss:
     search_type: "float"
     min: 0.1
-    max: 2.0
+    max: 10.0
+    log: true
   lambda_mask:
     search_type: "float"
     min: 0.001
-    max: 0.1
+    max: 10
     log: true
   lambda_connectivity:
     search_type: "float"
     min: 0.001
-    max: 0.1
+    max: 10
     log: true
   lambda_radiality:
     search_type: "float"
     min: 0.001
-    max: 0.1
+    max: 10
     log: true
   
   # Strategy Hyperparameters
@@ -110,7 +117,3 @@ search_space:
     search_type: "categorical"
     choices: ["adaptive", "simple", "injection_scale", "per_node", "paper_based"]
   
-  # Batch size
-  batch_size:
-    search_type: "categorical"
-    choices: [32, 64, 128, 256]
