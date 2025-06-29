@@ -539,8 +539,8 @@ class HPO:
 
         study.optimize(
             self.objective,
-            n_trials=n_trials
-            # no n_jobs: runs sequentially
+            n_trials=n_trials,
+            n_jobs = 8 
         )
 
         if use_wandb:

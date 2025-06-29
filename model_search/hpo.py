@@ -381,6 +381,7 @@ class HPO:
                 elif expected_type == int:
                     config[param] = int(config[param])
         
+        
         return config
     
     def _validate_config(self, config: dict) -> bool:
@@ -481,6 +482,10 @@ class HPO:
         val_loader = WORKER_DATALOADERS['val']
 
         config = self.suggest_params(trial)
+        
+        if not self._validate_config(config):
+            logger.warning(f"Trial {trial.number} skipped due to invalid configuration: {config}")
+            raise optuna.exceptions.TrialPruned("Invalid configuration")
         
         data_sample = train_loader.dataset[0]
         model_class = AdvancedMLP()
