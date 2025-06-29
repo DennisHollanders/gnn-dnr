@@ -437,71 +437,78 @@ class HPO:
 
 
     def objective(self, trial: optuna.Trial) -> float:
-        """Objective with infeasible-config pruning."""
-        # Thread / process limits
-        if self.device.type == 'cpu':
-            torch.set_num_threads(1)
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
-
-        # Seed everything
-        random.seed(trial.number)
-        np.random.seed(trial.number)
-        torch.manual_seed(trial.number)
-        if self.device.type == 'cuda':
-            torch.cuda.manual_seed_all(trial.number)
-
-        # Suggest and validate hyperparameters
+        """Objective with infeasible-config pruning and error handling."""
         try:
+            # Thread / process limits
+            if self.device.type == 'cpu':
+                torch.set_num_threads(1)
+                os.environ['OMP_NUM_THREADS'] = '1'
+                os.environ['MKL_NUM_THREADS'] = '1'
+
+            # Seed everything
+            random.seed(trial.number)
+            np.random.seed(trial.number)
+            torch.manual_seed(trial.number)
+            if self.device.type == 'cuda':
+                torch.cuda.manual_seed_all(trial.number)
+
+            # Suggest and validate hyperparameters
             config = self.suggest_params(trial)
-        except optuna.exceptions.TrialPruned:
-            logger.info(f"Trial {trial.number}: pruning due to infeasible params.")
-            raise
 
-        if not self._validate_config(config):
-            logger.info(f"Trial {trial.number}: config failed validation, pruning.")
-            raise optuna.exceptions.TrialPruned()
-
-        # Model instantiation
-        sample = self.train_loader.dataset[0]
-        model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
-        model_class = getattr(model_module, config['model_module'])
-        model_kwargs = {
-            'node_input_dim': sample.x.shape[1],
-            'edge_input_dim': sample.edge_attr.shape[1],
-            **config
-        }
-        model = model_class(**model_kwargs).to(self.device)
-
-        optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-        criterion = FocalLoss(alpha=1.0, gamma=2.0)  # placeholder
-
-        start_time = time.time()
-        best_mcc = -1.0
-        best_epoch = 0
-
-        max_epochs = min(config.get('epochs', 100), 80)
-        for epoch in range(max_epochs):
-            if time.time() - start_time > self.trial_timeout:
-                raise optuna.exceptions.TrialPruned("Trial timed out")
-
-            train_loss, train_metrics = train(model, self.train_loader, optimizer, criterion, self.device)
-            val_loss, val_metrics = test(model, self.val_loader, criterion, self.device)
-
-            trial.report(val_loss, epoch)
-            if trial.should_prune():
+            if not self._validate_config(config):
+                logger.info(f"Trial {trial.number}: config failed validation, pruning.")
                 raise optuna.exceptions.TrialPruned()
 
-            current_mcc = val_metrics.get('test_mcc', -1.0)
-            if current_mcc > best_mcc:
-                best_mcc = current_mcc
-                best_epoch = epoch + 1
+            # Model instantiation
+            sample = self.train_loader.dataset[0]
+            model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
+            model_class = getattr(model_module, config['model_module'])
+            model_kwargs = {
+                'node_input_dim': sample.x.shape[1],
+                'edge_input_dim': sample.edge_attr.shape[1],
+                **config
+            }
+            model = model_class(**model_kwargs).to(self.device)
 
-        trial.set_user_attr(
-            "metrics",
-            {'best_mcc': best_mcc, 'final_val_loss': val_loss, 'final_epoch': best_epoch}
-        )
-        return best_mcc
+            optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+            criterion = FocalLoss(alpha=1.0, gamma=2.0)  # placeholder
+
+            start_time = time.time()
+            best_mcc = -1.0
+            best_epoch = 0
+
+            max_epochs = min(config.get('epochs', 100), 80)
+            for epoch in range(max_epochs):
+                if time.time() - start_time > self.trial_timeout:
+                    raise optuna.exceptions.TrialPruned("Trial timed out")
+
+                train_loss, train_metrics = train(model, self.train_loader, optimizer, criterion, self.device)
+                val_loss, val_metrics = test(model, self.val_loader, criterion, self.device)
+
+                trial.report(val_loss, epoch)
+                if trial.should_prune():
+                    raise optuna.exceptions.TrialPruned()
+
+                current_mcc = val_metrics.get('test_mcc', -1.0)
+                if current_mcc > best_mcc:
+                    best_mcc = current_mcc
+                    best_epoch = epoch + 1
+
+            trial.set_user_attr(
+                "metrics",
+                {'best_mcc': best_mcc, 'final_val_loss': val_loss, 'final_epoch': best_epoch}
+            )
+            return best_mcc
+        
+        except optuna.exceptions.TrialPruned:
+            # Allow Optuna to handle pruning gracefully.
+            raise
+        except Exception as e:
+            # Catch any other runtime error during the trial.
+            logger.warning(f"Trial {trial.number} failed with an unhandled error: {e}")
+            logger.warning(f"Problematic parameters: {trial.params}")
+            # Prune the trial to allow the study to continue.
+            raise optuna.exceptions.TrialPruned()
 
 
 
