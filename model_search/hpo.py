@@ -6,6 +6,7 @@ import torch.optim as optim
 import torch.nn as nn
 from pathlib import Path
 import optuna
+import random
 import wandb
 import importlib
 import sys
@@ -445,6 +446,18 @@ class HPO:
         os.environ['OMP_NUM_THREADS'] = '1'
         os.environ['MKL_NUM_THREADS'] = '1'
 
+        seed = 0
+        
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        
+        # Force CPU and limit threads in each worker process
+        device = torch.device("cpu")
+        torch.set_num_threads(1)
+
         # Load data only if not already loaded in this worker process
         if not WORKER_DATALOADERS:
             logger.info(f"Worker (PID: {os.getpid()}) loading data for the first time.")
@@ -514,14 +527,14 @@ class HPO:
         # After the trial, save the BEST model state if it exists
         if best_model_state_dict is not None:
             model_path = self.results_dir / f"model_trial_{trial.number}.pt"
-            torch.save({
-                'model_state_dict': best_model_state_dict,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'config': config,
-                'model_params': model_params,
-                'best_mcc_in_trial': best_mcc_in_trial,
-                'best_epoch': best_epoch
-            }, model_path)
+            # torch.save({
+            #     'model_state_dict': best_model_state_dict,
+            #     'optimizer_state_dict': optimizer.state_dict(),
+            #     'config': config,
+            #     'model_params': model_params,
+            #     'best_mcc_in_trial': best_mcc_in_trial,
+            #     'best_epoch': best_epoch
+            # }, model_path)
             logger.info(f"Saved best model for trial {trial.number} to {model_path} (MCC: {best_mcc_in_trial:.4f} at epoch {best_epoch})")
 
         # 5. Log all metrics and return the objective value

@@ -23,7 +23,7 @@ epochs: 300
 patience: 10
 criterion_name: "FocalLoss"
 
-# Physics Loss Configuration (used in training loop)
+# Physics Loss Configuration 
 lambda_connectivity: 0.06497262554235322
 lambda_mask: 0.2333442569508463
 lambda_phy_loss: 6.125445116538297
@@ -53,6 +53,7 @@ model_kwargs:
   node_hidden_dims: []
   use_node_mlp: false 
   edge_hidden_dims: [64, 512, 64]
+  use_edge_mlp: true
 
   # General Configuration
   activation: "leaky_relu"
