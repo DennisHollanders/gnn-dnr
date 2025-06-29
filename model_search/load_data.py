@@ -230,12 +230,13 @@ def create_pyg_dataset(
     logger.info(f"Built {len(data_list)} ")
     return data_list
 
-def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True, **kwargs):
+def create_dynamic_loader(dataset, max_nodes=1000, max_edges=5000, shuffle=True,**kwargs):
     est_batches = math.ceil(sum(d.num_nodes for d in dataset) / max_nodes)
     batch_sampler = DynamicBatchSampler(dataset, max_nodes,mode="node", shuffle=shuffle, num_steps =est_batches)
     return DataLoader(
         dataset, 
         batch_sampler=batch_sampler, 
+
         **kwargs
     )
 def create_neighbor_loaders(dataset, num_neighbors=[15, 10], batch_size=1024,shuffle=True, **kwargs):
@@ -313,7 +314,7 @@ def create_data_loaders(
     multiprocessing: bool = True,
     num_workers: int = 0,
     batching_type: str = "standard",
-    shuffle: bool = True
+    shuffle: bool = True, 
 ):
     torch.manual_seed(seed)
     random.seed(seed)
@@ -325,9 +326,10 @@ def create_data_loaders(
 
     def _create_loader(dataset): 
         if not dataset: return None
+        pin_memory = True if torch.cuda.is_available() else False
         loader_kwargs = {
             'num_workers': num_workers,
-            'pin_memory': False,  
+            'pin_memory': pin_memory,  
             'persistent_workers': True if num_workers > 0 else False
         }
         if batching_type == "dynamic":
