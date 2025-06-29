@@ -27,7 +27,7 @@ def load_pp_networks(base_directory):
     """
     nets = {"mst": {}, "mst_opt": {}}
     for phase in ["mst", "mst_opt"]:
-        folder = os.path.join(base_directory, phase, "pandapower_networks")
+        folder = os.path.join(base_directory, phase)
         if not os.path.isdir(folder):
             continue
         for fn in tqdm(os.listdir(folder), desc=f"Loading {phase} networks"):

@@ -4,9 +4,9 @@ job_name: "final modes"
 # --- Data Configuration ---
 dataset_names: ["train", "validation", "test"]
 folder_names: 
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/train"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/validation"
-  - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
+- "data\\split_datasets\\train"
+- "data\\split_datasets\\validation"
+- "data\\split_datasets\\test"
 dataset_type: "default"
 batching_type: "dynamic"
 max_nodes: 20000

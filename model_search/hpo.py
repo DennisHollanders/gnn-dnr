@@ -483,7 +483,9 @@ class HPO:
 
         # 4. Training loop with pruning and timeout
         start_time = time.time()
-        best_mcc = -1.0
+        best_mcc_in_trial = -1.0
+        best_model_state_dict = None
+        best_epoch = -1
         
         max_epochs = min(config.get('epochs', 100), 80)
         for epoch in range(300):
