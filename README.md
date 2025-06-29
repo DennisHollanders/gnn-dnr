@@ -1,6 +1,8 @@
 ## Overview
 This repository contains the full pipeline to devevelop graph neural networks to solve distribution network reconfiguration. This repo can in general be subdivided into two components
 
+0. :TODO this README is still WIP and the repo should be cleaned.
+0. *Abstract*
 1. *Data Generation*
 2. *GNN Development*
 
