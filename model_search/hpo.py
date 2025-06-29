@@ -442,60 +442,117 @@ class HPO:
 
 
     def objective(self, trial: optuna.Trial) -> float:
-        """Objective without global dataloader cache; uses self.train_loader and self.val_loader."""
-        # Thread / process limits
-        if self.device.type == 'cpu':
+        """The all-in-one objective function for a single HPO trial."""
+        global WORKER_DATALOADERS
+        
+        # Force CPU and limit threads in each worker process
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device.type == 'cpu':
             torch.set_num_threads(1)
             os.environ['OMP_NUM_THREADS'] = '1'
             os.environ['MKL_NUM_THREADS'] = '1'
+        torch.set_num_threads(1)
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
 
-        # Seed everything
-        random.seed(trial.number)
-        np.random.seed(trial.number)
-        torch.manual_seed(trial.number)
-        if self.device.type == 'cuda':
-            torch.cuda.manual_seed_all(trial.number)
+        seed = trial.number
+        
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        
 
-        # Get hyperparameters
+        # Load data only if not already loaded in this worker process
+        if not WORKER_DATALOADERS:
+            logger.info(f"Worker (PID: {os.getpid()}) loading data for the first time.")
+            dataloaders = create_data_loaders(
+                dataset_names=self.config.get('dataset_names'),
+                folder_names=self.config.get('folder_names'),
+                batch_size=self.fixed_params.get('batch_size', 128),
+                seed=self.seed,
+                num_workers=0, 
+            )
+            WORKER_DATALOADERS['train'] = dataloaders.get("train")
+            WORKER_DATALOADERS['val'] = dataloaders.get("validation")
+
+        train_loader = WORKER_DATALOADERS['train']
+        val_loader = WORKER_DATALOADERS['val']
+
         config = self.suggest_params(trial)
-
-        # Model instantiation
-        sample = self.train_loader.dataset[0]
-        model_module = importlib.import_module(f"models.{config['model_module']}.{config['model_module']}")
-        model_class = getattr(model_module, config['model_module'])
+        
+        data_sample = train_loader.dataset[0]
+        model_class = AdvancedMLP()
+        
+        # This model instantiation logic is taken directly from your _trial_worker
         model_kwargs = {
-            'node_input_dim': sample.x.shape[1],
-            'edge_input_dim': sample.edge_attr.shape[1],
-            **config
+            'node_input_dim': data_sample.x.shape[1],
+            'edge_input_dim': data_sample.edge_attr.shape[1],
+            **config  
         }
-        model = model_class(**model_kwargs).to(self.device)
+        model = model_class(**model_kwargs).to(device)
+        model_params = sum(p.numel() for p in model.parameters())
+
         optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-        criterion = FocalLoss(alpha=1.0, gamma=2.0)  # placeholder
+        criterion = FocalLoss(alpha=1.0, gamma=2.0) 
+        
+        lambda_dict = {k: config[k] for k in config if k.startswith('lambda_')}
 
+        # 4. Training loop with pruning and timeout
         start_time = time.time()
-        best_mcc = -1.0
-        best_epoch = 0
-
+        best_mcc_in_trial = -1.0
+        best_model_state_dict = None
+        best_epoch = -1
+        
         max_epochs = min(config.get('epochs', 100), 80)
-        for epoch in range(max_epochs):
+        for epoch in range(60):
             if time.time() - start_time > self.trial_timeout:
                 raise optuna.exceptions.TrialPruned("Trial timed out")
 
-            train_loss, train_metrics = train(model, self.train_loader, optimizer, criterion, self.device)
-            val_loss, val_metrics = test(model, self.val_loader, criterion, self.device)
+            train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
+            val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
+
+            logger.info(f"Epoch {epoch+1}/{max_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            if epoch % 5 == 0:
+                logger.info(f"Epoch {epoch+1}/{max_epochs}, Train dict:{train_dict}, \n \n Val dict: {val_dict}")
+
+            current_mcc = val_dict.get('test_mcc', -1.0)
+
+            # If the current model is the best one so far in this trial, save its state
+            if current_mcc > best_mcc_in_trial:
+                best_mcc_in_trial = current_mcc
+                best_epoch = epoch + 1
+                best_model_state_dict = model.state_dict()
+            
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-            current_mcc = val_metrics.get('test_mcc', -1.0)
-            if current_mcc > best_mcc:
-                best_mcc = current_mcc
-                best_epoch = epoch + 1
+        # After the trial, save the BEST model state if it exists
+        if best_model_state_dict is not None:
+            model_path = self.results_dir / f"model_trial_{trial.number}.pt"
+            # torch.save({
+            #     'model_state_dict': best_model_state_dict,
+            #     'optimizer_state_dict': optimizer.state_dict(),
+            #     'config': config,
+            #     'model_params': model_params,
+            #     'best_mcc_in_trial': best_mcc_in_trial,
+            #     'best_epoch': best_epoch
+            # }, model_path)
+            logger.info(f"Saved best model for trial {trial.number} to {model_path} (MCC: {best_mcc_in_trial:.4f} at epoch {best_epoch})")
 
-        # Log user attrs and CSV
-        trial.set_user_attr("metrics", {'best_mcc': best_mcc, 'final_val_loss': val_loss, 'final_epoch': best_epoch})
-        return best_mcc
+        # 5. Log all metrics and return the objective value
+        final_metrics = {
+            'best_mcc': best_mcc_in_trial,
+            'final_val_loss': val_loss,
+            'final_epoch': epoch,
+            'model_parameters': model_params,
+        }
+        trial.set_user_attr("metrics", final_metrics)
+        trial.set_user_attr("hyperparameters", config) 
 
+        return best_mcc_in_trial
 
     def run_async_optimization(self, n_trials: int = 100, use_wandb: bool = False):
         """Run asynchronous parallel optimization with fixed wandb support"""

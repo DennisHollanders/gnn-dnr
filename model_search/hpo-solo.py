@@ -89,13 +89,15 @@ class HPO:
         self._init_csv()
 
         # Data loaders: multi-threaded
-        self.train_loader, self.val_loader,_ = create_data_loaders(
+        dataloaders = create_data_loaders(
             dataset_names=self.config.get('dataset_names'),
             folder_names=self.config.get('folder_names'),
             batch_size=self.fixed_params.get('batch_size', 128),
             seed=self.seed,
             num_workers=8,          
         )
+        self.train_loader = dataloaders.get('train')    
+        self.val_loader = dataloaders.get('validation')
     
     def _init_csv(self):
         headers = ['trial_number', 'state', 'value', 'datetime_start', 'datetime_complete']
@@ -436,6 +438,11 @@ class HPO:
 
     def objective(self, trial: optuna.Trial) -> float:
         """Objective with infeasible-config pruning."""
+        # Thread / process limits
+        if self.device.type == 'cpu':
+            torch.set_num_threads(1)
+            os.environ['OMP_NUM_THREADS'] = '1'
+            os.environ['MKL_NUM_THREADS'] = '1'
 
         # Seed everything
         random.seed(trial.number)
@@ -447,13 +454,13 @@ class HPO:
         # Suggest and validate hyperparameters
         try:
             config = self.suggest_params(trial)
-        except optuna.exceptions.TrialPruned():
+        except optuna.exceptions.TrialPruned:
             logger.info(f"Trial {trial.number}: pruning due to infeasible params.")
             raise
 
         if not self._validate_config(config):
             logger.info(f"Trial {trial.number}: config failed validation, pruning.")
-            raise optuna.exceptions.TrialPruned()()
+            raise optuna.exceptions.TrialPruned()
 
         # Model instantiation
         sample = self.train_loader.dataset[0]
@@ -495,6 +502,7 @@ class HPO:
             {'best_mcc': best_mcc, 'final_val_loss': val_loss, 'final_epoch': best_epoch}
         )
         return best_mcc
+
 
 
     def run_optimization(self, n_trials: int = 100, use_wandb: bool = False):
