@@ -583,13 +583,14 @@ class HPO:
         )
         
         study = optuna.create_study(
-            direction="maximize",
-            sampler=sampler,
+        storage="sqlite:///hpo_results.db",
+        study_name="my_hpo",
+        direction="maximize",
+        sampler=sampler,
             pruner=optuna.pruners.MedianPruner(
                 n_startup_trials=self.pruner_startup,
                 n_warmup_steps=self.pruner_warmup,
-            )
-        )
+        load_if_exists=True))
 
         logger.info("Dataloaders will be created once per worker process.")
 
@@ -777,7 +778,7 @@ class HPO:
 
 def main():
     # Set proper multiprocessing start method for cluster
-    mp.set_start_method('spawn', force=True)
+    mp.set_start_method('fork', force=True)
     
     parser = argparse.ArgumentParser(description="Simplified HPO")
     parser.add_argument("--config", type=str, required=True, help="Config YAML path")
