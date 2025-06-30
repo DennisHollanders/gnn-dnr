@@ -517,8 +517,13 @@ class HPO:
             # Allow HPO to override learning rate and other fine-tuning params
             model_config.update(config)
             config = model_config
+            model_kwargs = {
+                'node_input_dim': data_sample.x.shape[1],
+                'edge_input_dim': data_sample.edge_attr.shape[1],
+                **config  
+            }
             
-            model = AdvancedMLP(**config).to(device)
+            model = AdvancedMLP(**model_kwargs).to(device)
             model.load_state_dict(checkpoint['model_state_dict'])
             logger.info("Loaded pre-trained model state_dict for fine-tuning.")
         else:
