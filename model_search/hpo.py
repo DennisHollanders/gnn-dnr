@@ -29,7 +29,7 @@ import json
 import signal
 from contextlib import contextmanager
 
-from model_search.models.AdvancedMLP.AdvancedMLP import AdvancedMLP
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -38,7 +38,7 @@ logger = logging.getLogger("HPO")
 # Add paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "model_search")])
-
+from model_search.models.AdvancedMLP.AdvancedMLP import AdvancedMLP
 from load_data import create_data_loaders
 from train import train, test
 # Add paths
@@ -481,22 +481,22 @@ class HPO:
         train_loader = WORKER_DATALOADERS['train']
         val_loader = WORKER_DATALOADERS['val']
 
+        data_sample = train_loader.dataset[0] if train_loader else None
+
         config = self.suggest_params(trial)
         
         if not self._validate_config(config):
             logger.warning(f"Trial {trial.number} skipped due to invalid configuration: {config}")
             raise optuna.exceptions.TrialPruned("Invalid configuration")
         
-        data_sample = train_loader.dataset[0]
-        model_class = AdvancedMLP()
-        
+
         # This model instantiation logic is taken directly from your _trial_worker
         model_kwargs = {
             'node_input_dim': data_sample.x.shape[1],
             'edge_input_dim': data_sample.edge_attr.shape[1],
             **config  
         }
-        model = model_class(**model_kwargs).to(device)
+        model = AdvancedMLP(**model_kwargs).to(device)
         model_params = sum(p.numel() for p in model.parameters())
 
         optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
