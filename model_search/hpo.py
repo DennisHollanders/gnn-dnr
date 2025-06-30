@@ -512,33 +512,34 @@ class HPO:
             logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
             checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
 
+
+            loaded_config = checkpoint['config']
+
             # 1) build model with the trial's node/edge dims but original architectural kwargs
             model_kwargs = {
                 'node_input_dim': data_sample.x.shape[1],
                 'edge_input_dim': data_sample.edge_attr.shape[1],
-                **config
+                **loaded_config
             }
             model = AdvancedMLP(**model_kwargs).to(device)
 
-            # 2) filter checkpoint -> own_state to drop any mismatched keys (e.g. switch_gate)
             ckpt_state = checkpoint['model_state_dict']
+            
+            model.load_state_dict(ckpt_state, strict=False)
+
             own_state = model.state_dict()
-            filtered = {
-                k: v for k, v in ckpt_state.items()
-                if k in own_state and v.size() == own_state[k].size()
-            }
-            missing    = set(own_state) - set(filtered)
-            unexpected = set(ckpt_state) - set(filtered)
+            missing_keys = set(own_state.keys()) - set(ckpt_state.keys())
+            unexpected_keys = set(ckpt_state.keys()) - set(own_state.keys())
 
-            if unexpected:
-                logger.warning(f"Ignoring unexpected checkpoint keys: {sorted(unexpected)}")
-            if missing:
-                logger.warning(f"Did not load weights for: {sorted(missing)}")
+            # Log keys that were in the checkpoint but not in the new model (unexpected)
+            if unexpected_keys:
+                logger.warning(f"Ignoring unexpected checkpoint keys (not in current model): {sorted(unexpected_keys)}")
+            
+            # Log keys that are in the new model but were not in the checkpoint (missing weights)
+            if missing_keys:
+                logger.warning(f"Did not load weights for (new or resized layers): {sorted(missing_keys)}")
 
-            # 3) merge and load
-            own_state.update(filtered)
-            model.load_state_dict(own_state)
-            logger.info("Loaded matching pre-trained weights for fine-tuning.")
+            logger.info("Successfully loaded pre-trained weights for fine-tuning.")
         else:
             # --- STAGE 1: Initialize model from scratch ---
             model_kwargs = {
