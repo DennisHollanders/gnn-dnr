@@ -12,7 +12,7 @@ batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
 train_ratio: 0.85
-seed: 0
+seed: 44
 num_workers: 0
 wandb: false
 batch_size: 128
@@ -30,21 +30,21 @@ fixed_params:
   gnn_type: "GAT"
   gnn_layers: 2
   gat_heads: 4
-  gnn_hidden_dim: 384
+  gnn_hidden_dim: 64
   activation: "leaky_relu"
   
   # Best MLP Architecture from Stage 1 (Trial 175)
-  node_hidden_dims: []
-  edge_hidden_dims: [64, 512, 64]
+  node_hidden_dims: [0, 256,512]
+  edge_hidden_dims: [128, 128, 128]
   
   # Best Switch Head Architecture from Stage 1 (Trial 175)
   switch_head_type: "mlp"
-  switch_head_layers: 5
-  switch_attention_heads: 0 # Not applicable for MLP head
+  switch_head_layers: 4
+  switch_attention_heads: 0
   
   # Best General Configuration from Stage 1 (Trial 175)
   use_residual: false
-  use_skip_connections: false
+  use_skip_connections: true
   use_gated_mp: true
   
   # Default GIN params

@@ -12,7 +12,7 @@ batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
 train_ratio: 0.85
-seed: 0
+seed: 91
 num_workers: 0
 batch_size: 128
 
@@ -31,20 +31,20 @@ fixed_params:
   # Best GCN Architecture from Stage 1 (Trial 117)
   gnn_type: "GCN"
   gnn_layers: 4
-  gnn_hidden_dim: 128
-  activation: "leaky_relu"
+  gnn_hidden_dim: 192
+  activation: "relu"
   
   # Best MLP Architecture from Stage 1 (Trial 117)
-  node_hidden_dims: []
-  edge_hidden_dims: [32, 64, 128]
+  node_hidden_dims: [128,0,0]
+  edge_hidden_dims: [128, 128,64 ]
   
   # Best Switch Head Architecture from Stage 1 (Trial 117)
   switch_head_type: "mlp"
-  switch_head_layers: 3
+  switch_head_layers: 4
   switch_attention_heads: 0
   
   # Best General Configuration from Stage 
-  use_residual: false
+  use_residual: true
   use_skip_connections: true
   use_gated_mp: true
   

@@ -57,7 +57,7 @@ class HPO:
         self.n_startup_trials = startup_trials
         self.pruner_startup = pruner_startup
         self.pruner_warmup = pruner_warmup
-        self.seed = 2
+        
         self.config_path = config_path
         self.study_name = study_name
         self.trial_timeout = trial_timeout  
@@ -79,6 +79,8 @@ class HPO:
         
         with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
+
+        self.seed = self.config.get('seed', 0) 
         
         self.search_space = self.config.pop('search_space', {})
         self.fixed_params = self.config.pop('fixed_params', {})
@@ -216,6 +218,12 @@ class HPO:
                 config['switch_attention_heads'] = switch_heads
         else:
             config['switch_attention_heads'] = 0
+        
+        if 'criterion_name' in self.search_space:
+            crit_spec = self.search_space['criterion_name']
+            config['criterion_name'] = trial.suggest_categorical(
+                'criterion_name', crit_spec['choices']
+            )
 
         # --- Suggest all other parameters from search_space ---
         handled_params = {
@@ -456,7 +464,7 @@ class HPO:
         os.environ['OMP_NUM_THREADS'] = '1'
         os.environ['MKL_NUM_THREADS'] = '1'
 
-        seed = trial.number
+        seed = self.seed 
         
         random.seed(seed)
         np.random.seed(seed)
@@ -500,7 +508,15 @@ class HPO:
         model_params = sum(p.numel() for p in model.parameters())
 
         optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-        criterion = FocalLoss(alpha=1.0, gamma=2.0) 
+        crit_name = config.get('criterion_name', 'FocalLoss')
+        if crit_name == 'FocalLoss':
+            criterion = FocalLoss(alpha=1.0, gamma=2.0)
+        elif crit_name == 'WeightedBCELoss':
+            criterion = WeightedBCELoss()
+        elif crit_name.lower() == 'crossentropy':
+            criterion = nn.CrossEntropyLoss()
+        else:
+            raise ValueError(f"Unknown loss: {crit_name}")
         
         lambda_dict = {k: config[k] for k in config if k.startswith('lambda_')}
 
@@ -518,9 +534,9 @@ class HPO:
             train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
             val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
 
-            logger.info(f"Epoch {epoch+1}/{max_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-            if epoch % 5 == 0:
-                logger.info(f"Epoch {epoch+1}/{max_epochs}, Train dict:{train_dict}, \n \n Val dict: {val_dict}")
+            # logger.info(f"Epoch {epoch+1}/{max_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            # if epoch % 5 == 0:
+            #     logger.info(f"Epoch {epoch+1}/{max_epochs}, Train dict:{train_dict}, \n \n Val dict: {val_dict}")
 
             current_mcc = val_dict.get('test_mcc', -1.0)
 
