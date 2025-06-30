@@ -512,8 +512,23 @@ class HPO:
             # --- STAGE 2: Load pre-trained model for fine-tuning ---
             logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
             checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
-            config = checkpoint['config']
-            
+
+            # filter out any keys that aren't in the current model (e.g. switch_gate)
+            ckpt_state = checkpoint['model_state_dict']
+            own_state = model.state_dict()
+            filtered = {k: v for k, v in ckpt_state.items() if k in own_state and v.size() == own_state[k].size()}
+            missing = set(own_state) - set(filtered)
+            unexpected = set(ckpt_state) - set(filtered)
+
+            if unexpected:
+                logger.warning(f"Ignoring unexpected checkpoint keys: {sorted(unexpected)}")
+            if missing:
+                logger.warning(f"Did not load weights for: {sorted(missing)}")
+
+            # now load only the matching ones
+            own_state.update(filtered)
+            model.load_state_dict(own_state)
+            logger.info("Loaded matching pre-trained weights for fine-tuning.")
             model_kwargs = {
                 'node_input_dim': data_sample.x.shape[1],
                 'edge_input_dim': data_sample.edge_attr.shape[1],
