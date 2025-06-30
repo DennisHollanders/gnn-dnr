@@ -512,11 +512,8 @@ class HPO:
             # --- STAGE 2: Load pre-trained model for fine-tuning ---
             logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
             checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
-            model_config = checkpoint['config']
+            config = checkpoint['config']
             
-            # Allow HPO to override learning rate and other fine-tuning params
-            model_config.update(config)
-            config = model_config
             model_kwargs = {
                 'node_input_dim': data_sample.x.shape[1],
                 'edge_input_dim': data_sample.edge_attr.shape[1],

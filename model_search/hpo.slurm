@@ -13,6 +13,7 @@ submit_hpo() {
   CONFIG="$1"   # e.g. hpo-GIN.yaml
   STUDY="$2"    # e.g. GIN
   PART="$3"     # e.g. elec-ees-empso.cpu.q
+  CHECKPOINT="$4"
 
   echo "→ Submitting HPO ${STUDY} → ${PART}"
   sbatch <<EOF
@@ -60,12 +61,13 @@ poetry run python -I model_search/hpo.py \
   --study_name ${STUDY}-CPU \
   --n_parallel 32 \
   --trials 200 \
-  --trial_timeout 3600
+  --trial_timeout 3600 \
+  --stage1_checkpoint ${CHECKPOINT}
 EOF
 }
 
 # 3) Submit all three
-submit_hpo hpo-GIN.yaml  GIN  elec-ees-empso.cpu.q
-submit_hpo hpo-GAT.yaml  GAT  tue.default.q
-submit_hpo hpo-GCN.yaml  GCN  elec-ees-empso.cpu.q
+submit_hpo hpo-GIN-stage2.yaml  GIN  elec-ees-empso.cpu.q "/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/GIN_model_trial_188.pt"
+submit_hpo hpo-GAT-stage2.yaml  GAT  tue.default.q "/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/GAT_model_trial_199.pt"
+submit_hpo hpo-GCN-stage2.yaml  GCN  elec-ees-empso.cpu.q "/vast.mnt/home/20174047/gnn-dnr/model_search/models/final_models/GCN_model_trial_121.pt"
 echo "✅ All three HPO jobs submitted."
