@@ -509,15 +509,25 @@ class HPO:
             raise optuna.exceptions.TrialPruned("Invalid configuration")
 
         if self.stage1_checkpoint:
-            # --- STAGE 2: Load pre-trained model for fine-tuning ---
             logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
             checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
 
-            # filter out any keys that aren't in the current model (e.g. switch_gate)
+            # 1) build model with the trial's node/edge dims but original architectural kwargs
+            model_kwargs = {
+                'node_input_dim': data_sample.x.shape[1],
+                'edge_input_dim': data_sample.edge_attr.shape[1],
+                **config
+            }
+            model = AdvancedMLP(**model_kwargs).to(device)
+
+            # 2) filter checkpoint -> own_state to drop any mismatched keys (e.g. switch_gate)
             ckpt_state = checkpoint['model_state_dict']
             own_state = model.state_dict()
-            filtered = {k: v for k, v in ckpt_state.items() if k in own_state and v.size() == own_state[k].size()}
-            missing = set(own_state) - set(filtered)
+            filtered = {
+                k: v for k, v in ckpt_state.items()
+                if k in own_state and v.size() == own_state[k].size()
+            }
+            missing    = set(own_state) - set(filtered)
             unexpected = set(ckpt_state) - set(filtered)
 
             if unexpected:
@@ -525,19 +535,10 @@ class HPO:
             if missing:
                 logger.warning(f"Did not load weights for: {sorted(missing)}")
 
-            # now load only the matching ones
+            # 3) merge and load
             own_state.update(filtered)
             model.load_state_dict(own_state)
             logger.info("Loaded matching pre-trained weights for fine-tuning.")
-            model_kwargs = {
-                'node_input_dim': data_sample.x.shape[1],
-                'edge_input_dim': data_sample.edge_attr.shape[1],
-                **config  
-            }
-            
-            model = AdvancedMLP(**model_kwargs).to(device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            logger.info("Loaded pre-trained model state_dict for fine-tuning.")
         else:
             # --- STAGE 1: Initialize model from scratch ---
             model_kwargs = {
