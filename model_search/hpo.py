@@ -48,16 +48,33 @@ sys.path.extend([str(ROOT_DIR), str(ROOT_DIR / "src")])
 from loss_functions import FocalLoss, WeightedBCELoss
 
 WORKER_DATALOADERS = {}
+
+def set_global_determinism(seed: int):
+    """
+    Sets seeds for all relevant libraries and configures PyTorch for deterministic operations.
+    """
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # Enforce deterministic algorithms in PyTorch
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 class HPO:
     """Parallelized HPO with multi-process execution and async TPE updates"""
     
     def __init__(self, config_path: str, study_name: str, startup_trials: int = 25,
                  pruner_startup: int = 15, pruner_warmup: int = 15, n_parallel: int = None,
-                 trial_timeout: int = 3600):  # Add trial timeout parameter (default 1 hour)
+                 trial_timeout: int = 3600, stage1_checkpoint: str=None):  # Add trial timeout parameter (default 1 hour)
         self.n_startup_trials = startup_trials
         self.pruner_startup = pruner_startup
         self.pruner_warmup = pruner_warmup
-        
+
+
+        self.stage1_checkpoint = stage1_checkpoint
         self.config_path = config_path
         self.study_name = study_name
         self.trial_timeout = trial_timeout  
@@ -81,6 +98,7 @@ class HPO:
             self.config = yaml.safe_load(f)
 
         self.seed = self.config.get('seed', 0) 
+        
         
         self.search_space = self.config.pop('search_space', {})
         self.fixed_params = self.config.pop('fixed_params', {})
@@ -458,20 +476,12 @@ class HPO:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if device.type == 'cpu':
             torch.set_num_threads(1)
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
-        torch.set_num_threads(1)
-        os.environ['OMP_NUM_THREADS'] = '1'
-        os.environ['MKL_NUM_THREADS'] = '1'
-
-        seed = self.seed 
         
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        
+        if self.seed ==0:
+            seed = trial.number
+        else:
+            seed = self.seed
+        set_global_determinism(seed)
 
         # Load data only if not already loaded in this worker process
         if not WORKER_DATALOADERS:
@@ -492,20 +502,41 @@ class HPO:
         data_sample = train_loader.dataset[0] if train_loader else None
 
         config = self.suggest_params(trial)
-        
+        initial_model_state_dict = None
+
         if not self._validate_config(config):
             logger.warning(f"Trial {trial.number} skipped due to invalid configuration: {config}")
             raise optuna.exceptions.TrialPruned("Invalid configuration")
-        
 
-        # This model instantiation logic is taken directly from your _trial_worker
-        model_kwargs = {
-            'node_input_dim': data_sample.x.shape[1],
-            'edge_input_dim': data_sample.edge_attr.shape[1],
-            **config  
-        }
-        model = AdvancedMLP(**model_kwargs).to(device)
+        if self.stage1_checkpoint:
+            # --- STAGE 2: Load pre-trained model for fine-tuning ---
+            logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
+            checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
+            model_config = checkpoint['config']
+            
+            # Allow HPO to override learning rate and other fine-tuning params
+            model_config.update(config)
+            config = model_config
+            
+            model = AdvancedMLP(**config).to(device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            logger.info("Loaded pre-trained model state_dict for fine-tuning.")
+        else:
+            # --- STAGE 1: Initialize model from scratch ---
+            model_kwargs = {
+                'node_input_dim': data_sample.x.shape[1],
+                'edge_input_dim': data_sample.edge_attr.shape[1],
+                **config  
+            }
+            model = AdvancedMLP(**model_kwargs).to(device)
+            # Save the random initial state for reproducibility
+            initial_model_state_dict = model.state_dict()
+
         model_params = sum(p.numel() for p in model.parameters())
+
+        if model_params > 2e6:
+            logger.warning(f"Model has {model_params} parameters, which is quite large")
+            raise optuna.exceptions.TrialPruned("Model too large")
 
         optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
         crit_name = config.get('criterion_name', 'FocalLoss')
@@ -513,7 +544,7 @@ class HPO:
             criterion = FocalLoss(alpha=1.0, gamma=2.0)
         elif crit_name == 'WeightedBCELoss':
             criterion = WeightedBCELoss()
-        elif crit_name.lower() == 'crossentropy':
+        elif crit_name.lower() == 'CrossEntropyLoss':
             criterion = nn.CrossEntropyLoss()
         else:
             raise ValueError(f"Unknown loss: {crit_name}")
@@ -526,8 +557,8 @@ class HPO:
         best_model_state_dict = None
         best_epoch = -1
         
-        max_epochs = min(config.get('epochs', 100), 80)
-        for epoch in range(60):
+        max_epochs = min(config.get('epochs', 100), 60)
+        for epoch in range(max_epochs):
             if time.time() - start_time > self.trial_timeout:
                 raise optuna.exceptions.TrialPruned("Trial timed out")
 
@@ -550,18 +581,36 @@ class HPO:
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-        # After the trial, save the BEST model state if it exists
         if best_model_state_dict is not None:
-            model_path = self.results_dir / f"model_trial_{trial.number}.pt"
-            # torch.save({
-            #     'model_state_dict': best_model_state_dict,
-            #     'optimizer_state_dict': optimizer.state_dict(),
-            #     'config': config,
-            #     'model_params': model_params,
-            #     'best_mcc_in_trial': best_mcc_in_trial,
-            #     'best_epoch': best_epoch
-            # }, model_path)
-            logger.info(f"Saved best model for trial {trial.number} to {model_path} (MCC: {best_mcc_in_trial:.4f} at epoch {best_epoch})")
+            mcc_threshold = 0.4
+            should_save = False
+            top_mccs = trial.study.user_attrs.get("top_mccs", [])
+
+            # Condition 1: Is MCC above the absolute threshold?
+            if best_mcc_in_trial > mcc_threshold:
+                should_save = True
+            elif len(top_mccs) < 5 or best_mcc_in_trial > min(top_mccs):
+                if any(mcc > mcc_threshold for mcc in top_mccs):
+                    should_save = True
+
+            if should_save:
+                model_path = self.results_dir / f"model_trial_{trial.number}.pt"
+                torch.save({
+                    'model_state_dict': best_model_state_dict,
+                    'initial_model_state_dict': initial_model_state_dict,
+                    'config': config,
+                    'seed': seed,
+                    'best_mcc_in_trial': best_mcc_in_trial,
+                    'best_epoch': best_epoch,
+                }, model_path)
+                logger.info(f"Saved model from trial {trial.number} to {model_path} (MCC: {best_mcc_in_trial:.4f})")
+
+                # Update the list of top MCCs
+                top_mccs.append(best_mcc_in_trial)
+                top_mccs = sorted(top_mccs, reverse=True)[:5]
+                trial.study.set_user_attr("top_mccs", top_mccs)
+            else:
+                logger.info(f"Discarded model from trial {trial.number} (MCC: {best_mcc_in_trial:.4f}). Does not meet save criteria.")
 
         # 5. Log all metrics and return the objective value
         final_metrics = {
@@ -606,7 +655,7 @@ class HPO:
                 n_warmup_steps=self.pruner_warmup,
             )
         )
-
+        study.set_user_attr("top_mccs", [])
 
         logger.info("Dataloaders will be created once per worker process.")
 
@@ -803,12 +852,13 @@ def main():
     parser.add_argument("--trials", type=int, default=100, help="Number of trials")
     parser.add_argument("--wandb", action="store_true", help="Use W&B")
     parser.add_argument("--trial_timeout", type=int, default=3600, help="Timeout per trial in seconds (default: 1 hour)")
-    
+    parser.add_argument("--stage1_checkpoint", type=str, default=None,
+                        help="Path to stage 1 checkpoint for resuming HPO")
     args = parser.parse_args()
     
     config_path = Path("model_search/config_files") / args.config
     hpo = HPO(config_path, args.study_name, n_parallel=args.n_parallel, 
-              trial_timeout=args.trial_timeout)
+              trial_timeout=args.trial_timeout, stage1_checkpoint=args.stage1_checkpoint)
     hpo.run_async_optimization(args.trials, args.wandb)
 
 
