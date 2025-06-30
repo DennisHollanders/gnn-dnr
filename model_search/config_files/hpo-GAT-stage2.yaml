@@ -12,7 +12,7 @@ batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
 train_ratio: 0.85
-seed: 44
+seed: 199
 num_workers: 0
 wandb: false
 batch_size: 128
@@ -29,12 +29,12 @@ fixed_params:
   # Best GAT Architecture from Stage 1 (Trial 175)
   gnn_type: "GAT"
   gnn_layers: 2
-  gat_heads: 4
-  gnn_hidden_dim: 64
-  activation: "leaky_relu"
+  gat_heads: 2
+  gnn_hidden_dim: 128
+  activation: "relu"
   
   # Best MLP Architecture from Stage 1 (Trial 175)
-  node_hidden_dims: [0, 256,512]
+  node_hidden_dims: [0, 512,128]
   edge_hidden_dims: [128, 128, 128]
   
   # Best Switch Head Architecture from Stage 1 (Trial 175)

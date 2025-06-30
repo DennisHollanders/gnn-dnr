@@ -12,7 +12,7 @@ batching_type: "dynamic"
 max_nodes: 20000
 max_edges: 50000
 train_ratio: 0.85
-seed: 83
+seed: 187
 num_workers: 0
 wandb: false
 batch_size: 128
@@ -28,24 +28,24 @@ fixed_params:
   
   # Best GIN Architecture from Stage 1 (Trial 138)
   gnn_type: "GIN"
-  gnn_layers: 3
-  gnn_hidden_dim: 64
-  gin_mlp_layers: 3
+  gnn_layers: 2
+  gnn_hidden_dim: 192
+  gin_mlp_layers: 2
   gin_train_eps: false
   activation: "relu"
   
   # Best MLP Architecture from Stage 1 (Trial 138)
-  node_hidden_dims: [0,64,64]
-  edge_hidden_dims: [64, 64,0]
+  node_hidden_dims: [512,64,512]
+  edge_hidden_dims: [256, 0,64]
   
   # Best Switch Head Architecture from Stage 1 (Trial 138)
   switch_head_type: "mlp"
-  switch_head_layers: 3
+  switch_head_layers: 2
   switch_attention_heads: 0 # Not applicable for MLP head
   
   # Best General Configuration from Stage 1 (Trial 138)
-  use_residual: true
-  use_skip_connections: true
+  use_residual: false
+  use_skip_connections: false
   use_gated_mp: true
   
   # Default GAT params
