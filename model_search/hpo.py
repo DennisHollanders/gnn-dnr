@@ -583,14 +583,14 @@ class HPO:
         )
         
         study = optuna.create_study(
-        storage="sqlite:///hpo_results.db",
-        study_name="my_hpo",
-        direction="maximize",
-        sampler=sampler,
+            direction="maximize",
+            sampler=sampler,
             pruner=optuna.pruners.MedianPruner(
                 n_startup_trials=self.pruner_startup,
                 n_warmup_steps=self.pruner_warmup,
-        load_if_exists=True))
+            )
+        )
+
 
         logger.info("Dataloaders will be created once per worker process.")
 
