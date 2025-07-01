@@ -1,6 +1,8 @@
 import argparse
 from ast import Lambda, arg
 import os
+from turtle import st
+from typing import final
 from numpy import gradient
 import yaml
 from collections import defaultdict
@@ -54,33 +56,27 @@ from loss_functions import WeightedBCELoss, FocalLoss
 
 DEFAULT_DESCRIPTION = "Graph Neural Network Model Search for Distribution Network Reconfiguration"
 
-MODEL_KWARGS_KEYS = [
-    'output_type', 'num_classes', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim',
-    'gat_heads', 'dropout_rate', 'gat_dropout', 'gin_eps', 'node_hidden_dims',
-    'use_node_mlp', 'edge_hidden_dims', 'use_edge_mlp', 'activation',
-    'use_batch_norm', 'use_residual', 'use_skip_connections', 'pooling',
-    'switch_head_type', 'switch_head_layers', 'switch_attention_heads',
-    'use_gated_mp', 'use_phyr', 'enforce_radiality', 'phyr_k_ratio',
-    'gat_v2', 'gat_edge_dim', 'gin_train_eps', 'gin_mlp_layers',
-    'criterion_name'
+MODEL_KWARGS_KEYS = [ "output_type", "num_classes",
+    "gnn_type", "gnn_layers", "gnn_hidden_dim", "gat_heads", "dropout_rate",
+    "gat_dropout", "gin_eps","gin_mlp_layers", "gin_train_eps","gat_v2","gat_edge_dim",
+    "phyr_k_ratio",
+    "node_hidden_dims", "use_node_mlp", "edge_hidden_dims", "use_edge_mlp",
+    "activation", "use_batch_norm", "use_residual", "use_skip_connections",
+    "pooling", "switch_head_type", "switch_head_layers", "switch_attention_heads",
+    "use_gated_mp", "use_phyr", "enforce_radiality",
+
 ]
 
-# Define which parameters are architectural vs training hyperparameters
-ARCHITECTURE_KEYS = [
-    'output_type', 'num_classes', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim',
-    'gat_heads', 'gin_eps', 'node_hidden_dims', 'use_node_mlp', 'edge_hidden_dims', 
-    'use_edge_mlp', 'activation', 'use_residual', 'use_skip_connections', 'pooling',
-    'switch_head_type', 'switch_head_layers', 'switch_attention_heads',
-    'use_gated_mp', 'use_phyr', 'enforce_radiality', 'phyr_k_ratio',
-    'gat_v2', 'gat_edge_dim', 'gin_train_eps', 'gin_mlp_layers'
+STAGE1_KEYS = [
+    "activation", "use_residual", "use_skip_connections", "use_gated_mp",
+    "gnn_layers", "gnn_hidden_dim", "gat_heads",  "gat_dropout", "gin_mlp_layers", "gin_train_eps","gat_v2","gat_edge_dim",
+    "phyr_k_ratio",
+    "node_hidden_dims", "use_node_mlp", "edge_hidden_dims", "use_edge_mlp",
+    "switch_head_type", "switch_head_layers", "switch_attention_heads"
 ]
 
-TRAINING_HYPERPARAMETER_KEYS = [
-    'learning_rate', 'weight_decay', 'dropout_rate', 'gat_dropout', 'batch_size',
-    'criterion_name', 'lambda_phy_loss', 'lambda_mask', 'lambda_connectivity',
-    'lambda_radiality', 'loss_scaling_strategy', 'normalization_type', 'use_batch_norm'
-]
-
+LAMBDAS= [
+    "lambda_phy_loss", "lambda_mask", "lambda_connectivity", "lambda_radiality"]
 def parse_args():
     parser = argparse.ArgumentParser(description=DEFAULT_DESCRIPTION)
     parser.add_argument("--description", type=str, help="Description for the training job")
@@ -125,163 +121,121 @@ def load_args_from_yaml(filepath):
     with open(filename, "r") as f:
         config = yaml.safe_load(f)
     return argparse.Namespace(**config)
+def load_and_merge_checkpoints(stage1_config, stage2_config, stage2_seed=None):
+    # Start with stage2 config as base
+    combined_config = dict(stage2_config)
 
-    
+    # Override architecture keys from stage1
+    for k in STAGE1_KEYS:
+        if k in stage1_config:
+            combined_config[k] = stage1_config[k]
+    combined_config["seed"] = stage2_seed
+    # Create Namespace
+    vargs = argparse.Namespace(**combined_config)
+
+    # Build model_kwargs from MODEL_KWARGS_KEYS
+    model_kwargs = {}
+    for k in MODEL_KWARGS_KEYS:
+        if k in stage1_config:
+            model_kwargs[k] = stage1_config[k]
+        elif hasattr(vargs, k):
+            model_kwargs[k] = getattr(vargs, k)
+
+    vargs.model_kwargs = model_kwargs
+
+    # Remove keys from top-level if they belong in model_kwargs
+    for k in MODEL_KWARGS_KEYS:
+        if hasattr(vargs, k):
+            delattr(vargs, k)
+
+    # Set default model_module
+    if not hasattr(vargs, "model_module"):
+        vargs.model_module = stage1_config.get("model_module", "AdvancedMLP")
+
+    # Ensure model_path exists
+    if not hasattr(vargs, "model_path"):
+        vargs.model_path = None
+
+    return vargs
 def main():
+
     args = parse_args()
-    logger.info(f"Loaded CLI args: {vars(args)}")
-
-    # Initialize variables
-    model_state_dict = None
-    stage1_architecture = {}
+    stage1_hyperparams = {}
     stage2_hyperparams = {}
-    actual_seed = args.seed  # default
-    
-    # 1) Load stage-1 checkpoint (architecture + initial weights)
-    if args.stage1_checkpoint:
-        logger.info(f"Loading stage1 checkpoint from {args.stage1_checkpoint}")
-        ck1 = torch.load(args.stage1_checkpoint, map_location="cpu")
-        
-        # Extract the CORRECT architecture from Stage 1
-        stage1_config = ck1.get('config', {})
-        for key in ARCHITECTURE_KEYS:
-            if key in stage1_config:
-                stage1_architecture[key] = stage1_config[key]
-        
-        # Also get node/edge hidden dims which might not be in ARCHITECTURE_KEYS
-        if 'node_hidden_dims' in stage1_config:
-            stage1_architecture['node_hidden_dims'] = stage1_config['node_hidden_dims']
-        if 'edge_hidden_dims' in stage1_config:
-            stage1_architecture['edge_hidden_dims'] = stage1_config['edge_hidden_dims']
-        
-        # Get the seed used in Stage 1
-        stage1_seed = ck1.get('seed', args.seed)
-        logger.info(f"Stage 1 seed: {stage1_seed}")
-        
-        # Store the initial model weights (not the trained ones!)
-        model_state_dict = ck1.get('initial_model_state_dict', ck1['model_state_dict'])
-        
-        logger.info(f"Loaded TRUE architecture from stage 1: {stage1_architecture}")
 
-    # 2) Load stage-2 checkpoint (training hyperparameters ONLY)
-    if args.stage2_checkpoint:
-        logger.info(f"Loading stage2 checkpoint from {args.stage2_checkpoint}")
-        ck2 = torch.load(args.stage2_checkpoint, map_location="cpu")
-        
-        # Get the seed from Stage 2 (which is the trial number)
-        stage2_seed = ck2.get('seed', stage1_seed if stage1_seed else args.seed)
-        actual_seed = stage2_seed  # Use Stage 2's seed for reproducibility
-        logger.info(f"Stage 2 seed: {stage2_seed}")
-        
-        # Extract ONLY training hyperparameters from stage 2, NOT architecture
-        stage2_config = ck2.get('config', {})
 
-        
-        # Log what Stage 2 thinks the architecture is (which we know is wrong)
-        logger.warning("Stage 2 config contains incorrect architecture values:")
-        for key in ['gnn_type', 'gnn_layers', 'node_hidden_dims', 'edge_hidden_dims']:
-            if key in stage2_config:
-                logger.warning(f"  {key}: {stage2_config[key]} (IGNORED - using Stage 1 value)")
-        
-        # Extract only the training hyperparameters
-        for key in TRAINING_HYPERPARAMETER_KEYS:
-            if key in stage2_config:
-                stage2_hyperparams[key] = stage2_config[key]
-        
-        # Also extract all lambda parameters
-        for key in stage2_config:
-            if key.startswith('lambda_') and key not in stage2_hyperparams:
-                stage2_hyperparams[key] = stage2_config[key]
-        
-        # Get other training-related configs
-        for key in ['epochs', 'patience', 'dataset_names', 'folder_names', 'max_nodes', 'max_edges', 'train_ratio']:
-            if key in stage2_config:
-                stage2_hyperparams[key] = stage2_config[key]
-        
-        logger.info(f"Loaded hyperparameters from stage 2: {stage2_hyperparams}")
+    print("args before loading from yaml:", args)
+    if args.config:
+        logger.info(f"Loaded configuration from {args.config}")
+        args = load_args_from_yaml(args.config)
+    elif args.stage1_checkpoint and args.stage2_checkpoint:
+        logger.info(f"Loading stage 1 and stage 2 checkpoints: {args.stage1_checkpoint}, {args.stage2_checkpoint}")
+        stage2_checkpoint_path = args.stage2_checkpoint
+        stage2_checkpoint = torch.load(stage2_checkpoint_path, map_location="cpu")
+        stage2_config = stage2_checkpoint.get("config", {})
+        stage2_seed = stage2_checkpoint.get("seed", None)
+        print(f"\n \n =================================Stage 2 configs: {stage2_config}")
 
-    # Set determinism with the correct seed
-    logger.info(f"Using seed: {actual_seed}")
+        logger.info(f"Loading stage 1 architecture from {args.stage1_checkpoint}")
+        stage1_checkpoint_path = args.stage1_checkpoint
+        stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location="cpu")
+        stage1_config = stage1_checkpoint.get("config", {})
+        print(f"Stage 1 configs: {stage1_config} \n \n ==================================="   )
+        # print lambda values from both stages
+        print(f"stage 1 lambda: {[stage1_config.get(k) for k in LAMBDAS]}")
+        print(f"stage 2 lambda: {[stage2_config.get(k) for k in LAMBDAS]}")
+        args = load_and_merge_checkpoints(stage1_config, stage2_config, stage2_seed)  
+        args.stage1_checkpoint = stage1_checkpoint_path
+        args.stage2_checkpoint = stage2_checkpoint_path
+        args.model_module = "AdvancedMLP"  
+        args.seed =stage1_checkpoint["seed"]
+
+    args.folder_names = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"  ]
     import random
-    import numpy as np
-    os.environ['PYTHONHASHSEED'] = str(actual_seed)
-    random.seed(actual_seed)
-    np.random.seed(actual_seed)
-    torch.manual_seed(actual_seed)
-    torch.cuda.manual_seed(actual_seed)
-    torch.cuda.manual_seed_all(actual_seed)
+    seed = args.seed
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # Enforce deterministic algorithms in PyTorch
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    
-    # 3) Build final configuration
-    # Start with CLI args
-    final_config = vars(args).copy()
+    final_config = vars(args)
+    print("use_edge_mlp in stage1_config:", "use_edge_mlp" in stage1_config)
+    # Print with YAML formatting
+    print("========== FINAL CONFIG STRUCTURE ==========")
+    print(yaml.dump(final_config, sort_keys=False, default_flow_style=False))
 
-    logger.info(f"\n \n Initial config from CLI args: {final_config}")
-    
-    # Update seed
-    final_config['seed'] = actual_seed
-    
-    # Override with stage 2 hyperparameters (training params only)
-    final_config.update(stage2_hyperparams)
-    
-    # Override with stage 1 architecture (this is the TRUTH, must come last!)
-    final_config.update(stage1_architecture)
 
-    logger.info(f" Final configuration after merging stage 1 and stage 2: {final_config} \n \n ")
-    
-    # Override folder_names to use local paths
-    final_config["folder_names"] = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"]
-    
-    # If a separate config file is specified, load it last
-    if final_config.get('config'):
-        logger.info(f"Loading additional config from YAML {final_config['config']}")
-        with open(final_config['config'], 'r') as f:
-            yaml_cfg = yaml.safe_load(f)
-        # Only update keys that aren't already set
-        for k, v in yaml_cfg.items():
-            if k not in final_config or final_config[k] is None:
-                final_config[k] = v
+    print("args after loading from yaml:", args)
+    model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
+    model_folder = os.path.dirname(model_module.__file__)
+    print("DEBUG: Value of args.model_module before import:", args.model_module)
 
-    # Extract model_kwargs from the final config
-    model_kwargs = {}
-    for key in MODEL_KWARGS_KEYS:
-        if key in final_config:
-            model_kwargs[key] = final_config[key]
-    
-    # Ensure node/edge hidden dims are in model_kwargs
-    if 'node_hidden_dims' in final_config:
-        model_kwargs['node_hidden_dims'] = final_config['node_hidden_dims']
-    if 'edge_hidden_dims' in final_config:
-        model_kwargs['edge_hidden_dims'] = final_config['edge_hidden_dims']
-    
-    # Update final config with model_kwargs
-    final_config['model_kwargs'] = model_kwargs
-    final_config['model_module'] = final_config.get('model_module', 'AdvancedMLP')
+    # Get the model class from the imported module
+    model_class = getattr(model_module, args.model_module)
+    print(f"Successfully imported model: {args.model_module}")
 
-    # Log critical parameter comparison
-    logger.info("=== CRITICAL PARAMETER CHECK ===")
-    if args.stage1_checkpoint and args.stage2_checkpoint:
-        critical_arch_params = ['gnn_type', 'gnn_layers', 'gnn_hidden_dim', 
-                               'node_hidden_dims', 'edge_hidden_dims', 
-                               'switch_head_type', 'switch_head_layers']
-        logger.info("Architecture (from Stage 1):")
-        for param in critical_arch_params:
-            logger.info(f"  {param}: {final_config.get(param, 'NOT SET')}")
-        
-        critical_training_params = ['learning_rate', 'weight_decay', 'batch_size',
-                                   'criterion_name'] + [k for k in final_config if k.startswith('lambda_')]
-        logger.info("Training hyperparameters (from Stage 2):")
-        for param in critical_training_params:
-            logger.info(f"  {param}: {final_config.get(param, 'NOT SET')}")    
+    if args.wandb:
+        run = wandb.init(project=args.description, job_type="train", config=vars(args))
+        args.job_name = run.name    
 
-    # 6) Build data loaders
-    logger.info(f"Sanity check - batch_size: {args.batch_size}, batching_type: {args.batching_type}, dataset_type: {args.dataset_type}")
+    # Save the configuration file in the model folder's config_files subdirectory.
+    file_name_yaml = save_args_to_yaml(args, model_folder)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    logger.info(args.dataset_type)
+    logger.info(args.dataset_names)
+    logger.info(args.folder_names)
+
     dataloaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
-        dataset_type=args.dataset_type,
+        dataset_type=args.dataset_type, 
         batch_size=args.batch_size,
         max_nodes=args.max_nodes,
         max_edges=args.max_edges,
@@ -289,85 +243,54 @@ def main():
         seed=args.seed,
         num_workers=args.num_workers,
         batching_type=args.batching_type,
-        shuffle=True,
+        shuffle=True,  # Set shuffle to True for training data
     )
-    train_loader = dataloaders.get("train")
-    val_loader = dataloaders.get("validation")
-    test_loader = dataloaders.get("test")
+    train_loader, val_loader, test_loader = dataloaders.get("train"),  dataloaders.get("validation"), dataloaders.get("test")
 
+    batch = next(iter(train_loader))
+    logger.info(f"Batch type: {type(batch)}")
+    logger.info(f"Batch: {batch}")
+    logger.info(f"Batch keys: {batch.keys() if isinstance(batch, dict) else 'N/A'}")
+    logger.info(f"Batch x shape: {batch.x.shape if hasattr(batch, 'x') else 'N/A'}")
+    logger.info(f"Batch edge_index shape: {batch.edge_index.shape if hasattr(batch, 'edge_index') else 'N/A'}")
+    logger.info(f"Batch edge_attr shape: {batch.edge_attr.shape if hasattr(batch, 'edge_attr') else 'N/A'}")
+    logger.info(f"Batch edge_y shape: {batch.edge_y.shape if hasattr(batch, 'edge_y') else 'N/A'}")
+    logger.info(f"Batch size: {len(train_loader.dataset)}")
 
-    if train_loader:
-        first_batch = next(iter(train_loader))
-        logger.info(f"First batch fingerprint - X shape: {first_batch.x.shape}, "
-                    f"X sum: {first_batch.x.sum().item():.6f}, "
-                    f"Edge attr sum: {first_batch.edge_attr.sum().item():.6f}")
-    # 7) Instantiate model with stage 1 architecture
-    model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
     model_class = getattr(model_module, args.model_module)
-    model_folder = os.path.dirname(model_module.__file__)
+    node_input_dim = train_loader.dataset[0].x.shape[1]
+    edge_input_dim = train_loader.dataset[0].edge_attr.shape[1]
+    args.model_kwargs["node_input_dim"] = node_input_dim
+    args.model_kwargs["edge_input_dim"] = edge_input_dim
 
-    # Add input dimensions to model_kwargs
-    model_kwargs["node_input_dim"] = train_loader.dataset[0].x.shape[1]
-    model_kwargs["edge_input_dim"] = train_loader.dataset[0].edge_attr.shape[1]
+    model_kwargs = args.model_kwargs
 
     if args.model_module == "cvx":
         all_data = []
         for d in dataloaders.values():
             if d: all_data.extend(d.dataset)
-        max_n = max(d.cvx_node_mask.shape[1] for d in all_data)
-        max_e = max(d.cvx_edge_mask.shape[1] for d in all_data)
-        model_kwargs['max_n'], model_kwargs['max_e'] = max_n, max_e
-        model_kwargs['cvx_layer'] = build_cvx_layer(max_n, max_e)
 
-    # Create model with stage 1 architecture
-    model = model_class(**model_kwargs).to(device)
-    logger.info(f"Created model with architecture from stage 1")
+        max_n_val = max(d.cvx_node_mask.shape[1] for d in all_data)
+        max_e_val = max(d.cvx_edge_mask.shape[1] for d in all_data)
+        model_kwargs['max_n'] = max_n_val
+        model_kwargs['max_e'] = max_e_val
+        model_kwargs['cvx_layer'] = build_cvx_layer(max_n_val, max_e_val)
 
-    # 8) Load weights from stage 1
-    if model_state_dict is not None:
-        try:
-            model.load_state_dict(model_state_dict, strict=True)
-            logger.info("Successfully loaded stage 1 weights with strict=True")
-        except RuntimeError as e:
-            logger.warning(f"Could not load weights with strict=True: {e}")
-            model.load_state_dict(model_state_dict, strict=False)
-            logger.warning("Loaded stage 1 weights with strict=False; some keys may have been ignored")
+        import torch.multiprocessing as mp
+        mp.set_start_method("spawn", force=True)
 
-    model_keys = set(model.state_dict().keys())
-    checkpoint_keys = set(model_state_dict.keys())
-    unused_keys = checkpoint_keys - model_keys
-    missing_keys = model_keys - checkpoint_keys
-
-    if unused_keys:
-        logger.warning("⚠️ Unused parameters in checkpoint not found in model:")
-        for k in sorted(unused_keys):
-            logger.warning(f"  - {k}")
-
-    if missing_keys:
-        logger.warning("⚠️ Model parameters not found in checkpoint:")
-        for k in sorted(missing_keys):
-            logger.warning(f"  - {k}")
-    else:
-        logger.info("✅ All model parameters matched with checkpoint.")
-
-    with torch.no_grad():
-        # Log a few key parameter values as fingerprint
-        for name, param in list(model.named_parameters())[:5]:
-            logger.info(f"Param {name} - mean: {param.mean().item():.6f}, "
-                    f"std: {param.std().item():.6f}, sum: {param.sum().item():.6f}")
-    # 9) Setup training with stage 2 hyperparameters
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    
-    best_loss = float("inf")
-    patience = 0
-
-
-    logger.info(f"Training {args.model_module} with {len(train_loader.dataset)} samples")
-    logger.info(f"Validation with {len(val_loader.dataset)} samples")
-    try:
-        logger.info(f"Test with {len(test_loader.dataset)} samples")
-    except AttributeError:
-        logger.info("No test dataset provided")
+        # enforce a sane DataLoader num_workers
+        args.num_workers = min(args.num_workers, 4)
+    print("Loaded model_kwargs: =================================================================")
+    for k, v in args.model_kwargs.items():
+        print(f"{k}: {v}")
+    model = model_class(**model_kwargs)
+    if args.stage1_checkpoint:
+        logger.info(f"Loading stage 1 checkpoint from {args.stage1_checkpoint}")
+        stage1_checkpoint = torch.load(args.stage1_checkpoint, map_location="cpu")
+        model.load_state_dict(stage1_checkpoint['initial_model_state_dict'], strict=True)
+  
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     # Use criterion from stage 2 hyperparameters
     if args.criterion_name == "FocalLoss":
@@ -385,29 +308,27 @@ def main():
         except AttributeError:
             logger.error(f"Criterion '{args.criterion_name}' not found in custom losses or torch.nn!")
             raise
-    
-    # Use lambda values from stage 2
-    if not args.stage2_checkpoint:
-        lambda_dict = {
-            'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
-            'lambda_mask': getattr(args, 'lambda_mask', 0.01),
-            'lambda_connectivity': getattr(args, 'lambda_connectivity', 0.05),
-            'lambda_radiality': getattr(args, 'lambda_radiality', 0.05),
-            'loss_scaling_strategy': getattr(args, 'loss_scaling_strategy', 'adaptive_ratio'),
-            'normalization_type': getattr(args, 'normalization_type', 'none'),
-        }
-    else:
-        lambda_dict = lambda_params = {k: v for k, v in stage2_hyperparams.items() if k.startswith('lambda_')}
+
+    lambda_dict = {
+        'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
+        'lambda_mask': getattr(args, 'lambda_mask', 0.01),
+        'lambda_connectivity': getattr(args, 'lambda_connectivity', 0.05),
+        'lambda_radiality': getattr(args, 'lambda_radiality', 0.05),
+    }
     
     writer = SummaryWriter(log_dir="runs/grad_debug")
-    global_step = 0 
+
 
     logger.info(f"Python hash seed: {os.environ.get('PYTHONHASHSEED', 'not set')}")
     logger.info(f"Torch deterministic: {torch.backends.cudnn.deterministic}")
     logger.info(f"Torch benchmark: {torch.backends.cudnn.benchmark}")
-    logger.info(f"NumPy random state: {np.random.get_state()[1][0]}")  
-    
-    for epoch in range(args.epochs):
+    logger.info(f"NumPy random state: {np.random.get_state()[1][0]}") 
+
+    best_loss = float('inf')
+    patience = 0
+    global_step = 0 
+
+    for epoch in range(61):
         if epoch == 0:
             logger.info(f"Training config - LR: {args.learning_rate}, "
                 f"WD: {args.weight_decay}, Batch size: {args.batch_size}, "
@@ -430,8 +351,6 @@ def main():
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'config': final_config,
-                'stage1_architecture': stage1_architecture,
-                'stage2_hyperparams': stage2_hyperparams,
                 'epoch': epoch,
                 'best_loss': best_loss
             }, f"model_search/models/{args.model_module}/{args.job_name}-Best.pt")
@@ -452,8 +371,6 @@ def main():
     torch.save({
         'model_state_dict': model.state_dict(),
         'config': final_config,
-        'stage1_architecture': stage1_architecture,
-        'stage2_hyperparams': stage2_hyperparams,
         'epoch': epoch,
         'final_loss': val_loss
     }, model_save_path)

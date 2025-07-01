@@ -628,7 +628,7 @@ class EdgeFlowMLP(nn.Module):
             nn.Linear(dim, dim),
             nn.ReLU(),
             nn.LayerNorm(dim),
-            nn.Linear(dim, 2),            # outputs [P̂, Q̂]
+            nn.Linear(dim, 2),         
         )
     def forward(self, edge_feat):
         return self.net(edge_feat)

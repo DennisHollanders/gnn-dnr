@@ -9,8 +9,8 @@ folder_names:
   - "/vast.mnt/home/20174047/gnn-dnr/data/split_datasets/test"
 dataset_type: "default"
 batching_type: "dynamic"
-max_nodes: 20000
-max_edges: 50000
+max_nodes: 2000
+max_edges: 5000
 train_ratio: 0.85
 seed: 187
 num_workers: 0

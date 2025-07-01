@@ -295,7 +295,6 @@ class HPO:
         if node_mlp_in_search:
             config['node_hidden_dims'] = suggest_mlp_layers(trial, 'node_hidden')
         elif 'node_hidden_dims' not in config:
-    
             config['node_hidden_dims'] = []
         
         if edge_mlp_in_search:
@@ -553,7 +552,7 @@ class HPO:
             init_state = checkpoint.get('initial_model_state_dict',
                                         checkpoint['model_state_dict'])
             model.load_state_dict(init_state, strict=True)
-            logger.info("✅ Loaded stage-1 initial weights for stage-2 HPO")
+            logger.info(" Loaded stage-1 initial weights for stage-2 HPO")
 
             logger.info(f"Stage 1 config keys: {sorted(checkpoint['config'].keys())}")
             logger.info(f"Stage 1 seed from checkpoint: {checkpoint.get('seed', 'not found')}")
