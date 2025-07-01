@@ -167,7 +167,36 @@ def main():
                 stage2_hyperparams[key] = stage2_config[key]
         
         logger.info(f"Loaded hyperparameters from stage 2: {stage2_hyperparams}")
+       # after ck1 = torch.load(...)
+    state1 = ck1['model_state_dict']
+    logger.info(f"Stage1 state_dict keys: {list(state1.keys())[:5]} ... ({len(state1)} total)")
 
+    # after ck2 = torch.load(...)
+    if 'model_state_dict' in ck2:
+        state2 = ck2['model_state_dict']
+        logger.info(f"Stage2 state_dict keys: {list(state2.keys())[:5]} ... ({len(state2)} total)")
+
+        # compare shapes & any mismatches
+        mismatches = []
+        for k in state1:
+            if k not in state2:
+                mismatches.append(f"  missing in stage2: {k}")
+            else:
+                s1, s2 = state1[k].shape, state2[k].shape
+                if s1 != s2:
+                    mismatches.append(f"  shape mismatch {k}: {s1} vs {s2}")
+                elif not torch.allclose(state1[k], state2[k], atol=1e-6):
+                    mismatches.append(f"  value mismatch at {k}")
+        for k in state2:
+            if k not in state1:
+                mismatches.append(f"  missing in stage1: {k}")
+
+        if mismatches:
+            logger.warning("Stage1 vs Stage2 initial-state mismatches:\n" + "\n".join(mismatches))
+        else:
+            logger.info("✅ Stage1 and Stage2 initial states are identical (within tolerance).")
+    else:
+        logger.warning("Stage2 checkpoint has no 'model_state_dict' to compare.")
     # 3) Build final configuration
     # Start with CLI args
     final_config = vars(args).copy()
@@ -197,6 +226,7 @@ def main():
     # Update final config with model_kwargs
     final_config['model_kwargs'] = model_kwargs
     final_config['model_module'] = final_config.get('model_module', 'AdvancedMLP')  
+    final_config["folder_names"] = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"]
     # 5) Reconstruct args namespace
     args = argparse.Namespace(**final_config)
     logger.info(f"Final merged configuration:")
@@ -259,6 +289,7 @@ def main():
     
     best_loss = float("inf")
     patience = 0
+
 
     logger.info(f"Training {args.model_module} with {len(train_loader.dataset)} samples")
     logger.info(f"Validation with {len(val_loader.dataset)} samples")

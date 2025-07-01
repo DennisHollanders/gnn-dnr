@@ -29,6 +29,16 @@ import json
 import signal
 from contextlib import contextmanager
 
+MODEL_KWARGS_KEYS = [
+    'output_type', 'num_classes', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim',
+    'gat_heads', 'dropout_rate', 'gat_dropout', 'gin_eps', 'node_hidden_dims',
+    'use_node_mlp', 'edge_hidden_dims', 'use_edge_mlp', 'activation',
+    'use_batch_norm', 'use_residual', 'use_skip_connections', 'pooling',
+    'switch_head_type', 'switch_head_layers', 'switch_attention_heads',
+    'use_gated_mp', 'use_phyr', 'enforce_radiality', 'phyr_k_ratio',
+    'gat_v2', 'gat_edge_dim', 'gin_train_eps', 'gin_mlp_layers',
+    'criterion_name'
+]
 
 
 # Setup logging
@@ -512,34 +522,24 @@ class HPO:
             logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
             checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
 
+            # 1) pull out *just* the architecture kwargs
+            arch = checkpoint.get('stage1_architecture',
+                {k: checkpoint['config'][k]
+                    for k in MODEL_KWARGS_KEYS
+                    if k in checkpoint['config']})
 
-            loaded_config = checkpoint['config']
-
-            # 1) build model with the trial's node/edge dims but original architectural kwargs
             model_kwargs = {
                 'node_input_dim': data_sample.x.shape[1],
                 'edge_input_dim': data_sample.edge_attr.shape[1],
-                **loaded_config
+                **arch
             }
             model = AdvancedMLP(**model_kwargs).to(device)
 
-            ckpt_state = checkpoint['model_state_dict']
-            
-            model.load_state_dict(ckpt_state, strict=False)
-
-            own_state = model.state_dict()
-            missing_keys = set(own_state.keys()) - set(ckpt_state.keys())
-            unexpected_keys = set(ckpt_state.keys()) - set(own_state.keys())
-
-            # Log keys that were in the checkpoint but not in the new model (unexpected)
-            if unexpected_keys:
-                logger.warning(f"Ignoring unexpected checkpoint keys (not in current model): {sorted(unexpected_keys)}")
-            
-            # Log keys that are in the new model but were not in the checkpoint (missing weights)
-            if missing_keys:
-                logger.warning(f"Did not load weights for (new or resized layers): {sorted(missing_keys)}")
-
-            logger.info("Successfully loaded pre-trained weights for fine-tuning.")
+            # 2) load the *initial* random weights, if available, else fall back
+            init_state = checkpoint.get('initial_model_state_dict',
+                                        checkpoint['model_state_dict'])
+            model.load_state_dict(init_state, strict=True)
+            logger.info("✅ Loaded stage-1 initial weights for stage-2 HPO")
         else:
             # --- STAGE 1: Initialize model from scratch ---
             model_kwargs = {
