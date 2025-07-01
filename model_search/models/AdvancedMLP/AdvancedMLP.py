@@ -380,21 +380,19 @@ class SwitchGatedMP(MessagePassing):
         self.node_transform = nn.Linear(in_channels, out_channels, bias=False)
         self.residual_transform = nn.Linear(in_channels, out_channels, bias=False)
         
-        # Physics-informed gate computation
-        # Expected edge_attr: [R, X, switch_state, line_capacity, ...]
         self.impedance_encoder = nn.Sequential(
-            nn.Linear(2, out_channels // 2),  # For R, X (resistance, reactance)
+            nn.Linear(2, out_channels // 2), 
             nn.ReLU(),
             nn.BatchNorm1d(out_channels // 2)
         )
         
         self.switch_encoder = nn.Sequential(
-            nn.Linear(1, out_channels // 4),  # For switch state
+            nn.Linear(1, out_channels // 4),
             nn.ReLU()
         )
         
         self.line_encoder = nn.Sequential(
-            nn.Linear(edge_attr_dim - 3, out_channels // 4),  # For other line features
+            nn.Linear(edge_attr_dim - 3, out_channels // 4),  
             nn.ReLU()
         ) if edge_attr_dim > 3 else None
         
@@ -408,7 +406,7 @@ class SwitchGatedMP(MessagePassing):
             nn.ReLU(),
             nn.LayerNorm(out_channels),
             nn.Linear(out_channels, out_channels),
-            nn.Sigmoid()  # Output between 0 and 1 (open to closed)
+            nn.Sigmoid()
         )
         
         self.activation = nn.ReLU()
@@ -982,14 +980,13 @@ class AdvancedMLP(nn.Module):
             "voltage_predictions": voltage_logits,
             "node_embeddings": node_features,
             "edge_embeddings": edge_features,
-            "flows": flows_hat,                      # for physics_loss
-            "node_v": volt_hat,                      # for physics_loss
+            "flows": flows_hat,                     
+            "node_v": volt_hat,                    
         }
 
         # Add multiclass probabilities if available
         if switch_probs_full is not None:
             outputs["switch_probabilities"] = switch_probs_full
-        #    print(f"Added switch_probabilities with shape: {switch_probs_full.shape}")
         
         # Apply PhysicsTopK if enabled
         if self.use_phyr:

@@ -172,31 +172,28 @@ class HPO:
         config = self.config.copy()
         config.update(self.fixed_params)
 
-        # Suggest gnn_hidden_dim first, as it's a dependency for attention heads.
-        gnn_hidden_dim = None
+        # Suggest gnn_hidden_dim first IF it's in search space
+        gnn_hidden_dim = config.get('gnn_hidden_dim', 256)  # Use existing value as default
         if 'gnn_hidden_dim' in self.search_space:
             spec = self.search_space['gnn_hidden_dim']
             gnn_hidden_dim = trial.suggest_categorical('gnn_hidden_dim', spec['choices'])
             config['gnn_hidden_dim'] = gnn_hidden_dim
-        else:
-            # Fallback to fixed params or a default value
-            gnn_hidden_dim = config.get('gnn_hidden_dim', 256)
 
         # --- GNN Specific Parameters ---
         if config.get('gnn_type') == 'GAT':
-            # Suggest GAT heads from the static list of choices
+            # Only suggest GAT heads if in search space
             if 'gat_heads' in self.search_space:
                 spec = self.search_space['gat_heads']
                 gat_heads = trial.suggest_categorical('gat_heads', spec['choices'])
 
-                # Prune the trial if the combination of parameters is invalid
+                # Prune if invalid combination
                 if gnn_hidden_dim % gat_heads != 0:
                     raise optuna.exceptions.TrialPruned(
                         f"GAT heads ({gat_heads}) must be a divisor of gnn_hidden_dim ({gnn_hidden_dim})."
                     )
                 config['gat_heads'] = gat_heads
 
-            # Suggest other GAT-specific parameters
+            # Suggest other GAT-specific parameters only if in search space
             for param in ['gat_dropout', 'gat_v2', 'gat_edge_dim']:
                 if param in self.search_space:
                     spec = self.search_space[param]
@@ -206,13 +203,9 @@ class HPO:
                         config[param] = trial.suggest_categorical(param, spec['choices'])
                     elif spec.get('search_type') == 'int':
                         config[param] = trial.suggest_int(param, spec['min'], spec['max'])
-        else:
-            # Set default values for GAT if not used
-            config['gat_heads'] = 0
-            config['gat_dropout'] = 0.0
-
+        
         if config.get('gnn_type') == 'GIN':
-            # Suggest GIN-specific parameters
+            # Only suggest GIN parameters if in search space
             for param in ['gin_layers', 'gin_hidden_dim', 'gin_eps']:
                 if param in self.search_space:
                     spec = self.search_space[param]
@@ -220,12 +213,7 @@ class HPO:
                         config[param] = trial.suggest_float(param, spec['min'], spec['max'], log=spec.get('log', False))
                     elif spec.get('search_type') == 'int':
                         config[param] = trial.suggest_int(param, spec['min'], spec['max'])
-        else:
-            # Set default values for GIN if not used
-            config['gin_layers'] = 0
-            config['gin_hidden_dim'] = 0
-            config['gin_eps'] = 0.0
-            
+        
         # --- Switch Head Parameters ---
         if 'switch_head_type' in self.search_space:
             config['switch_head_type'] = trial.suggest_categorical(
@@ -233,20 +221,19 @@ class HPO:
             )
         
         if 'attention' in config.get('switch_head_type', ''):
-            # Suggest switch attention heads from the static list of choices
+            # Only suggest switch attention heads if in search space
             if 'switch_attention_heads' in self.search_space:
                 spec = self.search_space['switch_attention_heads']
                 switch_heads = trial.suggest_categorical('switch_attention_heads', spec['choices'])
 
-                # Prune the trial if the combination is invalid
+                # Prune if invalid
                 if gnn_hidden_dim % switch_heads != 0:
                     raise optuna.exceptions.TrialPruned(
                         f"Switch heads ({switch_heads}) must be a divisor of gnn_hidden_dim ({gnn_hidden_dim})."
                     )
                 config['switch_attention_heads'] = switch_heads
-        else:
-            config['switch_attention_heads'] = 0
         
+        # Only suggest criterion if in search space
         if 'criterion_name' in self.search_space:
             crit_spec = self.search_space['criterion_name']
             config['criterion_name'] = trial.suggest_categorical(
@@ -257,12 +244,17 @@ class HPO:
         handled_params = {
             'gnn_hidden_dim', 'gat_heads', 'gat_dropout', 'gat_v2', 'gat_edge_dim',
             'gin_layers', 'gin_hidden_dim', 'gin_eps', 'switch_head_type', 
-            'switch_attention_heads'
+            'switch_attention_heads', 'criterion_name'
         }
         mlp_prefixes = ('node_hidden_dim_', 'edge_hidden_dim_')
         
         for param, spec in self.search_space.items():
-            if param in config or param in handled_params or param.startswith(mlp_prefixes):
+            # Skip already handled params and MLP dims (handled separately below)
+            if param in handled_params or param.startswith(mlp_prefixes):
+                continue
+            
+            # Skip if already in config (e.g., from fixed_params or stage1)
+            if param in config:
                 continue
 
             search_type = spec.get('search_type')
@@ -273,28 +265,49 @@ class HPO:
             elif search_type == 'float':
                 config[param] = trial.suggest_float(param, spec['min'], spec['max'], log=spec.get('log', False))
 
-        # --- MLP Architecture ---
+        # --- MLP Architecture - Only if params exist in search space ---
         def suggest_mlp_layers(trial, prefix):
+            """Only suggest MLP layers that are in the search space"""
             layer_params = sorted([
                 key for key in self.search_space.keys() if key.startswith(f'{prefix}_dim_')
             ])
+            
+            # If no MLP params in search space, return existing config value or empty
+            if not layer_params:
+                return config.get(f'{prefix}_dims', [])
+            
             dims = []
             for param_name in layer_params:
-                if param_name in self.search_space:
-                    spec = self.search_space[param_name]
-                    dim = trial.suggest_categorical(param_name, spec['choices'])
-                    dims.append(dim)
+                spec = self.search_space[param_name]
+                dim = trial.suggest_categorical(param_name, spec['choices'])
+                dims.append(dim)
             
+            # Remove trailing zeros
             while dims and dims[-1] == 0:
                 dims.pop()
             
             return [d for d in dims if d > 0]
 
-        config['node_hidden_dims'] = suggest_mlp_layers(trial, 'node_hidden')
-        config['edge_hidden_dims'] = suggest_mlp_layers(trial, 'edge_hidden')
+        # Only update node/edge dims if they're in the search space
+        node_mlp_in_search = any(k.startswith('node_hidden_dim_') for k in self.search_space)
+        edge_mlp_in_search = any(k.startswith('edge_hidden_dim_') for k in self.search_space)
+        
+        if node_mlp_in_search:
+            config['node_hidden_dims'] = suggest_mlp_layers(trial, 'node_hidden')
+        elif 'node_hidden_dims' not in config:
+    
+            config['node_hidden_dims'] = []
+        
+        if edge_mlp_in_search:
+            config['edge_hidden_dims'] = suggest_mlp_layers(trial, 'edge_hidden')
+        elif 'edge_hidden_dims' not in config:
+            # If not in search space and not in config, use default
+            config['edge_hidden_dims'] = []
 
         # Apply final constraints and return
         return self._apply_constraints(trial, config)
+
+
     def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
         """Apply comprehensive feasibility constraints with standardized null values"""
         
@@ -492,7 +505,7 @@ class HPO:
         else:
             seed = self.seed
         set_global_determinism(seed)
-
+        logger.info(f"Trial {trial.number} - Seed used: {seed}, Config seed: {self.seed}")
         # Load data only if not already loaded in this worker process
         if not WORKER_DATALOADERS:
             logger.info(f"Worker (PID: {os.getpid()}) loading data for the first time.")
@@ -522,6 +535,7 @@ class HPO:
             logger.info(f"Stage 2: Loading checkpoint {self.stage1_checkpoint}")
             checkpoint = torch.load(self.stage1_checkpoint, map_location=device)
 
+
             # 1) pull out *just* the architecture kwargs
             arch = checkpoint.get('stage1_architecture',
                 {k: checkpoint['config'][k]
@@ -540,6 +554,24 @@ class HPO:
                                         checkpoint['model_state_dict'])
             model.load_state_dict(init_state, strict=True)
             logger.info("✅ Loaded stage-1 initial weights for stage-2 HPO")
+
+            logger.info(f"Stage 1 config keys: {sorted(checkpoint['config'].keys())}")
+            logger.info(f"Stage 1 seed from checkpoint: {checkpoint.get('seed', 'not found')}")
+    
+            current_arch = {
+                'node_hidden_dims': model_kwargs.get('node_hidden_dims'),
+                'edge_hidden_dims': model_kwargs.get('edge_hidden_dims'),
+                'gnn_layers': model_kwargs.get('gnn_layers'),
+                'gnn_hidden_dim': model_kwargs.get('gnn_hidden_dim'),
+            }
+            logger.info(f"Trial {trial.number} - Architecture comparison:")
+            # logger.info(f"  Stage 1 node hidden dims: {checkpoint['config'].get('node_hidden_dims', [])}")
+            # logger.info(f"  Stage 1 gnn layers: {checkpoint['config'].get('gnn_layers', 0)}")
+            # logger.info(f"  Stage 1 edge hidden dims: {checkpoint['config'].get('edge_hidden_dims', [])}")
+            logger.info(f"  Current: {current_arch}")
+            # logger.info(f"  Stage 1 config: {checkpoint['config']}")
+            if self.stage1_checkpoint:
+                config.update(arch)
         else:
             # --- STAGE 1: Initialize model from scratch ---
             model_kwargs = {
@@ -577,7 +609,7 @@ class HPO:
         best_epoch = -1
         
         max_epochs = min(config.get('epochs', 100), 60)
-        for epoch in range(max_epochs):
+        for epoch in range(1):
             if time.time() - start_time > self.trial_timeout:
                 raise optuna.exceptions.TrialPruned("Trial timed out")
 
@@ -599,7 +631,8 @@ class HPO:
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
-
+        logger.info(f"Trial {trial.number} completed with best MCC: {best_mcc_in_trial:.4f} at epoch {best_epoch}")
+        logger.info(f"config used: {config}")
         if best_model_state_dict is not None:
             mcc_threshold = 0.4
             should_save = False
@@ -862,7 +895,7 @@ class HPO:
 
 def main():
     # Set proper multiprocessing start method for cluster
-    mp.set_start_method('fork', force=True)
+    #mp.set_start_method('fork', force=True)
     
     parser = argparse.ArgumentParser(description="Simplified HPO")
     parser.add_argument("--config", type=str, required=True, help="Config YAML path")

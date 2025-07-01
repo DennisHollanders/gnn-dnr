@@ -14,6 +14,7 @@ max_edges: 50000
 train_ratio: 0.85
 seed: 0
 num_workers: 0
+batch_size: 128
 
 # Model Configuration (fixed for all trials)
 model_module: "AdvancedMLP"
@@ -35,6 +36,7 @@ fixed_params:
   use_node_mlp: false  # Stage 1 found node MLP not beneficial
   use_edge_mlp: true
   edge_hidden_dims: [64]  # From edge_hidden_dims_0: 64, n_edge_hidden_dims_layers: 1
+  node_hidden_dims: [128]  # From node_hidden_dims_0: 512, n_node_hidden_dims_layers: 2
   
   # Best Switch Head Architecture from Stage 1
   switch_head_type: "mlp"
@@ -117,11 +119,6 @@ search_space:
     search_type: "categorical"
     choices: ["adaptive", "simple", "injection_scale", "per_node", "paper_based"]
   
-  # Batch size optimization
-  batch_size:
-    search_type: "categorical"
-    choices: [32, 64, 128, 256]
-
 # Logging
 wandb: true
 wandb_project: "GAT_HPO_Stage2"
