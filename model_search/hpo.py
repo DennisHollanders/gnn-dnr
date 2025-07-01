@@ -563,7 +563,7 @@ class HPO:
             criterion = FocalLoss(alpha=1.0, gamma=2.0)
         elif crit_name == 'WeightedBCELoss':
             criterion = WeightedBCELoss()
-        elif crit_name.lower() == 'CrossEntropyLoss':
+        elif crit_name == 'CrossEntropyLoss':
             criterion = nn.CrossEntropyLoss()
         else:
             raise ValueError(f"Unknown loss: {crit_name}")

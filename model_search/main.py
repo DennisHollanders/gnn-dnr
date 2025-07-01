@@ -24,7 +24,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     )
-# ── 2. attach it to your logger ──────────────────────────────────────────────
 logger = logging.getLogger("Distribution Network Reconfiguration -- Model Search")
 logger.setLevel(logging.INFO)
 logger.handlers.clear()         
@@ -36,7 +35,6 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
-# Add the model_search directory to sys.path (might be redundant if ROOT_DIR is added, but safe)
 model_search_path = ROOT_DIR / "model_search"
 if str(model_search_path) not in sys.path:
     sys.path.append(str(model_search_path))
@@ -54,9 +52,36 @@ from loss_functions import WeightedBCELoss, FocalLoss
 
 DEFAULT_DESCRIPTION = "Graph Neural Network Model Search for Distribution Network Reconfiguration"
 
+MODEL_KWARGS_KEYS = [
+    'output_type', 'num_classes', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim',
+    'gat_heads', 'dropout_rate', 'gat_dropout', 'gin_eps', 'node_hidden_dims',
+    'use_node_mlp', 'edge_hidden_dims', 'use_edge_mlp', 'activation',
+    'use_batch_norm', 'use_residual', 'use_skip_connections', 'pooling',
+    'switch_head_type', 'switch_head_layers', 'switch_attention_heads',
+    'use_gated_mp', 'use_phyr', 'enforce_radiality', 'phyr_k_ratio',
+    'gat_v2', 'gat_edge_dim', 'gin_train_eps', 'gin_mlp_layers',
+    'criterion_name'
+]
+
+# Define which parameters are architectural vs training hyperparameters
+ARCHITECTURE_KEYS = [
+    'output_type', 'num_classes', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim',
+    'gat_heads', 'gin_eps', 'node_hidden_dims', 'use_node_mlp', 'edge_hidden_dims', 
+    'use_edge_mlp', 'activation', 'use_residual', 'use_skip_connections', 'pooling',
+    'switch_head_type', 'switch_head_layers', 'switch_attention_heads',
+    'use_gated_mp', 'use_phyr', 'enforce_radiality', 'phyr_k_ratio',
+    'gat_v2', 'gat_edge_dim', 'gin_train_eps', 'gin_mlp_layers'
+]
+
+TRAINING_HYPERPARAMETER_KEYS = [
+    'learning_rate', 'weight_decay', 'dropout_rate', 'gat_dropout', 'batch_size',
+    'criterion_name', 'lambda_phy_loss', 'lambda_mask', 'lambda_connectivity',
+    'lambda_radiality', 'loss_scaling_strategy', 'normalization_type', 'use_batch_norm'
+]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=DEFAULT_DESCRIPTION)
-    # New argument to allow overriding the description (e.g., "Train PIGNN")
     parser.add_argument("--description", type=str, help="Description for the training job")
     parser.add_argument("--job_name", type=str, default="default_job", help="Job name")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate")
@@ -75,6 +100,8 @@ def parse_args():
     parser.add_argument("--config_path", type=str, help="Path to the config file")
     parser.add_argument("--override_job_name", type=str, help="Override job name for saving the model")
     parser.add_argument("--model_path", type=str, help="Path to the saved model")
+    parser.add_argument("--stage1_checkpoint", type=str, help="Path to first-stage checkpoint (.pt) file")
+    parser.add_argument("--stage2_checkpoint", type=str, help="Path to second-stage checkpoint (.pt) file")
     return parser.parse_args()
 
 def save_args_to_yaml(args, model_folder):
@@ -100,152 +127,179 @@ def load_args_from_yaml(filepath):
 
 def main():
     args = parse_args()
+    logger.info(f"Loaded CLI args: {vars(args)}")
 
-    print("args before loading from yaml:", args)
-
-    if args.config:
-        logger.info(f"Loaded configuration from {args.config}")
-        args = load_args_from_yaml(args.config)
-        
-    print("args after loading from yaml:", args)
-    model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
-    model_folder = os.path.dirname(model_module.__file__)
-    print("DEBUG: Value of args.model_module before import:", args.model_module)
-
-    # Get the model class from the imported module
-    model_class = getattr(model_module, args.model_module)
-    print(f"Successfully imported model: {args.model_module}")
-
-    if args.wandb:
-        run = wandb.init(project=args.description, job_type="train", config=vars(args))
-        args.job_name = run.name    
-
-    # Save the configuration file in the model folder's config_files subdirectory.
-    file_name_yaml = save_args_to_yaml(args, model_folder)
+    # Initialize variables
+    model_state_dict = None
+    stage1_architecture = {}
+    stage2_hyperparams = {}
     
+    # 1) Load stage-1 checkpoint (architecture + initial weights)
+    if args.stage1_checkpoint:
+        logger.info(f"Loading stage1 checkpoint from {args.stage1_checkpoint}")
+        ck1 = torch.load(args.stage1_checkpoint, map_location="cpu")
+        
+        # Extract architecture parameters from stage 1
+        stage1_config = ck1.get('config', {})
+        for key in ARCHITECTURE_KEYS:
+            if key in stage1_config:
+                stage1_architecture[key] = stage1_config[key]
+        
+        # Store the model weights
+        model_state_dict = ck1['model_state_dict']
+        
+        logger.info(f"Loaded architecture from stage 1: {stage1_architecture}")
+
+    # 2) Load stage-2 checkpoint (training hyperparameters)
+    if args.stage2_checkpoint:
+        logger.info(f"Loading stage2 checkpoint from {args.stage2_checkpoint}")
+        ck2 = torch.load(args.stage2_checkpoint, map_location="cpu")
+        
+        # Extract training hyperparameters from stage 2
+        stage2_config = ck2.get('config', {})
+        for key in TRAINING_HYPERPARAMETER_KEYS:
+            if key in stage2_config:
+                stage2_hyperparams[key] = stage2_config[key]
+        
+        # Also get other training-related configs
+        for key in ['epochs', 'patience', 'dataset_names', 'folder_names']:
+            if key in stage2_config:
+                stage2_hyperparams[key] = stage2_config[key]
+        
+        logger.info(f"Loaded hyperparameters from stage 2: {stage2_hyperparams}")
+
+    # 3) Build final configuration
+    # Start with CLI args
+    final_config = vars(args).copy()
+    
+    # Override with stage 2 hyperparameters
+    final_config.update(stage2_hyperparams)
+    
+    # Override with stage 1 architecture (this ensures we use the correct architecture)
+    final_config.update(stage1_architecture)
+    #final_config["folder_names"] = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"]
+    # If a separate config file is specified, load it last
+    if final_config.get('config'):
+        logger.info(f"Loading additional config from YAML {final_config['config']}")
+        with open(final_config['config'], 'r') as f:
+            yaml_cfg = yaml.safe_load(f)
+        # Only update keys that aren't already set
+        for k, v in yaml_cfg.items():
+            if k not in final_config or final_config[k] is None:
+                final_config[k] = v
+
+    # Extract model_kwargs from the final config
+    model_kwargs = {}
+    for key in MODEL_KWARGS_KEYS:
+        if key in final_config:
+            model_kwargs[key] = final_config[key]
+    
+    # Update final config with model_kwargs
+    final_config['model_kwargs'] = model_kwargs
+    final_config['model_module'] = final_config.get('model_module', 'AdvancedMLP')  
+    # 5) Reconstruct args namespace
+    args = argparse.Namespace(**final_config)
+    logger.info(f"Final merged configuration:")
+    logger.info(f"  Architecture parameters: {[(k, v) for k, v in model_kwargs.items() if k in ARCHITECTURE_KEYS]}")
+    logger.info(f"  Training hyperparameters: {[(k, getattr(args, k, None)) for k in TRAINING_HYPERPARAMETER_KEYS if hasattr(args, k)]}")
+
+    # 6) Build data loaders
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    logger.info(args.dataset_type)
-    logger.info(args.dataset_names)
-    logger.info(args.folder_names)
-
     dataloaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
-        dataset_type=args.dataset_type, 
+        dataset_type=args.dataset_type,
         batch_size=args.batch_size,
-        max_nodes=args.max_nodes,
-        max_edges=args.max_edges,
-        train_ratio=args.train_ratio,
-        seed=args.seed,
-        num_workers=args.num_workers,
-        batching_type=args.batching_type,
-        shuffle=True,  # Set shuffle to True for training data
+        max_nodes=20000,
+        max_edges=50000,
+        train_ratio=0.85,
+        seed=0,
+        num_workers=0,
+        batching_type="standard",
+        shuffle=True,
     )
-    train_loader, validation_loader, test_loader = dataloaders.get("train"),  dataloaders.get("validation"), dataloaders.get("test")
+    train_loader = dataloaders.get("train")
+    val_loader = dataloaders.get("validation")
+    test_loader = dataloaders.get("test")
 
-    batch = next(iter(train_loader))
-    logger.info(f"Batch type: {type(batch)}")
-    logger.info(f"Batch: {batch}")
-    logger.info(f"Batch keys: {batch.keys() if isinstance(batch, dict) else 'N/A'}")
-    logger.info(f"Batch x shape: {batch.x.shape if hasattr(batch, 'x') else 'N/A'}")
-    logger.info(f"Batch edge_index shape: {batch.edge_index.shape if hasattr(batch, 'edge_index') else 'N/A'}")
-    logger.info(f"Batch edge_attr shape: {batch.edge_attr.shape if hasattr(batch, 'edge_attr') else 'N/A'}")
-    logger.info(f"Batch edge_y shape: {batch.edge_y.shape if hasattr(batch, 'edge_y') else 'N/A'}")
-    logger.info(f"Batch size: {len(train_loader.dataset)}")
-
+    # 7) Instantiate model with stage 1 architecture
+    model_module = importlib.import_module(f"models.{args.model_module}.{args.model_module}")
     model_class = getattr(model_module, args.model_module)
-    node_input_dim = train_loader.dataset[0].x.shape[1]
-    edge_input_dim = train_loader.dataset[0].edge_attr.shape[1]
-    args.model_kwargs["node_input_dim"] = node_input_dim
-    args.model_kwargs["edge_input_dim"] = edge_input_dim
+    model_folder = os.path.dirname(model_module.__file__)
 
-    model_kwargs = args.model_kwargs
-    
+    # Add input dimensions to model_kwargs
+    model_kwargs["node_input_dim"] = train_loader.dataset[0].x.shape[1]
+    model_kwargs["edge_input_dim"] = train_loader.dataset[0].edge_attr.shape[1]
+
     if args.model_module == "cvx":
         all_data = []
         for d in dataloaders.values():
             if d: all_data.extend(d.dataset)
+        max_n = max(d.cvx_node_mask.shape[1] for d in all_data)
+        max_e = max(d.cvx_edge_mask.shape[1] for d in all_data)
+        model_kwargs['max_n'], model_kwargs['max_e'] = max_n, max_e
+        model_kwargs['cvx_layer'] = build_cvx_layer(max_n, max_e)
 
-        max_n_val = max(d.cvx_node_mask.shape[1] for d in all_data)
-        max_e_val = max(d.cvx_edge_mask.shape[1] for d in all_data)
-        model_kwargs['max_n'] = max_n_val
-        model_kwargs['max_e'] = max_e_val
-        model_kwargs['cvx_layer'] = build_cvx_layer(max_n_val, max_e_val)
+    # Create model with stage 1 architecture
+    model = model_class(**model_kwargs).to(device)
+    logger.info(f"Created model with architecture from stage 1")
 
-        import torch.multiprocessing as mp
-        mp.set_start_method("spawn", force=True)
+    # 8) Load weights from stage 1
+    if model_state_dict is not None:
+        try:
+            model.load_state_dict(model_state_dict, strict=True)
+            logger.info("Successfully loaded stage 1 weights with strict=True")
+        except RuntimeError as e:
+            logger.warning(f"Could not load weights with strict=True: {e}")
+            model.load_state_dict(model_state_dict, strict=False)
+            logger.warning("Loaded stage 1 weights with strict=False; some keys may have been ignored")
 
-        # enforce a sane DataLoader num_workers
-        args.num_workers = min(args.num_workers, 4)
-
-    model = model_class(**model_kwargs)
-
+    # 9) Setup training with stage 2 hyperparameters
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     best_loss = float("inf")
     patience = 0
 
     logger.info(f"Training {args.model_module} with {len(train_loader.dataset)} samples")
-    logger.info(f"Validation with {len(validation_loader.dataset)} samples")
+    logger.info(f"Validation with {len(val_loader.dataset)} samples")
     try:
         logger.info(f"Test with {len(test_loader.dataset)} samples")
-        #logger.info(f"real_val with {len(validation_real_loader.dataset)} samples")
     except AttributeError:
         logger.info("No test dataset provided")
 
-    # if hasattr(args, 'output_type') and args.output_type == "multiclass":
-    #     if args.criterion_name == "CrossEntropyLoss":
-    #         criterion = nn.CrossEntropyLoss()
-    #     if args.criterion_name == "WeightedBCELoss":
-    #         criterion = WeightedBCELoss(pos_weight=2.0)
-    #     else:
-    #         logger.warning(f"Using {args.criterion_name} with multiclass - may need adaptation")
-    #         criterion = getattr(nn, args.criterion_name)()
-    # else:
-    #     # Existing binary criterion logic
-    #     if args.criterion_name == "WeightedBCELoss":
-    #         criterion = WeightedBCELoss(pos_weight=2.0)
-    #     elif args.criterion_name == "FocalLoss":
-    #         criterion = FocalLoss(alpha=1.0, gamma=2.0)
-    #     elif args.criterion_name == "MSELoss":
-    #         criterion = nn.MSELoss()
-    #     elif args.criterion_name == "CrossEntropyLoss":
-    #         criterion = nn.CrossEntropyLoss()
-    #     else:
-    #         criterion = getattr(nn, args.criterion_name)()
-
+    # Use criterion from stage 2 hyperparameters
     if args.criterion_name == "FocalLoss":
         criterion = FocalLoss(alpha=1.0, gamma=2.0)
     elif args.criterion_name == "WeightedBCELoss":
-        # This can be used for binary or multiclass (with proper targets)
         criterion = WeightedBCELoss(pos_weight=2.0)
     elif args.criterion_name == "CrossEntropyLoss":
         criterion = nn.CrossEntropyLoss()
     elif args.criterion_name == "MSELoss":
         criterion = nn.MSELoss()
     else:
-        # Fallback for any other standard nn loss
         try:
             criterion = getattr(nn, args.criterion_name)()
             logger.info(f"Initialized criterion '{args.criterion_name}' from torch.nn")
         except AttributeError:
             logger.error(f"Criterion '{args.criterion_name}' not found in custom losses or torch.nn!")
             raise
-
-    criterion = FocalLoss(alpha=1.0, gamma=2.0) 
     
-    lambda_dict = { 'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
-                    'lambda_mask': getattr(args, 'lambda_mask', 0.01),
-                    "lambda_connectivity": getattr(args, 'lambda_connectivity', 0.05),
-                    "lambda_radiality": getattr(args, 'lambda_radiality', 0.05),
-                    "loss_scaling_strategy": getattr(args, 'loss_scaling_strategy', 'adaptive_ratio'),
-                     "normalization_type": getattr(args, 'normalization_type', 'none'),}
+    # Use lambda values from stage 2
+    lambda_dict = {
+        'lambda_phy_loss': getattr(args, 'lambda_phy_loss', 0.1),
+        'lambda_mask': getattr(args, 'lambda_mask', 0.01),
+        'lambda_connectivity': getattr(args, 'lambda_connectivity', 0.05),
+        'lambda_radiality': getattr(args, 'lambda_radiality', 0.05),
+        'loss_scaling_strategy': getattr(args, 'loss_scaling_strategy', 'adaptive_ratio'),
+        'normalization_type': getattr(args, 'normalization_type', 'none'),
+    }
+    
     writer = SummaryWriter(log_dir="runs/grad_debug")
     global_step = 0 
-    for epoch in range(args.epochs): # tqdm(range(args.epochs), desc="Training Progress"):
-        train_loss, train_dict  = train(model, train_loader,     optimizer, criterion, device,**lambda_dict, writer=writer, global_step=global_step)
-        val_loss, val_dict      = test(model, validation_loader, criterion, device,**lambda_dict)
+    
+    for epoch in range(args.epochs):
+        train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict, writer=writer, global_step=global_step)
+        val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
         total_grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
         logger.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Total Grad Norm: {total_grad_norm:.6f}")
 
@@ -253,39 +307,42 @@ def main():
             logger.info(f"\n Epoch {epoch+1}/{args.epochs} - Train Metrics: {train_dict}\n ")
             logger.info(f"Epoch {epoch+1}/{args.epochs} - Val Metrics: {val_dict} \n ")
             
-        
-        
         if args.wandb:
             wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
         if val_loss < best_loss:
             best_loss = val_loss
             patience = 0
-            torch.save(model.state_dict(), f"model_search/models/{args.model_module}/{args.job_name}-Best.pt")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'config': final_config,
+                'stage1_architecture': stage1_architecture,
+                'stage2_hyperparams': stage2_hyperparams,
+                'epoch': epoch,
+                'best_loss': best_loss
+            }, f"model_search/models/{args.model_module}/{args.job_name}-Best.pt")
         else:
             patience += 1
             if patience == args.patience:
                 logger.info(f"Early stopping at epoch {epoch+1}")
                 break
 
-    # Check if test_loader is a valid DataLoader object before using it
     if test_loader:
         test_loss, test_dict = test(model, test_loader, criterion, device, **lambda_dict) 
         logger.info(f"Test Loss: {test_loss:.4f}")
         if args.wandb:
-             wandb.log({"test_loss": test_loss, **test_dict}) 
+            wandb.log({"test_loss": test_loss, **test_dict}) 
     logger.info(f"Training completed. Best validation loss: {best_loss:.4f}")
 
     model_save_path = f"model_search/models/{args.model_module}/{args.job_name}-Epoch{epoch}-Last.pt"
-    torch.save(model.state_dict(),model_save_path)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'config': final_config,
+        'stage1_architecture': stage1_architecture,
+        'stage2_hyperparams': stage2_hyperparams,
+        'epoch': epoch,
+        'final_loss': val_loss
+    }, model_save_path)
     logger.info(f"Model saved to {model_save_path}")
-    # try:
-    #     args.model_path = model_save_path
-    #     args.config_path = file_name_yaml 
-    #     args.override_job_name = args.model_module + "------" + args.job_name
 
-    #     run_evaluation(model, train_loader, validation_loader, test_loader, device, args)
-    # except Exception as e:
-    #     logger.error(f"Error during evaluation: {e}")   
 if __name__ == "__main__":
-   
    main()
