@@ -443,8 +443,8 @@ class Predictor:
         self.model = cls(
             node_input_dim=node_dim,
             edge_input_dim=edge_dim,
-            output_type=config.get("output_type", "binary"),
-            num_classes=config.get("num_classes", 2),
+            # output_type=config.get("output_type", "binary"),
+            #  num_classes=config.get("num_classes", 2),
             **config.get("model_kwargs", {})
         ).to(device)
         self.model.load_state_dict(state, strict=False)
@@ -1011,10 +1011,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict-then-Optimize Pipeline with Explicit Saving")
     parser.add_argument("--config_path", type=str,
                        # default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------devout-glitter-19.yaml",
-                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\hpo_hpo_20250629_000608\config.yaml",
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\AdvancedMLP------None.yaml",
                         help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\hpo_hpo_20250629_000608\model_trial_0.pt",
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\None-Best.pt",
                         #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
