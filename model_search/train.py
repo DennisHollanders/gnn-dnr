@@ -6,6 +6,7 @@ import psutil
 import logging 
 import sys 
 from pathlib import Path    
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,8 @@ def approximate_connectivity_loss(switch_probs, edge_index, num_nodes, device):
     
     disconnected_penalty = torch.relu(1.0 - node_degrees).sum()
     return disconnected_penalty
+
+
 def enhanced_physics_loss(output, data, device, lambda_phy=0.1, 
                          lambda_connectivity=0.05, lambda_radiality=0.05,
                          normalization_type="paper_based"):
@@ -397,6 +400,23 @@ def test(model, test_loader, criterion, device,
     
     return avg_loss, log_dict
 
+def calculate_topology_error_hamming(y_true, y_pred):    
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Handle length mismatch
+    if len(y_true) != len(y_pred):
+        min_len = min(len(y_true), len(y_pred))
+        y_true = y_true[:min_len]
+        y_pred = y_pred[:min_len]
+    
+    if len(y_true) == 0:
+        return 1.0 
+    hamming_distance = np.sum(y_true != y_pred)
+    topology_error = hamming_distance / len(y_true)
+    
+    return topology_error
+
 def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor, 
                           threshold: float = 0.5, eps: float = 1e-8) -> dict:
     """Compute classification metrics for switch predictions."""
@@ -432,6 +452,8 @@ def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor,
     # Add F1 for minority class (class 0)
     f1_minority = 2 * tn / (2 * tn + fp + fn + eps)
 
+    TopologyError =calculate_topology_error_hamming(targets.cpu().numpy(), preds.cpu().numpy())
+
     return {
         "accuracy": accuracy.item(),
         "precision": precision.item(),
@@ -446,6 +468,7 @@ def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor,
         "dice": dice.item(),
         "tp": tp.item(), "fp": fp.item(),
         "fn": fn.item(), "tn": tn.item(),
+        "TopologyError": TopologyError,  
     }
 
 

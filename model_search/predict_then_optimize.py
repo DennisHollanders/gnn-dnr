@@ -1,3 +1,4 @@
+from pyexpat import model
 from random import shuffle
 import sys
 import os
@@ -12,6 +13,7 @@ from tqdm import tqdm
 import argparse
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.patches import Patch
 import logging
 import pandas as pd
 import json
@@ -27,7 +29,10 @@ from model_search.evaluation.evaluation import load_config_from_model_path
 
 from model_search.models.AdvancedMLP.AdvancedMLP import PhysicsInformedRounding
 from data_generation.define_ground_truth import is_radial_and_connected
-from model_search.load_data2 import *
+from model_search.load_data import *
+
+from models.cvx.cvx import build_cvx_layer
+
 
 
 class NetworkSwitchManager:
@@ -410,7 +415,7 @@ class Predictor:
     def __init__(self, model_path, config_path, device, sample_loader):
         self.device = device
 
-        config = (yaml.safe_load(open(config_path)) if config_path
+        config = (yaml.safe_load(open(config_path, encoding='utf-8')) if config_path
                   else load_config_from_model_path(model_path))
         self.eval_args = argparse.Namespace(**config)
         self.gnn_times = {}
@@ -423,10 +428,104 @@ class Predictor:
         module = importlib.import_module(
             f"models.{self.eval_args.model_module}.{self.eval_args.model_module}"
         )
+        
         cls = getattr(module, self.eval_args.model_module)
-
+        
+        
         ckpt = torch.load(model_path, map_location=device)
         state = ckpt.get("model_state_dict", ckpt)
+        sdict  = ckpt.get("model_state_dict", ckpt)
+
+
+        # Print state dict for debugging
+        for key, item in sdict.items():
+            print(f"Key: {key}, Shape: {item.shape}")
+
+        # Reconstruct config from state dict
+        # Node MLP configuration - from gnn.node_mlp layers
+        node_hidden_dims = []
+        if "gnn.node_mlp.layers.0.weight" in sdict:
+            node_hidden_dims.append(sdict["gnn.node_mlp.layers.0.weight"].shape[0])  # 256
+        if "gnn.node_mlp.layers.1.weight" in sdict:
+            node_hidden_dims.append(sdict["gnn.node_mlp.layers.1.weight"].shape[0])  # 512
+        if "gnn.node_mlp.layers.2.weight" in sdict:
+            node_hidden_dims.append(sdict["gnn.node_mlp.layers.2.weight"].shape[0])  # 512
+        
+        # Edge MLP configuration - from gnn.edge_mlp layers
+        edge_hidden_dims = []
+        if "gnn.edge_mlp.layers.0.weight" in sdict:
+            edge_hidden_dims.append(sdict["gnn.edge_mlp.layers.0.weight"].shape[0])  # 256
+        if "gnn.edge_mlp.layers.1.weight" in sdict:
+            edge_hidden_dims.append(sdict["gnn.edge_mlp.layers.1.weight"].shape[0])  # 512
+
+        # GNN configuration - from gnn.gnn_layers
+        gnn_hidden_dim = 360  # From gnn.gnn_layers.0.node_transform.weight output dim
+        gnn_layers = 1  # Only one gnn layer visible in state dict
+        
+        print(f"Recovered node_hidden_dims = {node_hidden_dims}")
+        print(f"Recovered edge_hidden_dims = {edge_hidden_dims}")
+        print(f"GNN hidden dim = {gnn_hidden_dim}")
+
+        # Detect output type from switch head
+        head = state.get("gnn.switch_head.1.weight")
+        output_type = "binary"
+        num_classes = 2
+        if head is not None:
+            dim = head.shape[0]
+            if dim == 1:
+                print("Detected binary classification head, setting output type accordingly.")
+                output_type = "binary"
+                num_classes = 2
+            elif dim == 2:
+                print("Detected multiclass classification head, setting output type accordingly.")
+                output_type = "multiclass"
+                num_classes = 2
+        # whatever L you used
+        dropout_rate = 0.0
+        # Build your CVX layer
+        max_n_val, max_e_val = 301, 310
+        cvx_layer = build_cvx_layer(max_n=max_n_val, max_e=max_e_val)
+
+        # Overwrite model_kwargs in one shot
+        model_kwargs = {
+            # from your YAML/fragrant-shape-31 run:
+            'output_type':        'binary',
+            'num_classes':        2,
+            'gnn_type':           'GCN',
+            'gnn_layers':         1,
+            'gnn_hidden_dim':     360,
+            'gin_eps':            0.0,
+            'gat_heads':          4,
+            'gat_dropout':        0.1,
+            'use_node_mlp':       True,
+            'node_hidden_dims':   [256, 512, 512],
+            'use_edge_mlp':       True,
+            'edge_hidden_dims':   [256, 512],
+            'activation':         'leaky_relu',
+            'dropout_rate':       dropout_rate,
+            'use_batch_norm':     True,
+            'use_residual':       True,
+            'use_skip_connections': True,
+            'pooling':            'add',
+            'switch_head_type':   'mlp',
+            'switch_head_layers': 3,
+            'switch_attention_heads': 4,
+            'use_gated_mp':       True,
+            'use_phyr':           False,
+            'enforce_radiality':  False,
+
+            'max_n':              max_n_val,
+            'max_e':              max_e_val,
+            'cvx_layer':          cvx_layer,
+        }
+
+        # Finally instantiate:
+        self.model = cls(
+            node_input_dim = sample.x.shape[1],
+            edge_input_dim = sample.edge_attr.shape[1],
+            **model_kwargs
+        ).to(self.device)
+                
 
         head = state.get("switch_head.1.weight")
         if head is not None:
@@ -439,14 +538,14 @@ class Predictor:
                 print("Detected multiclass classification head, setting output type accordingly.")
                 config["output_type"] = "multiclass"
                 config["num_classes"] = 2
+       
 
-        self.model = cls(
-            node_input_dim=node_dim,
-            edge_input_dim=edge_dim,
-            # output_type=config.get("output_type", "binary"),
-            #  num_classes=config.get("num_classes", 2),
-            **config.get("model_kwargs", {})
-        ).to(device)
+        # self.model = cls(
+        #     node_input_dim=node_dim,
+        #     edge_input_dim=edge_dim,
+        #     #output_type=config.get("output_type", "binary"),
+        #     #num_classes=config.get("num_classes", 2),
+        #     **model_kwargs).to(device)
         self.model.load_state_dict(state, strict=False)
         self.model.eval()
         self.loader = sample_loader
@@ -1006,16 +1105,84 @@ class Optimizer:
 
         csv_path = self.saver.save_csv()
         return results, csv_path
+    
+def calculate_topology_error_hamming(y_true, y_pred):
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    if len(y_true) != len(y_pred):
+        min_len = min(len(y_true), len(y_pred))
+        y_true = y_true[:min_len]
+        y_pred = y_pred[:min_len]
+    
+    if len(y_true) == 0:
+        return 1.0
+    hamming_distance = np.sum(y_true != y_pred)
+    topology_error = hamming_distance / len(y_true)
+    
+    return topology_error
+
+def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor, 
+                             threshold: float = 0.5, eps: float = 1e-8) -> dict:
+    if scores.ndim == targets.ndim + 1 and scores.size(-1) == 1:
+        scores = scores.squeeze(-1)
+
+    targets = targets.float()
+    preds = (scores > threshold).float()
+
+    tp = (preds * targets).sum()
+    fp = (preds * (1 - targets)).sum()
+    fn = ((1 - preds) * targets).sum()
+    tn = ((1 - preds) * (1 - targets)).sum()
+
+    accuracy = (tp + tn) / (tp + fp + fn + tn + eps)
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1 = 2 * precision * recall / (precision + recall + eps)
+    jaccard = tp / (tp + fp + fn + eps)
+    dice = 2 * tp / (2 * tp + fp + fn + eps)
+    
+    mcc_numerator = (tp * tn) - (fp * fn)
+    mcc_denominator = torch.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    mcc = mcc_numerator / (mcc_denominator + eps)
+    
+    sensitivity = recall
+    specificity = tn / (tn + fp + eps)
+    balanced_acc = (sensitivity + specificity) / 2
+    
+    f1_minority = 2 * tn / (2 * tn + fp + fn + eps)
+
+    TopologyError = calculate_topology_error_hamming(targets.cpu().numpy(), preds.cpu().numpy())
+
+    return {
+        "accuracy": accuracy.item(),
+        "precision": precision.item(),
+        "recall": recall.item(),
+        "f1": f1.item(),
+        "mcc": mcc.item(), 
+        "balanced_acc": balanced_acc.item(),  
+        "f1_minority": f1_minority.item(), 
+        "sensitivity": sensitivity.item(),
+        "specificity": specificity.item(),
+        "jaccard": jaccard.item(),
+        "dice": dice.item(),
+        "tp": tp.item(), "fp": fp.item(),
+        "fn": fn.item(), "tn": tn.item(),
+        "TopologyError": TopologyError,  
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict-then-Optimize Pipeline with Explicit Saving")
     parser.add_argument("--config_path", type=str,
                        # default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------devout-glitter-19.yaml",
-                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\AdvancedMLP------None.yaml",
+                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------devout-glitter-19.yaml",
+                        default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\final_models\cvx------fragrant-shape-31.yaml",
+                        
                         help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\None-Best.pt",
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt",
                         #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt", 
+                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\final_models\CVX-fragrant-shape-31-Best.pt",
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
                         default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test"],
@@ -1058,7 +1225,7 @@ if __name__ == "__main__":
     loaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
-        dataset_type="default",
+        dataset_type="cvx",
         shuffle=False,
         batch_size=1)
     test_loader = loaders.get("test", None)
@@ -1069,6 +1236,9 @@ if __name__ == "__main__":
     
     print(f"Test loader created with {len(test_loader.dataset)} samples")
     print(f"Graph IDs: {graph_ids[:5]}..." if len(graph_ids) > 5 else f"Graph IDs: {graph_ids}")
+
+    print(f"first sample in test_loader: {test_loader.dataset[0]}")
+    print(f"first edge_y sample in test_loader: {test_loader.dataset[0].edge_y}")
 
     # Extract job name from model_path
     job_name = Path(args.model_path).stem
@@ -1083,8 +1253,9 @@ if __name__ == "__main__":
 
     predictions = None
     gnn_times = None
-    if args.predict:         
-        print(f"\n ===================================================\n       RUN PREDICTIONS \n =================================================== \n ")   
+    # Start of the plotting and metric calculation logic
+    if args.predict:           
+        print(f"\n ===================================================\n      RUN PREDICTIONS \n =================================================== \n ")   
         print("Starting prediction...")
         predictor = Predictor(
             model_path=args.model_path,
@@ -1094,84 +1265,160 @@ if __name__ == "__main__":
         )
         predictions, gnn_times = predictor.run(test_loader, graph_ids=graph_ids)
 
-        # print(f"Prediction keys: {sorted(predictions.keys())}")
-        # print(f"Graph IDs: {sorted(graph_ids)}")
-        # print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
-        # print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
-        # # Convert to numpy arrays
-        # class_0_preds = np.array(predictor.class_0_predictions)
-        # class_1_preds = np.array(predictor.class_1_predictions)
-
-        # class_0_high_conf = class_0_preds[class_0_preds > 0.5]
-        # class_1_high_conf = class_1_preds[class_1_preds > 0.5]
-        # # create 50 bins in [0.5, 1.0]
-
-        # bins = np.linspace(0.5, 1.0, 51)
-
-        # # IEEE column width plotting setup
-        # column_width_pt = 246.0  # IEEE single column width in points
-        # inches_per_pt = 1.0/72.27
-        # fig_w = column_width_pt * inches_per_pt
-        # fig_h = fig_w * 0.6  # Slightly taller aspect ratio for better readability
-
-        # fig, ax0 = plt.subplots(figsize=(fig_w, fig_h))
-
-        # # Class 0 (Open) on left
-        # n0, bins0, patches0 = ax0.hist(
-        #     class_0_high_conf, bins=bins,
-        #     alpha=0.5, color='red', edgecolor='red', linewidth=0.5,
-        #     label='Class 0 (Open)'
-        # )
-        # ax0.set_xlabel('Confidence', fontsize=8)
-        # ax0.set_ylabel('Freq Class 0', fontsize=8, color='red')
-        # ax0.tick_params(axis='y', labelcolor='red', labelsize=7, width=0.5, length=3)
-        # ax0.yaxis.set_major_locator(ticker.MultipleLocator(10))
-
-        # # Class 1 (Closed) on right
-        # ax1 = ax0.twinx()
-        # n1, bins1, patches1 = ax1.hist(
-        #     class_1_high_conf, bins=bins,
-        #     alpha=0.5, color='blue', edgecolor='blue', linewidth=0.5,
-        #     label='Class 1 (Closed)'
-        # )
-        # ax1.set_ylabel('Freq Class 1', fontsize=8, color='blue')
-        # ax1.tick_params(axis='y', labelcolor='blue', labelsize=7, width=0.5, length=3)
-        # #ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.1))
-
-        # # X-axis ticks every 0.1
-        # ax0.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
-
-        # # Title
-        # ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
-
-        # # Legend centered top
-        # h0, l0 = ax0.get_legend_handles_labels()
-        # h1, l1 = ax1.get_legend_handles_labels()
-        # ax0.legend(h0 + h1, l0 + l1,
-        #         loc='upper center',
-        #         bbox_to_anchor=(0.5, 1.0),
-        #         fontsize=7,
-        #         ncol=1)
-
-        # plt.tight_layout(pad=0.5)
-        # fig.savefig('confidence_histograms_double_axis_png.png',
-        #             bbox_inches='tight',
-        #             pad_inches=0.05)
-                                                
+        print(f"Prediction keys: {sorted(predictions.keys())}")
+        print(f"Graph IDs: {sorted(graph_ids)}")
+        print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
+        print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
         
-    if args.optimize and predictions is not None:
-        print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
-        print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
+        # Collect all predictions and ground truths for overall metrics
+        all_predicted_scores = [] 
+        all_true_labels = []
 
-        optimizer = Optimizer(
-            folder_name=args.folder_names[0],  
-            predictions=predictions,
-            saver=saver,
-            warmstart_mode=args.warmstart_mode,
-            confidence_threshold=args.confidence_threshold,
-            gnn_times=gnn_times,
+        bins = np.linspace(0.5, 1.0, 51)
+
+        correct_0_conf = []
+        incorrect_0_conf = []
+        correct_1_conf = []
+        incorrect_1_conf = []
+
+        prediction_idx_offset = 0
+
+        for i, data_batch in enumerate(test_loader):
+            true_labels_graph = data_batch.edge_y.cpu().numpy().flatten()
+            
+            num_edges_in_graph = len(true_labels_graph)
+            
+            graph_class_0_probs = predictor.class_0_predictions[prediction_idx_offset : prediction_idx_offset + num_edges_in_graph]
+            graph_class_1_probs = predictor.class_1_predictions[prediction_idx_offset : prediction_idx_offset + num_edges_in_graph]
+            
+            all_predicted_scores.extend(graph_class_1_probs)
+            all_true_labels.extend(true_labels_graph)
+
+            for j in range(num_edges_in_graph):
+                prob_0 = graph_class_0_probs[j]
+                prob_1 = graph_class_1_probs[j]
+                true_label = true_labels_graph[j]
+
+                predicted_prob = max(prob_0, prob_1)
+                predicted_label = 0 if prob_0 > prob_1 else 1
+
+                if predicted_prob > 0.5:
+                    if predicted_label == 0:
+                        if true_label == 0:
+                            correct_0_conf.append(predicted_prob)
+                        else:
+                            incorrect_0_conf.append(predicted_prob)
+                    elif predicted_label == 1:
+                        if true_label == 1:
+                            correct_1_conf.append(predicted_prob)
+                        else:
+                            incorrect_1_conf.append(predicted_prob)
+            
+            prediction_idx_offset += num_edges_in_graph
+
+        # Calculate and print overall metrics
+        overall_scores_tensor = torch.tensor(all_predicted_scores, dtype=torch.float32, device=device)
+        overall_targets_tensor = torch.tensor(all_true_labels, dtype=torch.float32, device=device)
+        
+        metrics = compute_switch_metrics(overall_scores_tensor, overall_targets_tensor)
+        print("\nModel Performance Metrics on Test Set:")
+        for metric_name, value in metrics.items():
+            print(f"  {metric_name}: {value:.4f}")
+
+        column_width_pt = 246.0
+        inches_per_pt = 1.0/72.27
+        fig_w = column_width_pt * inches_per_pt
+        fig_h = fig_w * 0.6
+
+        fig, ax0 = plt.subplots(figsize=(fig_w, fig_h))
+
+        color_c0_correct = 'red'
+        color_c1_correct = 'blue'
+        color_c0_incorrect = 'darkred'
+        color_c1_incorrect = 'darkblue'
+
+        n0_correct, _, _ = ax0.hist(
+            correct_0_conf, bins=bins,
+            color=color_c0_correct, edgecolor='red', linewidth=0.5,
+            alpha=0.5,
+            label='_nolegend_',
+            histtype='bar'
         )
-        final_results, csv_path = optimizer.run(num_workers=args.num_workers)
+        n0_incorrect, _, _ = ax0.hist(
+            incorrect_0_conf, bins=bins,
+            color=color_c0_incorrect, edgecolor='darkred', linewidth=0.5,
+            label='_nolegend_',
+            histtype='bar',
+            bottom=n0_correct
+        )
+
+        ax0.set_xlabel('Confidence', fontsize=8)
+        ax0.set_ylabel('Frequency', fontsize=8)
+        ax0.tick_params(axis='y', labelsize=7, width=0.5, length=3)
+        ax0_max_y = max(n0_correct.max() if len(n0_correct) > 0 else 0, n0_incorrect.max() if len(n0_incorrect) > 0 else 0)
+        if ax0_max_y > 0:
+            ax0.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        
+        ax1 = ax0.twinx()
+
+        n1_correct, _, _ = ax1.hist(
+            correct_1_conf, bins=bins,
+            color=color_c1_correct, edgecolor='blue', linewidth=0.5,
+            alpha=0.5,
+            label='_nolegend_',
+            histtype='bar'
+        )
+        n1_incorrect, _, _ = ax1.hist(
+            incorrect_1_conf, bins=bins,
+            color=color_c1_incorrect, edgecolor='darkblue', linewidth=0.5,
+            label='_nolegend_',
+            histtype='bar',
+            bottom=n1_correct
+        )
+
+        ax1.set_ylabel('Frequency', fontsize=8)
+        ax1.tick_params(axis='y', labelsize=7, width=0.5, length=3)
+        ax1_max_y = max(n1_correct.max() if len(n1_correct) > 0 else 0, n1_incorrect.max() if len(n1_incorrect) > 0 else 0)
+        if ax1_max_y > 0:
+            ax1.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+
+        ax0.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
+
+        # Adjust title position further upward (increased y from 1.22 to 1.30)
+        ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10, y=1.30)
+
+        legend_elements = [
+            Patch(facecolor=color_c0_correct, edgecolor='red', label='Class 0 (Correct)'),
+            Patch(facecolor=color_c0_incorrect, edgecolor='darkred', label='Class 0 (Incorrect)'),
+            Patch(facecolor=color_c1_correct, edgecolor='blue', label='Class 1 (Correct)'),
+            Patch(facecolor=color_c1_incorrect, edgecolor='darkblue', label='Class 1 (Incorrect)')
+        ]
+        ax0.legend(handles=legend_elements,
+                loc='lower center',
+                bbox_to_anchor=(0.5, 1.0),
+                fontsize=7,
+                ncol=2)
+
+        plt.tight_layout(pad=0.5)
+        fig.savefig('confidence_histograms_stacked_double_axis_png.png',
+                    bbox_inches='tight',
+                    pad_inches=0.05,
+                    dpi=300)
+                                                        
+        
+    # if args.optimize and predictions is not None:
+    #     print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
+    #     print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
+
+    #     optimizer = Optimizer(
+    #         folder_name=args.folder_names[0],  
+    #         predictions=predictions,
+    #         saver=saver,
+    #         warmstart_mode=args.warmstart_mode,
+    #         confidence_threshold=args.confidence_threshold,
+    #         gnn_times=gnn_times,
+    #     )
+    #     final_results, csv_path = optimizer.run(num_workers=args.num_workers)
         
         # if args.visualize:
         #     # Save visualizations for all graphs
@@ -1179,38 +1426,38 @@ if __name__ == "__main__":
         #     saver.save_all_visualizations()
         #     print(f"Visualizations saved to: {saver.visualization_folder}")
 
-        print(f"Optimization completed with {len(final_results)} results.")
-        print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
-        if csv_path:
-            print(f"Results saved to CSV: {csv_path}")
-        print(f"Warmstart networks saved to: {saver.warmstart_networks_folder}")
-        print(f"Final optimized networks saved to: {saver.prediction_networks_folder}")
+    #     print(f"Optimization completed with {len(final_results)} results.")
+    #     print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
+    #     if csv_path:
+    #         print(f"Results saved to CSV: {csv_path}")
+    #     print(f"Warmstart networks saved to: {saver.warmstart_networks_folder}")
+    #     print(f"Final optimized networks saved to: {saver.prediction_networks_folder}")
         
-        # Print summary statistics
-        successful = sum(1 for r in final_results.values() if r.get('success', False))
-        total = len(final_results)
-        if successful > 0:
-            avg_solve_time = sum(r.get('solve_time', 0) for r in final_results.values() if r.get('success')) / successful
-            avg_switches_changed = sum(r.get('switches_changed', 0) for r in final_results.values() if r.get('success')) / successful
-        else:
-            avg_solve_time = 0
-            avg_switches_changed = 0
+    #     # Print summary statistics
+    #     successful = sum(1 for r in final_results.values() if r.get('success', False))
+    #     total = len(final_results)
+    #     if successful > 0:
+    #         avg_solve_time = sum(r.get('solve_time', 0) for r in final_results.values() if r.get('success')) / successful
+    #         avg_switches_changed = sum(r.get('switches_changed', 0) for r in final_results.values() if r.get('success')) / successful
+    #     else:
+    #         avg_solve_time = 0
+    #         avg_switches_changed = 0
     
-        print(f"\nOptimization Summary ({args.warmstart_mode} warmstart):")
-        print(f"  Successful solves: {successful}/{total}")
-        if total > successful:
-            print(f"  Failed solves: {total - successful}")
-        print(f"  Average solve time: {avg_solve_time:.2f}s")
-        print(f"  Average switches changed: {avg_switches_changed:.1f}")
-        if args.warmstart_mode == "hard":
-            print(f"  Confidence threshold: {args.confidence_threshold}")
+    #     print(f"\nOptimization Summary ({args.warmstart_mode} warmstart):")
+    #     print(f"  Successful solves: {successful}/{total}")
+    #     if total > successful:
+    #         print(f"  Failed solves: {total - successful}")
+    #     print(f"  Average solve time: {avg_solve_time:.2f}s")
+    #     print(f"  Average switches changed: {avg_switches_changed:.1f}")
+    #     if args.warmstart_mode == "hard":
+    #         print(f"  Confidence threshold: {args.confidence_threshold}")
         
-        print(f"\nFolder structure created:")
-        print(f"  Root predictions folder: {saver.predictions_folder}")
-        print(f"  Warmstart folder: {saver.warmstart_folder}")
-        print(f"  Final predictions folder: {saver.prediction_folder}")
-        if csv_path:
-            print(f"  CSV file: {csv_path}")
+    #     print(f"\nFolder structure created:")
+    #     print(f"  Root predictions folder: {saver.predictions_folder}")
+    #     print(f"  Warmstart folder: {saver.warmstart_folder}")
+    #     print(f"  Final predictions folder: {saver.prediction_folder}")
+    #     if csv_path:
+    #         print(f"  CSV file: {csv_path}")
     
-    elif args.optimize and predictions is None:
-        print("Cannot run optimization without predictions. Run prediction step first.")
+    # elif args.optimize and predictions is None:
+    #     print("Cannot run optimization without predictions. Run prediction step first.")

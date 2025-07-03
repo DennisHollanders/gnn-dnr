@@ -15,14 +15,25 @@ mkdir -p "$LOG_DIR"
 
 # Model configurations
 declare -A MODELS=(
-  ["GAT"]="$BASE_DIR/model_search/models/final_models/whole-paper-13-Best.pt"
-  ["GIN"]="$BASE_DIR/model_search/models/final_models/devout-glitter-19-Best.pt"
-  ["GCN"]="$BASE_DIR/model_search/models/final_models/ancient-bush-22-Best.pt"
+  ["GAT"]="$BASE_DIR/model_search/models/AdvancedMLP/GAT-stage2-hyperparameter-tuning-Best.pt"
+  ["GIN"]="$BASE_DIR/model_search/models/AdvancedMLP/None-Best.pt"
+  ["GCN"]="$BASE_DIR/model_search/models/AdvancedMLP/GCN-stage2-hyperparameter-tuning-Best.pt"
 )
 declare -A CONFIGS=(
-  ["GAT"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------whole-paper-13.yaml"
-  ["GIN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------devout-glitter-19.yaml"
-  ["GCN"]="$BASE_DIR/model_search/models/final_models/AdvancedMLP------ancient-bush-22.yaml"
+  ["GAT"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------GAT-stage2-hyperparameter-tuning.yaml"
+  ["GIN"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------None.yaml"
+  ["GCN"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------GCN-stage2-hyperparameter-tuning.yaml"
+)
+
+declare -A CPUS_PER_MODEL=(
+  ["GAT"]=20
+  ["GIN"]=24
+  ["GCN"]=24
+)
+declare -A PARTITIONS_PER_MODEL=(
+  ["GAT"]="tue.default.q"
+  ["GIN"]="be.student.q"
+  ["GCN"]="elec-ees-empso.cpu.q"
 )
 
 # Grab one “first” model for the global warm-start job
@@ -60,6 +71,8 @@ submit_job() {
     local predict_flag=$8
     local optimize_flag=$9
 
+    local cpus="${CPUS_PER_MODEL[$model_name]}"
+    local partition="${PARTITIONS_PER_MODEL[$model_name]}"
     local job_script="$LOG_DIR/${job_name}.slurm"
 
     cat > "$job_script" <<EOF
@@ -69,10 +82,10 @@ submit_job() {
 #SBATCH --error=${LOG_DIR}/${job_name}_%j.err
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=${NTASKS_PER_NODE}
-#SBATCH --cpus-per-task=${CPUS}
+#SBATCH --cpus-per-task=${cpus}
 #SBATCH --mem=${MEMORY}
 #SBATCH --time=${TIME_LIMIT}
-#SBATCH --partition=${PARTITION}
+#SBATCH --partition=${partition}
 
 module purge
 module load Python/3.11.3
@@ -181,9 +194,6 @@ for model in "${!MODELS[@]}"; do
   echo "=> Submitted $job_count jobs so far"
 done
 
-# Add the missing baseline job
-submit_job "optimization_without_warmstart" "$GLOBAL_MODEL" "$GLOBAL_MP" "$GLOBAL_CP" "optimization_without_warmstart" "round" 0.5 "" "--optimize"
-((job_count++))
 
 # one global "optimization with warmstart" job (using first model/config)
 submit_job "optimization_with_warmstart" "$GLOBAL_MODEL" "$GLOBAL_MP" "$GLOBAL_CP" "soft" "round" 0.5 "" "--optimize"

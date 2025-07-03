@@ -1,5 +1,6 @@
 import argparse
 import os
+from sqlalchemy import FallbackAsyncAdaptedQueuePool
 import yaml
 import torch
 import torch.optim as optim
@@ -184,7 +185,8 @@ def main():
         args.model_module = "AdvancedMLP"  
         args.seed =stage1_checkpoint["seed"]
 
-    args.folder_names = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"  ]
+    #args.folder_names = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"  ]
+    args.folder_names = ["data/split_datasets-without-synthetic/train", "data/split_datasets-without-synthetic/validation", "data/split_datasets-without-synthetic/test"]
     import random
     seed = args.seed
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -198,7 +200,7 @@ def main():
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     final_config = vars(args)
-    print("use_edge_mlp in stage1_config:", "use_edge_mlp" in stage1_config)
+
     # Print with YAML formatting
     print("========== FINAL CONFIG STRUCTURE ==========")
     print(yaml.dump(final_config, sort_keys=False, default_flow_style=False))
@@ -213,9 +215,9 @@ def main():
     model_class = getattr(model_module, args.model_module)
     print(f"Successfully imported model: {args.model_module}")
 
-    if args.wandb:
-        run = wandb.init(project=args.description, job_type="train", config=vars(args))
-        args.job_name = run.name    
+    args.description = "Ablation-studies"
+    run = wandb.init(project=args.description, job_type="train", config=vars(args))
+    args.job_name = run.name    
 
     # Save the configuration file in the model folder's config_files subdirectory.
     file_name_yaml = save_args_to_yaml(args, model_folder)
@@ -235,7 +237,7 @@ def main():
         max_edges=args.max_edges,
         train_ratio=args.train_ratio,
         seed=args.seed,
-        num_workers=args.num_workers,
+        num_workers= 4, 
         batching_type=args.batching_type,
         shuffle=True,  # Set shuffle to True for training data
     )
@@ -278,6 +280,7 @@ def main():
     print("Loaded model_kwargs: =================================================================")
     for k, v in args.model_kwargs.items():
         print(f"{k}: {v}")
+
     model = model_class(**model_kwargs)
     if args.stage1_checkpoint:
         logger.info(f"Loading stage 1 checkpoint from {args.stage1_checkpoint}")
@@ -309,6 +312,7 @@ def main():
         'lambda_connectivity': getattr(args, 'lambda_connectivity', 0.05),
         'lambda_radiality': getattr(args, 'lambda_radiality', 0.05),
     }
+
     
     writer = SummaryWriter(log_dir="runs/grad_debug")
 
@@ -322,7 +326,7 @@ def main():
     patience = 0
     global_step = 0 
 
-    for epoch in range(61):
+    for epoch in range(300):
         if epoch == 0:
             logger.info(f"Training config - LR: {args.learning_rate}, "
                 f"WD: {args.weight_decay}, Batch size: {args.batch_size}, "
@@ -357,6 +361,7 @@ def main():
     if test_loader:
         test_loss, test_dict = test(model, test_loader, criterion, device, **lambda_dict) 
         logger.info(f"Test Loss: {test_loss:.4f}")
+        logger.info(f"Test Metrics: {test_dict}")
         if args.wandb:
             wandb.log({"test_loss": test_loss, **test_dict}) 
     logger.info(f"Training completed. Best validation loss: {best_loss:.4f}")

@@ -453,7 +453,7 @@ if __name__ == "__main__":
         predictions_folder = sys.argv[1]
     else:
         # Default path for testing
-        predictions_folder = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\predictions"
+        predictions_folder = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\test\predictions"
     
     print(f"Using predictions folder: {predictions_folder}")
     
