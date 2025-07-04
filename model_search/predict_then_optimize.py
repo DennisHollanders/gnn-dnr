@@ -652,22 +652,6 @@ class WarmstartSOCP(SOCP_class):
         model = super().create_model()
         self.logger.info("MANUAL OVERRIDE: Forcing ALL lines/switches to be OPEN.")
         fixed_count = 0
-        if self.toggles.get('all_lines_are_switches', False):
-            # If all lines are considered switches
-            for l_id in model.lines:
-                model.line_status[l_id].fix(1) # Fix to 0 (open)
-                fixed_count += 1
-            self.logger.info(f"Fixed {fixed_count} line_status variables to 0 (OPEN) due to manual override.")
-        else:
-            # If using explicit switch_status variables
-            if hasattr(model, 'model_switches'):
-                for s_idx in model.model_switches:
-                    model.switch_status[s_idx].fix(1) # Fix to 0 (open)
-                    fixed_count += 1
-                self.logger.info(f"Fixed {fixed_count} switch_status variables to 0 (OPEN) due to manual override.")
-            else:
-                self.logger.warning("Attempted to force all switches open, but model.model_switches not found.")
-        return model
         if self.fixed_lines:
             fixed_count = 0
             for line_id, val in self.fixed_lines.items():
