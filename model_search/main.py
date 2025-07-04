@@ -185,8 +185,8 @@ def main():
         args.model_module = "AdvancedMLP"  
         args.seed =stage1_checkpoint["seed"]
 
-    #args.folder_names = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"  ]
-    args.folder_names = ["data/split_datasets-without-synthetic/train", "data/split_datasets-without-synthetic/validation", "data/split_datasets-without-synthetic/test"]
+    args.folder_names = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"  ]
+    #args.folder_names = ["data/split_datasets-without-synthetic/train", "data/split_datasets-without-synthetic/validation", "data/split_datasets-without-synthetic/test"]
     import random
     seed = args.seed
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -341,8 +341,7 @@ def main():
             logger.info(f"\n Epoch {epoch+1}/{args.epochs} - Train Metrics: {train_dict}\n ")
             logger.info(f"Epoch {epoch+1}/{args.epochs} - Val Metrics: {val_dict} \n ")
             
-        if args.wandb:
-            wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
+        wandb.log({"train_loss": train_loss, "val_loss": val_loss, **train_dict, **val_dict})
         if val_loss < best_loss:
             best_loss = val_loss
             patience = 0

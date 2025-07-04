@@ -1,4 +1,4 @@
-import pandas as pd
+import pandas as pd 
 import json
 import numpy as np
 from pathlib import Path
@@ -459,9 +459,9 @@ if __name__ == "__main__":
     
     # Map your actual model names to the desired display names
     model_mapping = {
-        "whole-paper-13": "GAT",       
-        "devout-glitter-19": "GIN",     
-        "ancient-bush-22": "GCN",       
+        "GAT-stage2-hyperparameter-tuning-Best": "GAT",       
+        "AdvancedMLP------GIN-stage2-hyperparameter": "GIN",     
+        "GCN-stage2-hyperparameter-tuning-Best": "GCN",       
     }
     
     # Process all results and generate table

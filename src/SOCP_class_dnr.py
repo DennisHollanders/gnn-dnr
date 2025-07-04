@@ -313,9 +313,17 @@ class SOCP_class:
         to_bus_map   = {l: int(self.line_df.to_bus[l])   for l in model.lines}
         model.from_bus = Param(model.lines, initialize=lambda m, l: from_bus_map[l])
         model.to_bus   = Param(model.lines, initialize=lambda m, l: to_bus_map[l])
+
+        total_physical_switches = len(self.switch_df[self.switch_df.et == 'l']) #
         
-        #DTDForbidden
-        # :TODO remove big_M voltage add  slack
+        if self.toggles.get('all_lines_are_switches', False): #
+            self.logger.info(f"Total physical switches (lines with switches) in network: {total_physical_switches}") #
+            self.logger.info(f"Model will use {len(model.lines)} line_status variables as switch decision variables (all lines are switches).") #
+        else: #
+            self.logger.info(f"Total physical switches (lines with switches) in network: {total_physical_switches}") #
+            self.logger.info(f"Model will use {len(model.model_switches) if hasattr(model, 'model_switches') else 0} explicit switch_status variables.") #
+        
+        
         # ------------------------------------------------------------------
         #  Variables
         # ------------------------------------------------------------------

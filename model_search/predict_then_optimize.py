@@ -1,10 +1,7 @@
-from pyexpat import model
-from random import shuffle
 import sys
 import os
 import torch
 import torch.multiprocessing as mp
-from torch_geometric.data import DataLoader
 import pandapower as pp
 import yaml
 import importlib
@@ -12,9 +9,6 @@ from pathlib import Path
 from tqdm import tqdm
 import argparse
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-from matplotlib.patches import Patch
-import logging
 import pandas as pd
 import json
 import numpy as np
@@ -29,10 +23,7 @@ from model_search.evaluation.evaluation import load_config_from_model_path
 
 from model_search.models.AdvancedMLP.AdvancedMLP import PhysicsInformedRounding
 from data_generation.define_ground_truth import is_radial_and_connected
-from model_search.load_data import *
-
-from models.cvx.cvx import build_cvx_layer
-
+from model_search.load_data2 import *
 
 
 class NetworkSwitchManager:
@@ -415,7 +406,7 @@ class Predictor:
     def __init__(self, model_path, config_path, device, sample_loader):
         self.device = device
 
-        config = (yaml.safe_load(open(config_path, encoding='utf-8')) if config_path
+        config = (yaml.safe_load(open(config_path)) if config_path
                   else load_config_from_model_path(model_path))
         self.eval_args = argparse.Namespace(**config)
         self.gnn_times = {}
@@ -428,104 +419,10 @@ class Predictor:
         module = importlib.import_module(
             f"models.{self.eval_args.model_module}.{self.eval_args.model_module}"
         )
-        
         cls = getattr(module, self.eval_args.model_module)
-        
-        
+
         ckpt = torch.load(model_path, map_location=device)
         state = ckpt.get("model_state_dict", ckpt)
-        sdict  = ckpt.get("model_state_dict", ckpt)
-
-
-        # Print state dict for debugging
-        for key, item in sdict.items():
-            print(f"Key: {key}, Shape: {item.shape}")
-
-        # Reconstruct config from state dict
-        # Node MLP configuration - from gnn.node_mlp layers
-        node_hidden_dims = []
-        if "gnn.node_mlp.layers.0.weight" in sdict:
-            node_hidden_dims.append(sdict["gnn.node_mlp.layers.0.weight"].shape[0])  # 256
-        if "gnn.node_mlp.layers.1.weight" in sdict:
-            node_hidden_dims.append(sdict["gnn.node_mlp.layers.1.weight"].shape[0])  # 512
-        if "gnn.node_mlp.layers.2.weight" in sdict:
-            node_hidden_dims.append(sdict["gnn.node_mlp.layers.2.weight"].shape[0])  # 512
-        
-        # Edge MLP configuration - from gnn.edge_mlp layers
-        edge_hidden_dims = []
-        if "gnn.edge_mlp.layers.0.weight" in sdict:
-            edge_hidden_dims.append(sdict["gnn.edge_mlp.layers.0.weight"].shape[0])  # 256
-        if "gnn.edge_mlp.layers.1.weight" in sdict:
-            edge_hidden_dims.append(sdict["gnn.edge_mlp.layers.1.weight"].shape[0])  # 512
-
-        # GNN configuration - from gnn.gnn_layers
-        gnn_hidden_dim = 360  # From gnn.gnn_layers.0.node_transform.weight output dim
-        gnn_layers = 1  # Only one gnn layer visible in state dict
-        
-        print(f"Recovered node_hidden_dims = {node_hidden_dims}")
-        print(f"Recovered edge_hidden_dims = {edge_hidden_dims}")
-        print(f"GNN hidden dim = {gnn_hidden_dim}")
-
-        # Detect output type from switch head
-        head = state.get("gnn.switch_head.1.weight")
-        output_type = "binary"
-        num_classes = 2
-        if head is not None:
-            dim = head.shape[0]
-            if dim == 1:
-                print("Detected binary classification head, setting output type accordingly.")
-                output_type = "binary"
-                num_classes = 2
-            elif dim == 2:
-                print("Detected multiclass classification head, setting output type accordingly.")
-                output_type = "multiclass"
-                num_classes = 2
-        # whatever L you used
-        dropout_rate = 0.0
-        # Build your CVX layer
-        max_n_val, max_e_val = 301, 310
-        cvx_layer = build_cvx_layer(max_n=max_n_val, max_e=max_e_val)
-
-        # Overwrite model_kwargs in one shot
-        model_kwargs = {
-            # from your YAML/fragrant-shape-31 run:
-            'output_type':        'binary',
-            'num_classes':        2,
-            'gnn_type':           'GCN',
-            'gnn_layers':         1,
-            'gnn_hidden_dim':     360,
-            'gin_eps':            0.0,
-            'gat_heads':          4,
-            'gat_dropout':        0.1,
-            'use_node_mlp':       True,
-            'node_hidden_dims':   [256, 512, 512],
-            'use_edge_mlp':       True,
-            'edge_hidden_dims':   [256, 512],
-            'activation':         'leaky_relu',
-            'dropout_rate':       dropout_rate,
-            'use_batch_norm':     True,
-            'use_residual':       True,
-            'use_skip_connections': True,
-            'pooling':            'add',
-            'switch_head_type':   'mlp',
-            'switch_head_layers': 3,
-            'switch_attention_heads': 4,
-            'use_gated_mp':       True,
-            'use_phyr':           False,
-            'enforce_radiality':  False,
-
-            'max_n':              max_n_val,
-            'max_e':              max_e_val,
-            'cvx_layer':          cvx_layer,
-        }
-
-        # Finally instantiate:
-        self.model = cls(
-            node_input_dim = sample.x.shape[1],
-            edge_input_dim = sample.edge_attr.shape[1],
-            **model_kwargs
-        ).to(self.device)
-                
 
         head = state.get("switch_head.1.weight")
         if head is not None:
@@ -538,21 +435,45 @@ class Predictor:
                 print("Detected multiclass classification head, setting output type accordingly.")
                 config["output_type"] = "multiclass"
                 config["num_classes"] = 2
-       
 
-        # self.model = cls(
-        #     node_input_dim=node_dim,
-        #     edge_input_dim=edge_dim,
-        #     #output_type=config.get("output_type", "binary"),
-        #     #num_classes=config.get("num_classes", 2),
-        #     **model_kwargs).to(device)
+        self.model = cls(
+            node_input_dim=node_dim,
+            edge_input_dim=edge_dim,
+            **config.get("model_kwargs", {})
+        ).to(device)
         self.model.load_state_dict(state, strict=False)
         self.model.eval()
         self.loader = sample_loader
 
-    def run(self, loader=None, graph_ids=None):
+        self.initial_states_history = {} # Used for initial state vs GNN prediction
+        self.gnn_predictions_history = {} # GNN's raw binary prediction
+        self.ground_truth_history = {} # New: To store ground truth from edge_y
+
+        self.pp_networks_for_manager = None # Will be set in run()
+
+    def run(self, loader=None, graph_ids=None, pp_networks_for_manager=None):
         loader = loader or self.loader
         preds = {}
+        
+        # Ensure pp_networks_for_manager is set
+        if pp_networks_for_manager is not None:
+            self.pp_networks_for_manager = pp_networks_for_manager
+        
+        if self.pp_networks_for_manager is None:
+            raise ValueError("Predictor requires pp_networks_for_manager to be set for initial state comparison and ground truth extraction.")
+
+        # Initialize counters for GNN prediction analysis
+        total_graphs_processed_successfully = 0
+        gnn_predicts_initial_count = 0
+        gnn_correctly_predicts_gt_count = 0 # New: Count graphs where GNN matches ground truth exactly
+
+        total_switches_for_initial_comparison = 0 # Sum of len(initial_switch_states)
+        total_switches_changed_by_gnn_vs_initial = 0
+
+        total_switches_for_gt_comparison = 0 # Sum of len(ground_truth_states)
+        total_switches_changed_by_gnn_vs_gt = 0
+
+
         print(f"Predicting on {len(loader.dataset)} samples with {self.eval_args.model_module} model…")
         with torch.no_grad():
             for i, batch in enumerate(tqdm(loader, desc="Predicting", leave=False)):
@@ -560,61 +481,213 @@ class Predictor:
                 batch = batch.to(self.device)
                 out = self.model(batch)
                 logits = out.get("switch_logits")
+                
                 if logits.dim() == 1 or (logits.dim() == 2 and logits.size(1) == 1):
                     prob_closed = torch.sigmoid(logits).squeeze(-1)
                     prob_open = 1.0 - prob_closed
                     probs = torch.stack([prob_open, prob_closed], dim=-1)  
                 elif logits.dim() >= 2 and logits.size(-1) == 2:
-                    # 2
                     probs = torch.softmax(logits, dim=-1)  
                 else:
                     raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
                 
 
                 gnn_time = time.time() - start
-                probs_list = probs.cpu().numpy().tolist()
+                probs_list = probs.cpu().numpy().tolist() # List of [prob_open, prob_closed] pairs
                 self.class_0_predictions.extend([p[0] for p in probs_list])
                 self.class_1_predictions.extend([p[1] for p in probs_list])
 
-                probs = probs.cpu().numpy().tolist()
-                
                 gid =  batch.graph_id[0]
+
+                # --- Get Initial Switch States for Comparison (Option 1) ---
+                current_mst_net = self.pp_networks_for_manager["mst"][gid]
+                temp_initial_manager = NetworkSwitchManager(current_mst_net)
+                initial_switch_states = temp_initial_manager.get_initial_states() 
+
+                # --- Get Ground Truth States for Comparison (Option 2) ---
+                # This uses batch.edge_y, assuming it's aligned with the GNN's output.
+                if hasattr(batch, 'edge_y') and batch.edge_y is not None:
+                    ground_truth_states = batch.edge_y.cpu().numpy().astype(int).tolist()
+                else:
+                    print(f"WARNING: Graph {gid} does not have 'edge_y' attribute. Cannot compare to ground truth.")
+                    ground_truth_states = [] # Or handle error appropriately
+
+                # GNN's raw binary prediction (rounded at 0.5 threshold)
+                gnn_raw_binary_prediction = [1 if pair[1] >= 0.5 else 0 for pair in probs_list]
+                
+                # --- IMPORTANT: Length Mismatch Checks ---
+                # Check for initial_switch_states vs GNN prediction length
+                if len(initial_switch_states) != len(gnn_raw_binary_prediction):
+                    print(f"WARNING: Mismatch in length between initial states ({len(initial_switch_states)}) and GNN predictions ({len(gnn_raw_binary_prediction)}) for graph {gid}. Skipping initial state comparison for this graph.")
+                    initial_switch_states_valid = False
+                else:
+                    initial_switch_states_valid = True
+                
+                # Check for ground_truth_states vs GNN prediction length
+                if len(ground_truth_states) != len(gnn_raw_binary_prediction):
+                    print(f"WARNING: Mismatch in length between ground truth ({len(ground_truth_states)}) and GNN predictions ({len(gnn_raw_binary_prediction)}) for graph {gid}. Skipping ground truth comparison for this graph.")
+                    ground_truth_states_valid = False
+                else:
+                    ground_truth_states_valid = True
+
+                # If both are invalid, skip the entire graph for analysis
+                if not initial_switch_states_valid and not ground_truth_states_valid:
+                    preds[gid] = probs_list
+                    self.gnn_times[gid] = gnn_time
+                    continue # Skip to next batch
+                
+                # If only ground truth is invalid, proceed with initial state comparison
+                if initial_switch_states_valid:
+                    self.initial_states_history[gid] = initial_switch_states
+                    # This history will be used for overall averages, so it needs GNN predictions too
+                    self.gnn_predictions_history[gid] = gnn_raw_binary_prediction 
+                    
+                    # Update counters for initial state comparison
+                    total_graphs_processed_successfully += 1
+                    current_graph_switches = len(initial_switch_states)
+                    total_switches_for_initial_comparison += current_graph_switches
+
+                    diff_count_vs_initial = sum(1 for i_state, gnn_pred in zip(initial_switch_states, gnn_raw_binary_prediction) if i_state != gnn_pred)
+                    total_switches_changed_by_gnn_vs_initial += diff_count_vs_initial
+
+                    if diff_count_vs_initial == 0:
+                        gnn_predicts_initial_count += 1
+                    
+                    correct_vs_initial_count = sum(1 for i_state, gnn_pred in zip(initial_switch_states, gnn_raw_binary_prediction) if i_state == gnn_pred)
+                    percent_correct_vs_initial = (correct_vs_initial_count / current_graph_switches) * 100 if current_graph_switches > 0 else 0.0
+
+                    num_predicted_closed = sum(gnn_raw_binary_prediction)
+                    num_predicted_open = current_graph_switches - num_predicted_closed
+
+                    print(f"Graph {gid}: GNN Accuracy (vs initial): {percent_correct_vs_initial:.2f}% "
+                          f"({num_predicted_closed} closed, {num_predicted_open} open predicted by GNN)")
+
+                # If ground truth is valid, perform ground truth comparison
+                if ground_truth_states_valid:
+                    self.ground_truth_history[gid] = ground_truth_states
+                    # If this is the primary analysis, you might want to adjust how total_graphs_processed_successfully increments
+                    # For now, it increments if initial_switch_states is valid.
+                    
+                    current_graph_switches_gt = len(ground_truth_states)
+                    total_switches_for_gt_comparison += current_graph_switches_gt
+
+                    diff_count_vs_gt = sum(1 for gt_state, gnn_pred in zip(ground_truth_states, gnn_raw_binary_prediction) if gt_state != gnn_pred)
+                    total_switches_changed_by_gnn_vs_gt += diff_count_vs_gt
+
+                    if diff_count_vs_gt == 0:
+                        gnn_correctly_predicts_gt_count += 1
+                    
+                    correct_vs_gt_count = sum(1 for gt_state, gnn_pred in zip(ground_truth_states, gnn_raw_binary_prediction) if gt_state == gnn_pred)
+                    percent_correct_vs_gt = (correct_vs_gt_count / current_graph_switches_gt) * 100 if current_graph_switches_gt > 0 else 0.0
+                    
+                    # Print GNN accuracy vs GT (only if GT comparison is valid)
+                    print(f"Graph {gid}: GNN Accuracy (vs GT): {percent_correct_vs_gt:.2f}%")
+
+
                 preds[gid] = probs_list
                 self.gnn_times[gid] = gnn_time
+            
+            # --- Summarize GNN Prediction Analysis ---
+            print("\n--- GNN Prediction Analysis Summary ---")
+            print(f"Total graphs attempted for analysis: {len(loader.dataset)}")
+            print(f"Total graphs successfully processed for initial state comparison: {total_graphs_processed_successfully}")
+            
+            # Initial state vs GNN prediction summary
+            if total_graphs_processed_successfully > 0:
+                print("\n--- GNN Prediction vs. Initial State ---")
+                print(f"Graphs where GNN predicted the exact initial switch state: {gnn_predicts_initial_count} ({gnn_predicts_initial_count/total_graphs_processed_successfully*100:.2f}%)")
+                if total_switches_for_initial_comparison > 0:
+                    avg_switches_changed_by_gnn_overall = total_switches_changed_by_gnn_vs_initial / total_graphs_processed_successfully
+                    print(f"Average number of switches changed by GNN's raw binary prediction (compared to initial state) across processed graphs: {avg_switches_changed_by_gnn_overall:.2f}")
+                    
+                    total_correct_vs_initial_all_graphs = sum(sum(1 for i, g in zip(self.initial_states_history[gid], self.gnn_predictions_history[gid]) if i == g) for gid in self.initial_states_history if gid in self.gnn_predictions_history and gid in self.initial_states_history) # Ensuring keys exist
+                    average_overall_percent_correct_vs_initial = (total_correct_vs_initial_all_graphs / total_switches_for_initial_comparison) * 100
+                    print(f"Overall average % correct GNN predictions (vs initial state) across processed switches: {average_overall_percent_correct_vs_initial:.2f}%")
+            else:
+                print("No graphs were successfully processed for initial state comparison.")
+
+            # Ground truth vs GNN prediction summary
+            if total_switches_for_gt_comparison > 0:
+                print("\n--- GNN Prediction vs. Ground Truth ---")
+                print(f"Graphs where GNN predicted the exact ground truth: {gnn_correctly_predicts_gt_count} ({gnn_correctly_predicts_gt_count/total_graphs_processed_successfully*100:.2f}%)") # Using total_graphs_processed_successfully for count
+                
+                avg_switches_changed_by_gnn_vs_gt_overall = total_switches_changed_by_gnn_vs_gt / total_graphs_processed_successfully # Using total_graphs_processed_successfully for average
+                print(f"Average number of switches changed by GNN's raw binary prediction (compared to GT) across processed graphs: {avg_switches_changed_by_gnn_vs_gt_overall:.2f}")
+
+                total_correct_vs_gt_all_graphs = sum(sum(1 for gt, g in zip(self.ground_truth_history[gid], self.gnn_predictions_history[gid]) if gt == g) for gid in self.ground_truth_history if gid in self.gnn_predictions_history and gid in self.ground_truth_history)
+                average_overall_percent_correct_vs_gt = (total_correct_vs_gt_all_graphs / total_switches_for_gt_comparison) * 100
+                print(f"Overall average % correct GNN predictions (vs Ground Truth) across processed switches: {average_overall_percent_correct_vs_gt:.2f}%")
+            else:
+                print("No graphs had valid ground truth for GNN prediction comparison.")
+
+            print("---------------------------------------\n")
+
             return preds, self.gnn_times
-
-
 
 class WarmstartSOCP(SOCP_class):
     def __init__(self, net, graph_id="", **kwargs):
         # Extract our custom parameters before calling super().__init__()
         self.fixed_switches = kwargs.pop('fixed_switches', {})
+        self.fixed_lines = kwargs.pop('fixed_lines', {})  # New parameter for line-based fixing
         self.float_warmstart = kwargs.pop('float_warmstart', None)
         
-        # Ensure fixed_switches is always a dict, never None
+        # Ensure dictionaries are never None
         if self.fixed_switches is None:
             self.fixed_switches = {}
+        if self.fixed_lines is None:
+            self.fixed_lines = {}
         
         # Now call parent constructor with remaining kwargs
         super().__init__(net=net, graph_id=graph_id, **kwargs)
 
     def initialize(self):
         super().initialize()
-        # Apply fixed switches if any
-        if self.fixed_switches:  # Check if dict is not empty
+        # Apply fixed switches if any (this affects the network state before optimization)
+        if self.fixed_switches:
             for idx, val in self.fixed_switches.items():
-                if idx in self.switch_df.index:  # Check if index exists
+                if idx in self.switch_df.index:
                     self.switch_df.loc[idx, 'closed'] = bool(val)
     
     def create_model(self):
         model = super().create_model()
-        # Fix switches in the optimization model
-        if self.fixed_switches:  # Check if dict is not empty
-            for idx, val in self.fixed_switches.items():
-                if idx in self.switch_df.index:  # Check if index exists
-                    row = self.switch_df.loc[idx]
-                    if row.et == 'l' and row.element in model.lines:
-                        model.line_status[row.element].fix(val)
+        self.logger.info("MANUAL OVERRIDE: Forcing ALL lines/switches to be OPEN.")
+        fixed_count = 0
+        if self.toggles.get('all_lines_are_switches', False):
+            # If all lines are considered switches
+            for l_id in model.lines:
+                model.line_status[l_id].fix(1) # Fix to 0 (open)
+                fixed_count += 1
+            self.logger.info(f"Fixed {fixed_count} line_status variables to 0 (OPEN) due to manual override.")
+        else:
+            # If using explicit switch_status variables
+            if hasattr(model, 'model_switches'):
+                for s_idx in model.model_switches:
+                    model.switch_status[s_idx].fix(1) # Fix to 0 (open)
+                    fixed_count += 1
+                self.logger.info(f"Fixed {fixed_count} switch_status variables to 0 (OPEN) due to manual override.")
+            else:
+                self.logger.warning("Attempted to force all switches open, but model.model_switches not found.")
+        return model
+        if self.fixed_lines:
+            fixed_count = 0
+            for line_id, val in self.fixed_lines.items():
+                if line_id in model.lines:
+                    model.line_status[line_id].fix(val)
+                    fixed_count += 1
+            
+            self.logger.info(f"Hard warmstart: Fixed {fixed_count} line_status variables out of {len(self.fixed_lines)} proposed fixed lines.")
+        
+        # Fix switches when not in all_lines_are_switches mode
+        elif self.fixed_switches and not self.toggles.get('all_lines_are_switches', False):
+            if hasattr(model, 'model_switches'):
+                fixed_count = 0
+                for switch_idx, val in self.fixed_switches.items():
+                    if switch_idx in model.model_switches:
+                        model.switch_status[switch_idx].fix(val)
+                        fixed_count += 1
+                
+                self.logger.info(f"Hard warmstart: Fixed {fixed_count} switch_status variables out of {len(self.fixed_switches)} proposed fixed switches.")
+        
         return model
     
     def solve(self, solver="gurobi_persistent", **opts):
@@ -623,7 +696,9 @@ class WarmstartSOCP(SOCP_class):
         return super().solve(solver=solver, **opts)
 
     def _solve_with_float_warmstart(self, solver, **opts):
-        from pyomo.opt import SolverFactory
+        from pyomo.opt import SolverFactory, SolutionStatus, TerminationCondition # Add SolutionStatus, TerminationCondition
+
+        start_time_of_solve_method = time.time() 
     
         if self.model is None:
             self.create_model()
@@ -632,17 +707,21 @@ class WarmstartSOCP(SOCP_class):
 
         opt = SolverFactory(solver)
 
+        # Set instance if not already done. This is crucial for persistent solvers before setting hints.
+        if hasattr(opt, 'set_instance'):
+            opt.set_instance(m) # Ensure instance is set before hints
+
         if solver == "gurobi_persistent" and self.float_warmstart is not None:
-            if hasattr(opt, 'set_instance'):
-                opt.set_instance(m)
+            # ... (existing float warmstart logic for Gurobi hints)
+            # Make sure this part is still setting hints on the Gurobi model correctly.
+            # If opt.set_instance(m) is called before this, then opt._solver_model should be available.
             
-            sorted_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element')
-            unique_switches = sorted_switches.drop_duplicates(subset='element', keep='first')
+            sorted_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
             
             warmstart_count = 0
             gurobi_hints_set = 0
             
-            for i, (_, switch_row) in enumerate(unique_switches.iterrows()):
+            for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
                 if i < len(self.float_warmstart):
                     line_id = switch_row['element']
                     if hasattr(m, 'line_status') and line_id in m.line_status:
@@ -650,34 +729,42 @@ class WarmstartSOCP(SOCP_class):
                         warmstart_value = max(0.0, min(1.0, warmstart_value))
         
                         # For Gurobi, use round to nearest integer for binary vars
-                        binary_value = 1 if warmstart_value >= 0.5 else 0
-                        
-                        m.line_status[line_id].set_value(binary_value, skip_validation=True)
+                        # This sets the Pyomo variable's current value (warmstart for subsequent solves too)
+                        m.line_status[line_id].set_value(binary_value, skip_validation=True) # binary_value defined below
                         warmstart_count += 1
                         
-                        if hasattr(opt, '_solver_model'):
+                        if hasattr(opt, '_solver_model'): # Check if Gurobi model is attached
                             try:
                                 pyomo_var = m.line_status[line_id]
-                                if hasattr(opt, '_pyomo_var_to_solver_var_map'):
-                                    gurobi_var = opt._pyomo_var_to_solver_var_map.get(pyomo_var)
-                                    if gurobi_var is not None:
-                                        gurobi_var.VarHintVal = warmstart_value
-                                        gurobi_hints_set += 1
-                                elif hasattr(opt, '_solver_model') and hasattr(opt._solver_model, 'getVars'):
+                                # Using the internal map is usually more reliable
+                                if hasattr(opt, '_pyomo_var_to_solver_var_map') and pyomo_var in opt._pyomo_var_to_solver_var_map:
+                                    gurobi_var = opt._pyomo_var_to_solver_var_map[pyomo_var]
+                                    gurobi_var.VarHintVal = warmstart_value
+                                    gurobi_hints_set += 1
+                                # Fallback if internal map is not directly accessible (less ideal but keeps compatibility)
+                                else:
+                                    # This loop is less efficient but ensures the hint is set if direct map is elusive
                                     for gvar in opt._solver_model.getVars():
+                                        # Match by variable name - make sure the name format is consistent
                                         if f"line_status[{line_id}]" in str(gvar.VarName):
                                             gvar.VarHintVal = warmstart_value
                                             gurobi_hints_set += 1
                                             break
                             except Exception as hint_error:
-                                pass
+                                self.logger.warning(f"Error setting Gurobi hint for line {line_id}: {hint_error}")
                         
-                        if i < 5 or i % 20 == 0:
-                            print(f"Set warmstart for line {line_id}: binary={binary_value}, hint={warmstart_value:.3f}")
-            
-            print(f"Float warmstart summary: {warmstart_count} binary values set, {gurobi_hints_set} Gurobi hints set")
+                        # Use a 0.5 threshold to determine the binary value for Pyomo's internal warmstart (set_value)
+                        binary_value = 1 if warmstart_value >= 0.5 else 0 
+                        m.line_status[line_id].set_value(binary_value, skip_validation=True)
+                        warmstart_count += 1
+
+                        if self.debug_level >= 2 and (i < 5 or i % 20 == 0): # Add debug_level check
+                             self.logger.debug(f"Set warmstart for line {line_id}: binary={binary_value}, hint={warmstart_value:.3f}")
+
+            self.logger.info(f"Float warmstart summary: {warmstart_count} binary values set, {gurobi_hints_set} Gurobi hints set.")
         
         elif self.float_warmstart is not None:
+            # ... (existing non-gurobi float warmstart logic)
             unique_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
             
             warmstart_count = 0
@@ -689,24 +776,54 @@ class WarmstartSOCP(SOCP_class):
                         binary_value = 1 if warmstart_value >= 0.5 else 0
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
-                        if i < 5: 
-                            print(f"Set binary warmstart for line {line_id}: {binary_value}")
+                        if self.debug_level >= 2 and i < 5: # Add debug_level check
+                            self.logger.debug(f"Set binary warmstart for line {line_id}: {binary_value}")
             
-            print(f"Binary warmstart summary: {warmstart_count} values set")
+            self.logger.info(f"Binary warmstart summary: {warmstart_count} values set.")
         
         # Set solver options
         if hasattr(opt, 'options'):
             opt.options.update(opts)
         
-        # Set instance if not already done
-        if hasattr(opt, 'set_instance') and not hasattr(opt, '_solver_model'):
-            opt.set_instance(m)
+        self.logger.info(f"Solving with float warmstart using {len(self.float_warmstart) if self.float_warmstart else 0} warmstart values.")
         
-        print(f"Solving with float warmstart using {len(self.float_warmstart) if self.float_warmstart else 0} warmstart values")
-        res = opt.solve(m, tee=False, load_solutions=True)
-        self.solve_time = getattr(res.solver, 'time', 0.0)
-        return res
+        res = opt.solve(m, tee=self.debug_level > 1, load_solutions=True) # Ensure tee is controlled by debug_level
+        
+        # --- FIX FOR CAPTURING SOLVE TIME ---
+        # Prioritize solver.time if available and meaningful
+        if hasattr(res.solver, 'time') and res.solver.time is not None and res.solver.time > 0:
+            self.solve_time = float(res.solver.time)
+        elif hasattr(res.solver, 'wall_time') and res.solver.wall_time is not None and res.solver.wall_time > 0: # Some solvers might use wall_time
+            self.solve_time = float(res.solver.wall_time)
+        else:
+            # Fallback: Measure wall time around the solve call
+            # This is less precise for actual solver time but ensures a non-zero value
+            # It's better to log a warning if precise solver time is unavailable.
+            self.logger.warning("Precise solver time attribute not found from Pyomo results. Falling back to external timing.")
+            self.solve_time = time.time() - start_time_of_solve_method # Need to get this 'start_time_of_solve_method'
+            # To get start_time_of_solve_method, you'd add start_time_of_solve_method = time.time() at the very beginning of _solve_with_float_warmstart
+        # --- END FIX ---
 
+        # Add detailed logging of termination condition and possible solution status
+        termination_condition = res.solver.termination_condition
+        solution_status = res.solver.status # e.g., SolutionStatus.optimal, SolutionStatus.infeasible
+        self.logger.info(f"Solver termination condition: {termination_condition}")
+        self.logger.info(f"Solver solution status: {solution_status}")
+
+        if str(termination_condition) != "optimal" and str(termination_condition) != "feasible" and \
+           str(termination_condition) != "locallyOptimal" and str(solution_status) != str(SolutionStatus.optimal) and \
+           str(solution_status) != str(SolutionStatus.feasible):
+            self.logger.warning(f"Solution is not optimal. Termination: {termination_condition}, Status: {solution_status}")
+            if self.debug_level >= 2:
+                from pyomo.util.infeasible import log_infeasible_constraints
+                self.logger.debug("Running infeasibility diagnosis...")
+                log_infeasible_constraints(self.model, log_expression=True, log_variables=True)
+        else:
+            obj_val = pyo_val(self.model.objective)
+            self.logger.info("Solved in %.2fs (obj = %.3f)", self.solve_time, obj_val)
+
+
+        return res
 class ExplicitSaver:
     """Updated ExplicitSaver with fixed state tracking"""
     
@@ -1105,84 +1222,16 @@ class Optimizer:
 
         csv_path = self.saver.save_csv()
         return results, csv_path
-    
-def calculate_topology_error_hamming(y_true, y_pred):
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    
-    if len(y_true) != len(y_pred):
-        min_len = min(len(y_true), len(y_pred))
-        y_true = y_true[:min_len]
-        y_pred = y_pred[:min_len]
-    
-    if len(y_true) == 0:
-        return 1.0
-    hamming_distance = np.sum(y_true != y_pred)
-    topology_error = hamming_distance / len(y_true)
-    
-    return topology_error
-
-def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor, 
-                             threshold: float = 0.5, eps: float = 1e-8) -> dict:
-    if scores.ndim == targets.ndim + 1 and scores.size(-1) == 1:
-        scores = scores.squeeze(-1)
-
-    targets = targets.float()
-    preds = (scores > threshold).float()
-
-    tp = (preds * targets).sum()
-    fp = (preds * (1 - targets)).sum()
-    fn = ((1 - preds) * targets).sum()
-    tn = ((1 - preds) * (1 - targets)).sum()
-
-    accuracy = (tp + tn) / (tp + fp + fn + tn + eps)
-    precision = tp / (tp + fp + eps)
-    recall = tp / (tp + fn + eps)
-    f1 = 2 * precision * recall / (precision + recall + eps)
-    jaccard = tp / (tp + fp + fn + eps)
-    dice = 2 * tp / (2 * tp + fp + fn + eps)
-    
-    mcc_numerator = (tp * tn) - (fp * fn)
-    mcc_denominator = torch.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
-    mcc = mcc_numerator / (mcc_denominator + eps)
-    
-    sensitivity = recall
-    specificity = tn / (tn + fp + eps)
-    balanced_acc = (sensitivity + specificity) / 2
-    
-    f1_minority = 2 * tn / (2 * tn + fp + fn + eps)
-
-    TopologyError = calculate_topology_error_hamming(targets.cpu().numpy(), preds.cpu().numpy())
-
-    return {
-        "accuracy": accuracy.item(),
-        "precision": precision.item(),
-        "recall": recall.item(),
-        "f1": f1.item(),
-        "mcc": mcc.item(), 
-        "balanced_acc": balanced_acc.item(),  
-        "f1_minority": f1_minority.item(), 
-        "sensitivity": sensitivity.item(),
-        "specificity": specificity.item(),
-        "jaccard": jaccard.item(),
-        "dice": dice.item(),
-        "tp": tp.item(), "fp": fp.item(),
-        "fn": fn.item(), "tn": tn.item(),
-        "TopologyError": TopologyError,  
-    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict-then-Optimize Pipeline with Explicit Saving")
     parser.add_argument("--config_path", type=str,
-                       # default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------devout-glitter-19.yaml",
-                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\config_files\AdvancedMLP------devout-glitter-19.yaml",
-                        default= r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\final_models\cvx------fragrant-shape-31.yaml",
-                        
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\final_models\AdvancedMLP------GCN-stage2-hyperparameter-tuning.yaml",
+                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\AdvancedMLP------None.yaml",
                         help="Path to the YAML config file")
     parser.add_argument("--model_path", type=str,
-                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt",
-                        #default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\AdvancedMLP\devout-glitter-19-Best.pt", 
-                        default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\final_models\CVX-fragrant-shape-31-Best.pt",
+                        #default = r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\None-Best.pt",
+                        default=r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\model_search\models\final_models\GCN-stage2-hyperparameter-tuning-Best.pt", 
                         help="Path to pretrained GNN checkpoint")
     parser.add_argument("--folder_names", type=str, nargs="+",
                         default=[r"C:\Users\denni\Documents\thesis_dnr_gnn_dev\data\split_datasets\test"],
@@ -1195,11 +1244,11 @@ if __name__ == "__main__":
     # Warmstart arguments
     parser.add_argument("--warmstart_mode", type=str,
                         choices=["only_gnn_predictions", "soft", "float", "hard", "optimization_without_warmstart"],
-                        default="float",
+                        default="hard",
                         help="Warmstart strategy")
     parser.add_argument("--rounding_method", type=str,
                         choices=["round", "PhyR"],
-                        default="PhyR",
+                        default="round",
                         help="Rounding method for predictions")
     parser.add_argument("--confidence_threshold", type=float, default=0.99,
                         help="Confidence threshold for hard warmstart")
@@ -1225,7 +1274,7 @@ if __name__ == "__main__":
     loaders = create_data_loaders(
         dataset_names=args.dataset_names,
         folder_names=args.folder_names,
-        dataset_type="cvx",
+        dataset_type="default",
         shuffle=False,
         batch_size=1)
     test_loader = loaders.get("test", None)
@@ -1236,9 +1285,6 @@ if __name__ == "__main__":
     
     print(f"Test loader created with {len(test_loader.dataset)} samples")
     print(f"Graph IDs: {graph_ids[:5]}..." if len(graph_ids) > 5 else f"Graph IDs: {graph_ids}")
-
-    print(f"first sample in test_loader: {test_loader.dataset[0]}")
-    print(f"first edge_y sample in test_loader: {test_loader.dataset[0].edge_y}")
 
     # Extract job name from model_path
     job_name = Path(args.model_path).stem
@@ -1253,9 +1299,8 @@ if __name__ == "__main__":
 
     predictions = None
     gnn_times = None
-    # Start of the plotting and metric calculation logic
-    if args.predict:           
-        print(f"\n ===================================================\n      RUN PREDICTIONS \n =================================================== \n ")   
+    if args.predict:         
+        print(f"\n ===================================================\n       RUN PREDICTIONS \n =================================================== \n ")   
         print("Starting prediction...")
         predictor = Predictor(
             model_path=args.model_path,
@@ -1263,162 +1308,87 @@ if __name__ == "__main__":
             device=device,
             sample_loader=test_loader
         )
-        predictions, gnn_times = predictor.run(test_loader, graph_ids=graph_ids)
+        # Pass pp_networks here, as it's loaded outside the Predictor class.
+        predictions, gnn_times = predictor.run(test_loader, graph_ids=graph_ids, pp_networks_for_manager=pp_networks)
 
-        print(f"Prediction keys: {sorted(predictions.keys())}")
-        print(f"Graph IDs: {sorted(graph_ids)}")
-        print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
-        print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
+        # print(f"Prediction keys: {sorted(predictions.keys())}")
+        # print(f"Graph IDs: {sorted(graph_ids)}")
+        # print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
+        # print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
+        # # Convert to numpy arrays
+        # class_0_preds = np.array(predictor.class_0_predictions)
+        # class_1_preds = np.array(predictor.class_1_predictions)
+
+        # class_0_high_conf = class_0_preds[class_0_preds > 0.5]
+        # class_1_high_conf = class_1_preds[class_1_preds > 0.5]
+        # # create 50 bins in [0.5, 1.0]
+
+        # bins = np.linspace(0.5, 1.0, 51)
+
+        # # IEEE column width plotting setup
+        # column_width_pt = 246.0  # IEEE single column width in points
+        # inches_per_pt = 1.0/72.27
+        # fig_w = column_width_pt * inches_per_pt
+        # fig_h = fig_w * 0.6  # Slightly taller aspect ratio for better readability
+
+        # fig, ax0 = plt.subplots(figsize=(fig_w, fig_h))
+
+        # # Class 0 (Open) on left
+        # n0, bins0, patches0 = ax0.hist(
+        #     class_0_high_conf, bins=bins,
+        #     alpha=0.5, color='red', edgecolor='red', linewidth=0.5,
+        #     label='Class 0 (Open)'
+        # )
+        # ax0.set_xlabel('Confidence', fontsize=8)
+        # ax0.set_ylabel('Freq Class 0', fontsize=8, color='red')
+        # ax0.tick_params(axis='y', labelcolor='red', labelsize=7, width=0.5, length=3)
+        # ax0.yaxis.set_major_locator(ticker.MultipleLocator(10))
+
+        # # Class 1 (Closed) on right
+        # ax1 = ax0.twinx()
+        # n1, bins1, patches1 = ax1.hist(
+        #     class_1_high_conf, bins=bins,
+        #     alpha=0.5, color='blue', edgecolor='blue', linewidth=0.5,
+        #     label='Class 1 (Closed)'
+        # )
+        # ax1.set_ylabel('Freq Class 1', fontsize=8, color='blue')
+        # ax1.tick_params(axis='y', labelcolor='blue', labelsize=7, width=0.5, length=3)
+        # #ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.1))
+
+        # # X-axis ticks every 0.1
+        # ax0.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
+
+        # # Title
+        # ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
+
+        # # Legend centered top
+        # h0, l0 = ax0.get_legend_handles_labels()
+        # h1, l1 = ax1.get_legend_handles_labels()
+        # ax0.legend(h0 + h1, l0 + l1,
+        #         loc='upper center',
+        #         bbox_to_anchor=(0.5, 1.0),
+        #         fontsize=7,
+        #         ncol=1)
+
+        # plt.tight_layout(pad=0.5)
+        # fig.savefig('confidence_histograms_double_axis_png.png',
+        #             bbox_inches='tight',
+        #             pad_inches=0.05)
+                                                
         
-        # Collect all predictions and ground truths for overall metrics
-        all_predicted_scores = [] 
-        all_true_labels = []
+    if args.optimize and predictions is not None:
+        print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
+        print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
 
-        bins = np.linspace(0.5, 1.0, 51)
-
-        correct_0_conf = []
-        incorrect_0_conf = []
-        correct_1_conf = []
-        incorrect_1_conf = []
-
-        prediction_idx_offset = 0
-
-        for i, data_batch in enumerate(test_loader):
-            true_labels_graph = data_batch.edge_y.cpu().numpy().flatten()
-            
-            num_edges_in_graph = len(true_labels_graph)
-            
-            graph_class_0_probs = predictor.class_0_predictions[prediction_idx_offset : prediction_idx_offset + num_edges_in_graph]
-            graph_class_1_probs = predictor.class_1_predictions[prediction_idx_offset : prediction_idx_offset + num_edges_in_graph]
-            
-            all_predicted_scores.extend(graph_class_1_probs)
-            all_true_labels.extend(true_labels_graph)
-
-            for j in range(num_edges_in_graph):
-                prob_0 = graph_class_0_probs[j]
-                prob_1 = graph_class_1_probs[j]
-                true_label = true_labels_graph[j]
-
-                predicted_prob = max(prob_0, prob_1)
-                predicted_label = 0 if prob_0 > prob_1 else 1
-
-                if predicted_prob > 0.5:
-                    if predicted_label == 0:
-                        if true_label == 0:
-                            correct_0_conf.append(predicted_prob)
-                        else:
-                            incorrect_0_conf.append(predicted_prob)
-                    elif predicted_label == 1:
-                        if true_label == 1:
-                            correct_1_conf.append(predicted_prob)
-                        else:
-                            incorrect_1_conf.append(predicted_prob)
-            
-            prediction_idx_offset += num_edges_in_graph
-
-        # Calculate and print overall metrics
-        overall_scores_tensor = torch.tensor(all_predicted_scores, dtype=torch.float32, device=device)
-        overall_targets_tensor = torch.tensor(all_true_labels, dtype=torch.float32, device=device)
-        
-        metrics = compute_switch_metrics(overall_scores_tensor, overall_targets_tensor)
-        print("\nModel Performance Metrics on Test Set:")
-        for metric_name, value in metrics.items():
-            print(f"  {metric_name}: {value:.4f}")
-
-        column_width_pt = 246.0
-        inches_per_pt = 1.0/72.27
-        fig_w = column_width_pt * inches_per_pt
-        fig_h = fig_w * 0.6
-
-        fig, ax0 = plt.subplots(figsize=(fig_w, fig_h))
-
-        color_c0_correct = 'red'
-        color_c1_correct = 'blue'
-        color_c0_incorrect = 'darkred'
-        color_c1_incorrect = 'darkblue'
-
-        n0_correct, _, _ = ax0.hist(
-            correct_0_conf, bins=bins,
-            color=color_c0_correct, edgecolor='red', linewidth=0.5,
-            alpha=0.5,
-            label='_nolegend_',
-            histtype='bar'
+        optimizer = Optimizer(
+            folder_name=args.folder_names[0],  
+            predictions=predictions,
+            saver=saver,
+            warmstart_mode=args.warmstart_mode,
+            confidence_threshold=args.confidence_threshold,
+            gnn_times=gnn_times,
         )
-        n0_incorrect, _, _ = ax0.hist(
-            incorrect_0_conf, bins=bins,
-            color=color_c0_incorrect, edgecolor='darkred', linewidth=0.5,
-            label='_nolegend_',
-            histtype='bar',
-            bottom=n0_correct
-        )
-
-        ax0.set_xlabel('Confidence', fontsize=8)
-        ax0.set_ylabel('Frequency', fontsize=8)
-        ax0.tick_params(axis='y', labelsize=7, width=0.5, length=3)
-        ax0_max_y = max(n0_correct.max() if len(n0_correct) > 0 else 0, n0_incorrect.max() if len(n0_incorrect) > 0 else 0)
-        if ax0_max_y > 0:
-            ax0.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-        
-        ax1 = ax0.twinx()
-
-        n1_correct, _, _ = ax1.hist(
-            correct_1_conf, bins=bins,
-            color=color_c1_correct, edgecolor='blue', linewidth=0.5,
-            alpha=0.5,
-            label='_nolegend_',
-            histtype='bar'
-        )
-        n1_incorrect, _, _ = ax1.hist(
-            incorrect_1_conf, bins=bins,
-            color=color_c1_incorrect, edgecolor='darkblue', linewidth=0.5,
-            label='_nolegend_',
-            histtype='bar',
-            bottom=n1_correct
-        )
-
-        ax1.set_ylabel('Frequency', fontsize=8)
-        ax1.tick_params(axis='y', labelsize=7, width=0.5, length=3)
-        ax1_max_y = max(n1_correct.max() if len(n1_correct) > 0 else 0, n1_incorrect.max() if len(n1_incorrect) > 0 else 0)
-        if ax1_max_y > 0:
-            ax1.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-
-        ax0.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
-
-        # Adjust title position further upward (increased y from 1.22 to 1.30)
-        ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10, y=1.30)
-
-        legend_elements = [
-            Patch(facecolor=color_c0_correct, edgecolor='red', label='Class 0 (Correct)'),
-            Patch(facecolor=color_c0_incorrect, edgecolor='darkred', label='Class 0 (Incorrect)'),
-            Patch(facecolor=color_c1_correct, edgecolor='blue', label='Class 1 (Correct)'),
-            Patch(facecolor=color_c1_incorrect, edgecolor='darkblue', label='Class 1 (Incorrect)')
-        ]
-        ax0.legend(handles=legend_elements,
-                loc='lower center',
-                bbox_to_anchor=(0.5, 1.0),
-                fontsize=7,
-                ncol=2)
-
-        plt.tight_layout(pad=0.5)
-        fig.savefig('confidence_histograms_stacked_double_axis_png.png',
-                    bbox_inches='tight',
-                    pad_inches=0.05,
-                    dpi=300)
-                                                        
-        
-    # if args.optimize and predictions is not None:
-    #     print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
-    #     print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
-
-    #     optimizer = Optimizer(
-    #         folder_name=args.folder_names[0],  
-    #         predictions=predictions,
-    #         saver=saver,
-    #         warmstart_mode=args.warmstart_mode,
-    #         confidence_threshold=args.confidence_threshold,
-    #         gnn_times=gnn_times,
-    #     )
-    #     final_results, csv_path = optimizer.run(num_workers=args.num_workers)
+        final_results, csv_path = optimizer.run(num_workers=args.num_workers)
         
         # if args.visualize:
         #     # Save visualizations for all graphs
@@ -1426,38 +1396,38 @@ if __name__ == "__main__":
         #     saver.save_all_visualizations()
         #     print(f"Visualizations saved to: {saver.visualization_folder}")
 
-    #     print(f"Optimization completed with {len(final_results)} results.")
-    #     print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
-    #     if csv_path:
-    #         print(f"Results saved to CSV: {csv_path}")
-    #     print(f"Warmstart networks saved to: {saver.warmstart_networks_folder}")
-    #     print(f"Final optimized networks saved to: {saver.prediction_networks_folder}")
+        print(f"Optimization completed with {len(final_results)} results.")
+        print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
+        if csv_path:
+            print(f"Results saved to CSV: {csv_path}")
+        print(f"Warmstart networks saved to: {saver.warmstart_networks_folder}")
+        print(f"Final optimized networks saved to: {saver.prediction_networks_folder}")
         
-    #     # Print summary statistics
-    #     successful = sum(1 for r in final_results.values() if r.get('success', False))
-    #     total = len(final_results)
-    #     if successful > 0:
-    #         avg_solve_time = sum(r.get('solve_time', 0) for r in final_results.values() if r.get('success')) / successful
-    #         avg_switches_changed = sum(r.get('switches_changed', 0) for r in final_results.values() if r.get('success')) / successful
-    #     else:
-    #         avg_solve_time = 0
-    #         avg_switches_changed = 0
+        # Print summary statistics
+        successful = sum(1 for r in final_results.values() if r.get('success', False))
+        total = len(final_results)
+        if successful > 0:
+            avg_solve_time = sum(r.get('solve_time', 0) for r in final_results.values() if r.get('success')) / successful
+            avg_switches_changed = sum(r.get('switches_changed', 0) for r in final_results.values() if r.get('success')) / successful
+        else:
+            avg_solve_time = 0
+            avg_switches_changed = 0
     
-    #     print(f"\nOptimization Summary ({args.warmstart_mode} warmstart):")
-    #     print(f"  Successful solves: {successful}/{total}")
-    #     if total > successful:
-    #         print(f"  Failed solves: {total - successful}")
-    #     print(f"  Average solve time: {avg_solve_time:.2f}s")
-    #     print(f"  Average switches changed: {avg_switches_changed:.1f}")
-    #     if args.warmstart_mode == "hard":
-    #         print(f"  Confidence threshold: {args.confidence_threshold}")
+        print(f"\nOptimization Summary ({args.warmstart_mode} warmstart):")
+        print(f"  Successful solves: {successful}/{total}")
+        if total > successful:
+            print(f"  Failed solves: {total - successful}")
+        print(f"  Average solve time: {avg_solve_time:.2f}s")
+        print(f"  Average switches changed: {avg_switches_changed:.1f}")
+        if args.warmstart_mode == "hard":
+            print(f"  Confidence threshold: {args.confidence_threshold}")
         
-    #     print(f"\nFolder structure created:")
-    #     print(f"  Root predictions folder: {saver.predictions_folder}")
-    #     print(f"  Warmstart folder: {saver.warmstart_folder}")
-    #     print(f"  Final predictions folder: {saver.prediction_folder}")
-    #     if csv_path:
-    #         print(f"  CSV file: {csv_path}")
+        print(f"\nFolder structure created:")
+        print(f"  Root predictions folder: {saver.predictions_folder}")
+        print(f"  Warmstart folder: {saver.warmstart_folder}")
+        print(f"  Final predictions folder: {saver.prediction_folder}")
+        if csv_path:
+            print(f"  CSV file: {csv_path}")
     
-    # elif args.optimize and predictions is None:
-    #     print("Cannot run optimization without predictions. Run prediction step first.")
+    elif args.optimize and predictions is None:
+        print("Cannot run optimization without predictions. Run prediction step first.")
