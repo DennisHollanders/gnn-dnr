@@ -650,30 +650,46 @@ class WarmstartSOCP(SOCP_class):
     
     def create_model(self):
         model = super().create_model()
-        self.logger.info("MANUAL OVERRIDE: Forcing ALL lines/switches to be OPEN.")
         fixed_count = 0
         if self.fixed_lines:
-            fixed_count = 0
+            print(f"Hard warmstart: Fixing {len(self.fixed_lines)} line_status variables")
             for line_id, val in self.fixed_lines.items():
                 if line_id in model.lines:
                     model.line_status[line_id].fix(val)
                     fixed_count += 1
+                    print(f"  Fixed line {line_id} to {val}")
+            print(f"Hard warmstart: Successfully fixed {fixed_count} line_status variables out of {len(self.fixed_lines)} proposed")
             
-            self.logger.info(f"Hard warmstart: Fixed {fixed_count} line_status variables out of {len(self.fixed_lines)} proposed fixed lines.")
-        
-        # Fix switches when not in all_lines_are_switches mode
-        elif self.fixed_switches and not self.toggles.get('all_lines_are_switches', False):
-            if hasattr(model, 'model_switches'):
-                fixed_count = 0
-                for switch_idx, val in self.fixed_switches.items():
-                    if switch_idx in model.model_switches:
-                        model.switch_status[switch_idx].fix(val)
-                        fixed_count += 1
-                
-                self.logger.info(f"Hard warmstart: Fixed {fixed_count} switch_status variables out of {len(self.fixed_switches)} proposed fixed switches.")
-        
+        elif self.fixed_switches:
+            if self.toggles.get('all_lines_are_switches', False):
+                print("Warning: fixed_switches provided but all_lines_are_switches=True. No variables will be fixed!")
+                print("  Use fixed_lines instead when all_lines_are_switches=True")
+            else:
+                print(f"Hard warmstart: Fixing {len(self.fixed_switches)} switch_status variables")
+                if hasattr(model, 'model_switches'):
+                    for switch_idx, val in self.fixed_switches.items():
+                        if switch_idx in model.model_switches:
+                            model.switch_status[switch_idx].fix(val)
+                            fixed_count += 1
+                            if print >= 2:
+                                print(f"  Fixed switch {switch_idx} to {val}")
+                    print(f"Hard warmstart: Successfully fixed {fixed_count} switch_status variables out of {len(self.fixed_switches)} proposed")
+                else:
+                    print("Error: No model_switches found in model, cannot fix switch variables")
+        else:
+            print("No variables fixed (normal optimization without hard warmstart)")
+        if self.fixed_lines and fixed_count > 0:
+            # Verify that fixed variables are actually fixed
+            unfixed_count = 0
+            for line_id, expected_val in self.fixed_lines.items():
+                if line_id in model.lines:
+                    if not model.line_status[line_id].fixed:
+                        print(f"Line {line_id} should be fixed but isn't!")
+                        unfixed_count += 1
+            if unfixed_count > 0:
+                print(f"{unfixed_count} lines failed to be fixed!")
         return model
-    
+        
     def solve(self, solver="gurobi_persistent", **opts):
         if self.float_warmstart is not None:
             return self._solve_with_float_warmstart(solver, **opts)
@@ -696,10 +712,6 @@ class WarmstartSOCP(SOCP_class):
             opt.set_instance(m) # Ensure instance is set before hints
 
         if solver == "gurobi_persistent" and self.float_warmstart is not None:
-            # ... (existing float warmstart logic for Gurobi hints)
-            # Make sure this part is still setting hints on the Gurobi model correctly.
-            # If opt.set_instance(m) is called before this, then opt._solver_model should be available.
-            
             sorted_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
             
             warmstart_count = 0
@@ -711,6 +723,11 @@ class WarmstartSOCP(SOCP_class):
                     if hasattr(m, 'line_status') and line_id in m.line_status:
                         warmstart_value = float(self.float_warmstart[i])
                         warmstart_value = max(0.0, min(1.0, warmstart_value))
+                        
+                        # first compute the integer warmstart
+                        binary_value = 1 if warmstart_value >= 0.5 else 0
+                        m.line_status[line_id].set_value(binary_value, skip_validation=True)
+                        warmstart_count += 1
         
                         # For Gurobi, use round to nearest integer for binary vars
                         # This sets the Pyomo variable's current value (warmstart for subsequent solves too)
@@ -737,8 +754,6 @@ class WarmstartSOCP(SOCP_class):
                             except Exception as hint_error:
                                 self.logger.warning(f"Error setting Gurobi hint for line {line_id}: {hint_error}")
                         
-                        # Use a 0.5 threshold to determine the binary value for Pyomo's internal warmstart (set_value)
-                        binary_value = 1 if warmstart_value >= 0.5 else 0 
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
 
@@ -888,7 +903,8 @@ class ExplicitSaver:
                   final_optima: list, solve_time: float, objective: float,
                   radial: bool, connected: bool, pf_converged: bool,
                   switches_changed: int, gt_loss: float, pred_loss: float,
-                  gnn_time: float = 0.0,  # New parameter
+                  gnn_time: float = 0.0, 
+                fixed_switch_counts: list = None,
                   error_message: str = None):
         """Add CSV entry with separate timing columns"""
         
@@ -916,10 +932,13 @@ class ExplicitSaver:
             "connected": connected,
             "pf_converged": pf_converged,
             "switches_changed": switches_changed,
+            "fixed_switch_counts": json.dumps(fixed_switch_counts) 
+                                     if fixed_switch_counts is not None 
+                                     else json.dumps([0,0]),
             "gt_loss": gt_loss,
             "pred_loss": pred_loss,
             "same_loss_diff_topo": abs(gt_loss - pred_loss) < 1e-6 if (gt_loss is not None and pred_loss is not None) else False,
-            "error": error_message or ""
+            "error": error_message or False
         })
 
 
@@ -953,7 +972,7 @@ class Optimizer:
             "use_root_flow": True,
             "include_switch_penalty": True,
             "include_cone_constraint": True,
-            "all_lines_are_switches": True,
+            "all_lines_are_switches": False,
             "allow_load_shed": True,
         }
 
@@ -1021,7 +1040,7 @@ class Optimizer:
             
             elif mode == "hard":
                 T = self.confidence_threshold
-                fixed = {}
+                fixed_lines = {}  # Changed: use fixed_lines for line_id mapping
                 fixed_0_count = 0
                 fixed_1_count = 0
                 sorted_switches = switch_manager.collapsed_switches.sort_values("element")
@@ -1038,18 +1057,22 @@ class Optimizer:
                         fixed_1_count += 1
                     else:
                         continue
-                        
+                    
+                    # Fix the line_status variable
+                    fixed_lines[line_id] = d
+                    
+                    # Still update the physical switches in the network
                     switch_indices = switch_manager.line_to_switches_map.get(line_id, [])
                     for switch_idx in switch_indices:
-                        fixed[switch_idx] = d
                         net.switch.at[switch_idx, 'closed'] = bool(d)
 
-                switch_manager.set_switch_states(rounded, "hard_warmstart")
-                radial, connected = is_radial_and_connected(net, include_switches=True)
-                print(f"Hard warmstart {gid}: {fixed_0_count} fixed to 0, {fixed_1_count} fixed to 1, radial={radial}, connected={connected}")
-                
-                self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
-                solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid, fixed_switches=fixed)
+                    print(f"Hard warmstart: fixing {len(fixed_lines)} lines")
+                    solver = WarmstartSOCP(
+                        net=net,
+                        toggles=self.toggles,
+                        graph_id=gid,
+                        fixed_lines=fixed_lines
+                    )
 
 
             elif mode == "only_gnn_predictions":
@@ -1132,6 +1155,7 @@ class Optimizer:
                 connected=connected,
                 pf_converged=pf_ok,
                 switches_changed=flips,
+                fixed_switch_counts=[fixed_0_count, fixed_1_count]
                 gt_loss=gt_loss,
                 pred_loss=pred_loss,
                 error_message=None
@@ -1162,6 +1186,7 @@ class Optimizer:
                 connected=False,
                 pf_converged=False,
                 switches_changed=0,
+                fixed_switch_counts=[fixed_0_count, fixed_1_count]
                 gt_loss=float("nan"),
                 pred_loss=float("nan"),
                 error_message=str(e)
