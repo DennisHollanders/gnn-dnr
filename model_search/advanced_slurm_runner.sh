@@ -15,24 +15,24 @@ mkdir -p "$LOG_DIR"
 
 # Model configurations
 declare -A MODELS=(
-  ["GAT"]="$BASE_DIR/model_search/models/AdvancedMLP/GAT-stage2-hyperparameter-tuning-Best.pt"
-  ["GIN"]="$BASE_DIR/model_search/models/AdvancedMLP/None-Best.pt"
+ # ["GAT"]="$BASE_DIR/model_search/models/AdvancedMLP/GAT-stage2-hyperparameter-tuning-Best.pt"
+ # ["GIN"]="$BASE_DIR/model_search/models/AdvancedMLP/GIN-stage2-hyperparameter-tuning-Best.pt"
   ["GCN"]="$BASE_DIR/model_search/models/AdvancedMLP/GCN-stage2-hyperparameter-tuning-Best.pt"
 )
 declare -A CONFIGS=(
-  ["GAT"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------GAT-stage2-hyperparameter-tuning.yaml"
-  ["GIN"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------None.yaml"
+ # ["GAT"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------GAT-stage2-hyperparameter-tuning.yaml"
+ # ["GIN"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------GIN-stage2-hyperparameter-tuning.yaml"
   ["GCN"]="$BASE_DIR/model_search/models/AdvancedMLP/config_files/AdvancedMLP------GCN-stage2-hyperparameter-tuning.yaml"
 )
 
 declare -A CPUS_PER_MODEL=(
-  ["GAT"]=20
-  ["GIN"]=24
-  ["GCN"]=24
+ # ["GAT"]=32
+ # ["GIN"]=32
+  ["GCN"]=32
 )
 declare -A PARTITIONS_PER_MODEL=(
-  ["GAT"]="tue.default.q"
-  ["GIN"]="be.student.q"
+ # ["GAT"]="tue.default.q"
+ # ["GIN"]="be.student.q"
   ["GCN"]="elec-ees-empso.cpu.q"
 )
 
@@ -44,13 +44,10 @@ GLOBAL_CP="${CONFIGS[$GLOBAL_MODEL]}"
 
 # Experiment parameters
 DATASET_NAME="test"
-NUM_WORKERS=8
+NUM_WORKERS=4
 
-# SLURM parameters
-PARTITION="tue.default.q"
-TIME_LIMIT="0-20:00:00"
+TIME_LIMIT="2-00:00:00"
 MEMORY="8G"
-CPUS=8
 NODES=1
 NTASKS_PER_NODE=1
 
@@ -174,7 +171,7 @@ for model in "${!MODELS[@]}"; do
         ;;
 
       hard)
-        for conf in 0.999 0.99 0.975 0.95; do
+        for conf in 0.99 0.975 0.95 0.9; do
           for round in "round" "PhyR"; do
             name="${model}_Hard_${conf}_${round}"
             submit_job "$name" "$model" "$mp" "$cp" "hard" "$round" "$conf" "--predict" "--optimize"
@@ -194,10 +191,6 @@ for model in "${!MODELS[@]}"; do
   echo "=> Submitted $job_count jobs so far"
 done
 
-
-# one global "optimization with warmstart" job (using first model/config)
-submit_job "optimization_with_warmstart" "$GLOBAL_MODEL" "$GLOBAL_MP" "$GLOBAL_CP" "soft" "round" 0.5 "" "--optimize"
-((job_count++))
 
 
 echo "All done. Total jobs: $job_count"

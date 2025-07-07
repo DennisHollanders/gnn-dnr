@@ -1155,7 +1155,7 @@ class Optimizer:
                 connected=connected,
                 pf_converged=pf_ok,
                 switches_changed=flips,
-                fixed_switch_counts=[fixed_0_count, fixed_1_count]
+                fixed_switch_counts=[fixed_0_count, fixed_1_count],
                 gt_loss=gt_loss,
                 pred_loss=pred_loss,
                 error_message=None
@@ -1186,7 +1186,7 @@ class Optimizer:
                 connected=False,
                 pf_converged=False,
                 switches_changed=0,
-                fixed_switch_counts=[fixed_0_count, fixed_1_count]
+                fixed_switch_counts=[fixed_0_count, fixed_1_count],
                 gt_loss=float("nan"),
                 pred_loss=float("nan"),
                 error_message=str(e)
