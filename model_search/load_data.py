@@ -105,7 +105,7 @@ def create_pyg_from_pp(pp_net_raw):
             f"Found conflicting switch states on lines: {conflicts.index.tolist()}"
         )
 
-    # keep only one switch per line (first by switch-ID)
+    # keep only one switch per line 
     ls_unique = ls.sort_index().drop_duplicates(subset="element", keep="first")
 
     # map line-IDs to row positions
@@ -167,11 +167,7 @@ def process_single_graph(gid, pp_all, dataset_type):
             
             sub_idx = cvx_feat['sub_idx']
             data_x.cvx_sub_idx = sub_idx
-            # if len(sub_idx) == 0:
-            #     data_x.cvx_sub_idx = torch.empty((1, 0), dtype=torch.long)
-            # else:
-            #     data_x.cvx_sub_idx = sub_idx.unsqueeze(0)
-                
+
         except Exception as e:
             logger.error(f"CVX processing failed for {gid}: {e}")
             return None
@@ -259,13 +255,13 @@ def _get_cache_path_suffix(original_path_str: str) -> Path:
 def _load_or_create_dataset(
     dataset_name: str,
     input_data_path_str: str,
-    dataset_cache_file_path: Path, # Accepts the full path to the cache file
+    dataset_cache_file_path: Path, 
     dataset_type: str = "default",
     multiprocessing: bool = True,
     seed: int = 0
 ):
     """Handles loading a single dataset from cache or creating and caching it."""
-    dataset_cache_dir = dataset_cache_file_path.parent # Derive dir from full file path
+    dataset_cache_dir = dataset_cache_file_path.parent 
     dataset_cache_dir.mkdir(parents=True, exist_ok=True)
     
     loaded_dataset = []
@@ -279,14 +275,14 @@ def _load_or_create_dataset(
             logger.info(f"{dataset_name} dataset loaded from cache ({len(loaded_dataset)} samples).")
         except Exception as e:
             logger.error(f"Failed to load {dataset_name} dataset from cache: {e}. Regenerating.", exc_info=True)
-            loaded_dataset = [] # Ensure it's an empty list to trigger generation
+            loaded_dataset = [] 
     
-    if not loaded_dataset: # If cache miss or loading failed
+    if not loaded_dataset:
         logger.info(f"Generating {dataset_name} dataset for: {input_data_path_str}")
         created_data = create_pyg_dataset(input_data_path_str, dataset_type, seed=seed, multiprocessing=multiprocessing)
         loaded_dataset = created_data if created_data is not None else []
 
-        if not loaded_dataset and input_data_path_str: # Check if still empty after attempting generation
+        if not loaded_dataset and input_data_path_str: 
             logger.error(f"Failed to generate {dataset_name} dataset for {input_data_path_str}.")
             return [] 
         
@@ -296,7 +292,7 @@ def _load_or_create_dataset(
             logger.info(f"{dataset_name} dataset saved to cache.")
         except Exception as e:
             logger.error(f"Failed to save {dataset_name} dataset to cache: {e}", exc_info=True)
-            # Proceed with in-memory data even if saving fails
+    
 
     return loaded_dataset
 
@@ -393,16 +389,13 @@ def create_data_loaders(
                     return t[:L]
             
             elif t.ndim == 2:
-                # assume shape (1, Ei) or (batch, Ei)
                 batch_dim, cur = cur_shape
                 if cur == L:
                     return t
                 elif cur < L:
-                    # pad along dim=1 to reach (batch_dim, L)
                     pad = t.new_full((batch_dim, L - cur), fill)
                     return torch.cat([t, pad], dim=1)
                 else:
-                    # slice off extra columns
                     return t[:, :L]
             
             else:
@@ -432,7 +425,7 @@ def create_data_loaders(
 
                 # --- Create substation and non-substation masks ---
                 sub_mask = torch.zeros(max_N, dtype=torch.float32)
-                sub_indices = data.cvx_sub_idx.long()  # No squeeze needed now
+                sub_indices = data.cvx_sub_idx.long()  
                 valid_sub_indices = sub_indices[sub_indices < Ni]
                 if len(valid_sub_indices) > 0:
                     sub_mask[valid_sub_indices] = 1.0

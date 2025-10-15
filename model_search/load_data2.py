@@ -54,7 +54,7 @@ def create_pyg_from_pp(pp_net_raw):
     """
     Convert a pandapower Net (or JSON/dict) into a PyG Data object with x, edge_index, edge_attr.
     """
-    # Ensure Net object
+    # Ensure net object
     if isinstance(pp_net_raw, str):
         pp_net = pp.from_json_string(pp_net_raw)
     elif isinstance(pp_net_raw, dict):
@@ -62,7 +62,6 @@ def create_pyg_from_pp(pp_net_raw):
     else:
         pp_net = pp_net_raw
 
-    # Node features: p_mw, q_mvar, vm_pu, va_degree
     bus_ids = pp_net.bus.index.to_numpy(dtype=int)
     id2row = {bid: i for i, bid in enumerate(bus_ids)}
     bus_res = pp_net.res_bus.loc[bus_ids]
@@ -109,8 +108,8 @@ def process_single_graph(gid, pp_all):
 
     data_x = create_pyg_from_pp(pp_all["mst"][gid])
     data_y = create_pyg_from_pp(net_opt)
-    data_x.edge_y = data_y.edge_attr[:, 2]   # switch state labels
-    data_x.node_y_voltage = data_y.x[:, 2]   # vm_pu labels
+    data_x.edge_y = data_y.edge_attr[:, 2]  
+    data_x.node_y_voltage = data_y.x[:, 2]   
 
     # Sanity checks
     if data_x.num_nodes != data_y.num_nodes:
