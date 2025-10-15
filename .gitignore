@@ -46,7 +46,7 @@
 
 /socp_lingkang/*
 /socp_lingkang/src/*
-
+/data_generation/old/*
 *.txt
 /models/
 /model_search/models/MLP/config_files/*.yaml
