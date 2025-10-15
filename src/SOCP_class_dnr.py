@@ -564,8 +564,6 @@ class SOCP_class:
                     if not active_model_substations:
                         if not list(model.buses): # Check if model.buses is empty
                             self.logger.error("SCF Radiality: No buses in the model. Cannot designate a root.")
-                            # This is a critical error, model building should probably stop or handle this.
-                            # For now, let's assume this won't happen if preprocessing is correct.
                             designated_root = None 
                         else:
                             designated_root = model.buses.first() # Pick the first bus in the set if no substations
@@ -575,11 +573,7 @@ class SOCP_class:
                         self.logger.info(f"SCF Radiality: Designated root for commodity flow is {designated_root}")
 
                     if designated_root is not None:
-                        # --- Flow Capacity Constraint ---
-                        # Flow on an arc is only possible if the underlying line is active (line_status[l]=1)
-                        # Max flow on an arc is N_buses (or N_energized_buses - 1)
-                        # (ensures flow variable goes to zero if line is off)
-                        n_buses_total = len(model.buses) # Max possible demand
+                        n_buses_total = len(model.buses) 
                         def scf_capacity_rule(m, u, v, l):
                             return m.scf_flow_var[u,v,l] <= (n_buses_total -1) * m.line_status[l]
                         model.SCFCapacity = Constraint(model.arcs, rule=scf_capacity_rule)
@@ -593,12 +587,9 @@ class SOCP_class:
                             outflow = sum(m.scf_flow_var[b_val,v,l_idx] for (b_val,v,l_idx) in m.arcs if b_val == b)
 
                             if b == designated_root:
-                                # The designated root supplies 1 unit of commodity for each *other* energized bus.
-                                # These other energized buses become the "sinks" in the commodity flow model.
                                 num_other_energized_sinks = sum(m.is_up[n_bus] for n_bus in m.buses if n_bus != designated_root)
                                 return outflow - inflow == num_other_energized_sinks
                             else:
-                                # Any other bus (non-root substations or partitioned buses) demands 1 unit of commodity if energized.
                                 return inflow - outflow == 1 * m.is_up[b]
                         
                         model.SCFFlowConservation = Constraint(model.buses, rule=scf_flow_conservation_rule)
@@ -727,18 +718,6 @@ class SOCP_class:
                     from pyomo.util.infeasible import log_infeasible_constraints
                     log_infeasible_constraints(self.model, log_expression=True, log_variables=True)
     
-
-        # Deep verification of solution 
-        #self.verify_solution()
-        
-        # Verify constraint satisfaction
-        #self.verify_constraint_satisfaction()
-        
-        # Track switch changes
-        # self.track_switch_changes()
-        
-        # Process the solution for return
-        #self.process_solution(update_network=False)
         return self.solver_results
 
     def track_switch_changes(self):
@@ -1047,9 +1026,7 @@ class SOCP_class:
         arc_max_flows = {}
         
         for u, v, l in model.arcs:
-            # Calculate maximum possible downstream demand from this arc
             try:
-                # Remove this edge temporarily to find downstream buses
                 G_temp = G.copy()
                 if G_temp.has_edge(u, v):
                     G_temp.remove_edge(u, v)
@@ -1149,9 +1126,7 @@ class SOCP_class:
         active_power_violations = []
         reactive_power_violations = []
         
-        # Checking each bus for active power balance
         for b in self.model.buses:
-            # Get flows, injections and balance values
             outflow = pyo_val(self.model.sum_outflow[b])
             inflow = pyo_val(self.model.sum_inflow[b])
             balance = outflow - inflow
@@ -1163,7 +1138,7 @@ class SOCP_class:
                 expected = injection + p_slack
                 
                 error = abs(balance - expected)
-                if error > 1e-4:  # Tolerance for numerical issues
+                if error > 1e-4:  
                     active_power_violations.append({
                         "bus": b,
                         "outflow": outflow,
@@ -1175,7 +1150,7 @@ class SOCP_class:
                         "error": error
                     })
             
-            # For reactive power (skip substations)
+            # For reactive power 
             if b not in self.substations:
                 # Calculate reactive flows
                 q_outflow = sum(pyo_val(self.model.reactive_power_flow[l, 0]) 
@@ -1189,7 +1164,7 @@ class SOCP_class:
                 q_expected = q_injection + q_slack
                 
                 q_error = abs(q_balance - q_expected)
-                if q_error > 1e-4:  # Tolerance for numerical issues
+                if q_error > 1e-4:  
                     reactive_power_violations.append({
                         "bus": b,
                         "outflow": q_outflow,
@@ -1239,8 +1214,6 @@ class SOCP_class:
             "active": active_power_violations,
             "reactive": reactive_power_violations
         }
-        
-        # Check special case: zero-injection buses with non-zero flows
         zero_injection_with_flow = []
         for b in self.model.buses:
             if b not in self.substations and abs(self.bus_p_inj[b]) < 1e-6:
@@ -1357,7 +1330,7 @@ class SOCP_class:
             rhs_squared = (vi + i_sq)**2
             
             # Check if constraint is satisfied
-            if norm_squared > rhs_squared * (1 + 1e-4):  # Allow small tolerance
+            if norm_squared > rhs_squared * (1 + 1e-4):  
                 violation = {
                     "line": l,
                     "from_bus": i,
@@ -1514,12 +1487,9 @@ class SOCP_class:
         except Exception as e:
             self.logger.warning(f"Error while checking for cycles: {e}")
         
-        # Check connectivity (should be connected if we have one substation, 
-        # or potentially multiple components if multiple substations)
         components = list(nx.connected_components(G))
         self.logger.info(f"Network has {len(components)} connected components")
-        
-        # Check if components match substations
+
         has_correct_components = False
         if len(components) == 1:
             self.logger.info("Network is fully connected - appropriate for single substation")
@@ -1530,10 +1500,10 @@ class SOCP_class:
         else:
             self.logger.warning(f"Network has {len(components)} components, more than the {len(substations)} substations")
         
-        # Check for tree structure - a radial network should have n nodes and n-1 edges
+
         total_nodes = G.number_of_nodes()
         total_edges = G.number_of_edges()
-        expected_edges = total_nodes - len(components)  # One less than nodes for each component
+        expected_edges = total_nodes - len(components)  
         
         self.logger.info(f"Graph has {total_nodes} nodes and {total_edges} edges. Expected {expected_edges} edges for a forest.")
         
@@ -1647,10 +1617,6 @@ class SOCP_class:
 
 
     def process_solution(self, update_network=True, tolerance=1e-5, output_dir=None):
-        # after solve
-        #for b in  self.model.buses:
-        #    print(f"Bus {b}: inj={self.bus_p_inj[b]:.4f}, out-in={pyo_val(self.sum_outflow[b]-self.sum_inflow[b]):.4f}, slack={pyo_val(self.active_power_slack[b,0]):.4f}")
-        # Set default output directory
         if output_dir is None:
             output_dir = Path("data_generation") / "logs" / "lp_files"
         else:
@@ -1786,7 +1752,6 @@ class SOCP_class:
             
             # Apply voltage results directly
             if hasattr(self.model, 'voltage_squared'):
-                # Create res_bus if it doesn't exist
                 if not hasattr(updated_network, 'res_bus') or updated_network.res_bus.empty:
                     updated_network.res_bus = pd.DataFrame(index=updated_network.bus.index)
                     updated_network.res_bus['vm_pu'] = np.nan
@@ -1796,7 +1761,7 @@ class SOCP_class:
                 for b in self.model.buses:
                     try:
                         v_squared = pyo_val(self.model.voltage_squared[b, 0])
-                        updated_network.res_bus.at[b, 'vm_pu'] = np.sqrt(max(0, v_squared))  # Ensure positive
+                        updated_network.res_bus.at[b, 'vm_pu'] = np.sqrt(max(0, v_squared)) 
                     except Exception as e:
                         msg = f"Could not apply voltage result for bus {b}: {e}"
                         lg.warning(msg)
@@ -1858,7 +1823,6 @@ class SOCP_class:
             
             # Apply line flows and check for overloads
             if hasattr(self.model, 'active_power_flow') and hasattr(self.model, 'squared_current_magnitude'):
-                # Create results tables if they don't exist
                 if not hasattr(updated_network, 'res_line') or updated_network.res_line.empty:
                     updated_network.res_line = pd.DataFrame(index=updated_network.line.index)
                     for col in ['p_from_mw', 'q_from_mvar', 'p_to_mw', 'q_to_mvar', 'pl_mw', 'i_ka']:
@@ -1870,13 +1834,13 @@ class SOCP_class:
                 for l in self.model.lines:
                     try:
                         # Active and reactive power flows
-                        p_val = pyo_val(self.model.active_power_flow[l, 0]) * self.S_base_VA / 1e6  # Convert to MW
-                        q_val = pyo_val(self.model.reactive_power_flow[l, 0]) * self.S_base_VA / 1e6  # Convert to MVar
+                        p_val = pyo_val(self.model.active_power_flow[l, 0]) * self.S_base_VA / 1e6  
+                        q_val = pyo_val(self.model.reactive_power_flow[l, 0]) * self.S_base_VA / 1e6 
                         i_squared = pyo_val(self.model.squared_current_magnitude[l, 0])
                         r_pu = pyo_val(self.model.line_resistance_pu[l])
                         
                         # Calculate loss
-                        loss = r_pu * i_squared * self.S_base_VA / 1e6  # Convert to MW
+                        loss = r_pu * i_squared * self.S_base_VA / 1e6  
                         
                         # Apply to network results
                         updated_network.res_line.at[l, 'p_from_mw'] = p_val
@@ -1920,7 +1884,7 @@ class SOCP_class:
             
             # Check voltage limits
             voltage_violations = []
-            vmin, vmax = 0.90, 1.10  # Standard voltage limits
+            vmin, vmax = 0.90, 1.10  
             
             if hasattr(updated_network, 'res_bus') and 'vm_pu' in updated_network.res_bus.columns:
                 vm = updated_network.res_bus['vm_pu']
@@ -2031,7 +1995,6 @@ class SOCP_class:
                 self.logger.info(f"Network forms a proper tree structure (n-1 lines)")
             else:
                 self.logger.warning(f"Network structure issue: expected {expected_lines} lines for a tree, found {active_lines}")
-        # Always do basic radiality check by counting lines and buses
         active_lines = sum(1 for l in self.model.lines if pyo_val(self.model.line_status[l]) > 0.5)
         energized_buses = sum(1 for b in self.model.buses if b in self.model.partitionedbuses 
                             and pyo_val(self.model.is_up[b]) > 0.5)
@@ -2044,8 +2007,7 @@ class SOCP_class:
             self.logger.info(f"Network forms a proper tree structure (n-1 lines)")
         else:
             self.logger.warning(f"Network structure issue: expected {expected_lines} lines for a tree, found {active_lines}")
-        # Continue with the rest of the method...
-        # Overall assessment
+
         if result['violations']:
             lg.warning(f"Found {len(result['violations'])} violations in solution")
             result['feasible'] = False
