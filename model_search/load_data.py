@@ -58,8 +58,7 @@ def load_pp_networks(base_directory):
 
 def create_pyg_from_pp(pp_net_raw):
     """
-    Accepts either a pandapower Net, a JSON string, or a dict.
-    Converts to a Net if needed, then extracts features and
+    Accepts either a pandapower Net, a JSON string, or a dict. Converts to a net if needed, then extracts features and
     a deduplicated line-switch state.
     """
     # --- ensure we have a Net object ---

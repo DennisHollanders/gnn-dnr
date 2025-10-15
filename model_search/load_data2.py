@@ -52,7 +52,7 @@ def load_pp_networks(base_directory):
 
 def create_pyg_from_pp(pp_net_raw):
     """
-    Convert a pandapower Net (or JSON/dict) into a PyG Data object with x, edge_index, edge_attr.
+    Convert a pandapower Net  into a PyG Data object with x, edge_index, edge_attr.
     """
     # Ensure net object
     if isinstance(pp_net_raw, str):
@@ -212,7 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_nodes", type=int, default=1000)
     parser.add_argument("--max_edges", type=int, default=5000)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--multiprocessing", action="store_true")
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--batching", choices=["standard","dynamic","neighbor"], default="dynamic")
