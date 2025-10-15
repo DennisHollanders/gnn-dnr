@@ -1,14 +1,14 @@
 ## Overview
 This repository contains the full pipeline to devevelop graph neural networks to solve distribution network reconfiguration. This repo can in general be subdivided into two components
 
-0. :TODO this README is still WIP and the repo should be cleaned.
-0. *Abstract*
+0. *link to paper*
 1. *Data Generation*
 2. *GNN Development*
 
 ---
 
-## Abstract + Link to paper
+##  Link to paper
+[Graph Neural Networks for Distribution Network Reconfiguration Optimization - Dennis Hollanders](https://research.tue.nl/nl/studentTheses/graph-neural-networks-for-distribution-network-reconfiguration-op) 
 
 ---
 
@@ -60,9 +60,22 @@ poetry run python data_generation/define_ground_truth --folder_path  <your-root>
 *Foldername:* model_search
 
 ### Purpose
+- Create a GNN model
+- Apply that GNN model within one of the warmstart frameworks
+- Experimentation with GNN + embedded optimization through cvxpy
 
+### Key sections 
+- model_search/main.py
+- model_search/predict_then_optimize.py
+- model_search/hpo.py
 
-### Key Sections
+- models:
+- model_search/models/AdvcanedMLP (GNNs)
+- model_search/models/cvx
+
+- config files:
+- model_search/config-mlp-GCN.yaml
+- model_search/config_files/config-cvx.yaml
 
 ### Example
 for these examples first adapt the config files, which are stored in model_search/config_files, to reference to the generated dataset paths.
@@ -87,6 +100,6 @@ poetry run python model_search/main.py --config config-cvx.yaml
 *Example 4: Evaluate Predict Then Optimize Model*
 
 ```
-poetry run python model_search/predict_then_optimize.py --folder_path <insert folder_path> --model_path <insert trained model path> --mode:...
+poetry run python model_search/predict_then_optimize.py --folder_path <insert folder_path> --model_path <insert trained model path> --mode soft
 ```
 --- 
