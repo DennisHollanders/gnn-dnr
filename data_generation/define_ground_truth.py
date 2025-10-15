@@ -366,7 +366,6 @@ def find_disconnected_buses(G):
             G_closed.add_edge(u, v)
     
     disconnected_buses = set()
-    
     for component in nx.connected_components(G_closed):
         if len(component) <= 2:
             disconnected_buses.update(component)
@@ -383,9 +382,6 @@ def loss_improvement(net_before, net_after, include_trafos=True,logger=None):
 
     def active_loss(net):
         loss = net.res_line["pl_mw"].abs().sum()
-        #if include_trafos and "res_trafo" in net:
-        #    loss += net.res_trafo["pl_mw"].abs().sum()
-
         return float(loss)
 
     l0 = active_loss(net_before)

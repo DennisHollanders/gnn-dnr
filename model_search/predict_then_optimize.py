@@ -114,16 +114,13 @@ class NetworkSwitchManager:
         """Set switch states for all lines and optionally track with label"""
         if len(states) != len(self.collapsed_switches):
             raise ValueError(f"Expected {len(self.collapsed_switches)} states, got {len(states)}")
-            
-        # Update the actual network
+
         sorted_switches = self.collapsed_switches.sort_values("element")
         for i, (_, switch_row) in enumerate(sorted_switches.iterrows()):
             line_id = switch_row['element']
             new_state = bool(states[i])
-            
-            # Only update if this line has physical switches
+
             if switch_row.get('has_physical_switch', True):
-                # Update ALL switches that control this line
                 switch_indices = self.line_to_switches_map.get(line_id, [])
                 for switch_idx in switch_indices:
                     self.net.switch.at[switch_idx, 'closed'] = new_state
@@ -132,7 +129,6 @@ class NetworkSwitchManager:
     
     def add_state(self, states, label):
         """Add a state to the history for visualization"""
-        # Check for duplicate labels and skip if already exists
         if label in self.state_labels:
             print(f"Warning: State '{label}' already exists, skipping duplicate")
             return
@@ -219,7 +215,6 @@ class NetworkSwitchManager:
             
             # For gnn_probs, use gradient coloring
             if label == "gnn_probs":
-                # Draw non-switch edges first
                 for u, v, data in G.edges(data=True):
                     if not data['is_switch']:
                         nx.draw_networkx_edges(G, pos, edgelist=[(u, v)],
@@ -230,7 +225,7 @@ class NetworkSwitchManager:
                     line_id = data['line_id']
                     if data['is_switch']:
                         state_value = line_states.get(line_id, 0)
-                        color = cmap(state_value)  # This will scale 0-1 automatically
+                        color = cmap(state_value) 
                         nx.draw_networkx_edges(G, pos, edgelist=[(u, v)],
                                             edge_color=[color], width=3.0, ax=ax, alpha=0.9)
                         
@@ -238,7 +233,7 @@ class NetworkSwitchManager:
                             open_switch_nodes.add(u)
                             open_switch_nodes.add(v)
             else:
-                # For binary states, separate edges by type
+                # For binary states
                 switch_edges_open = []
                 switch_edges_closed = []
                 switch_edges_fixed_open = []
@@ -270,39 +265,34 @@ class NetworkSwitchManager:
                     else:
                         non_switch_edges.append((u, v))
                 
-                # Draw edges with appropriate colors
-                # Non-switch edges (thin grey)
                 if non_switch_edges:
                     nx.draw_networkx_edges(G, pos, edgelist=non_switch_edges,
                                         edge_color="lightgrey", width=1.0, ax=ax, alpha=0.3)
-                
-                # Open switches (thick red, solid line)
+
                 if switch_edges_open:
                     nx.draw_networkx_edges(G, pos, edgelist=switch_edges_open,
                                         edge_color="red", width=3.0, ax=ax, alpha=0.9)
-                
-                # Closed switches (thick green)
+
                 if switch_edges_closed:
                     nx.draw_networkx_edges(G, pos, edgelist=switch_edges_closed,
                                         edge_color="green", width=3.0, ax=ax, alpha=0.9)
-                
-                # Fixed open switches (thick red, double dashed)
+   
                 if switch_edges_fixed_open:
                     nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_open,
                                         edge_color="red", width=3.0, ax=ax, alpha=0.9,
-                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                                        style=(0, (5, 2, 1, 2)))  
                     nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_open,
                                         edge_color="black", width=1.0, ax=ax, alpha=0.9,
-                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                                        style=(0, (5, 2, 1, 2)))  
                 
                 # Fixed closed switches (thick green, double dashed)
                 if switch_edges_fixed_closed:
                     nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_closed,
                                         edge_color="green", width=3.0, ax=ax, alpha=0.9,
-                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                                        style=(0, (5, 2, 1, 2)))  
                     nx.draw_networkx_edges(G, pos, edgelist=switch_edges_fixed_closed,
                                         edge_color="black", width=1.0, ax=ax,
-                                        style=(0, (5, 2, 1, 2)))  # double dash pattern
+                                        style=(0, (5, 2, 1, 2)))  
             
             # Draw nodes
             node_colors = []
@@ -377,7 +367,7 @@ def apply_physics_informed_rounding(switch_probs, switch_manager, device='cpu'):
     if not isinstance(switch_probs, torch.Tensor):
         switch_probs = torch.tensor(switch_probs, dtype=torch.float32, device=device)
 
-    # Build edge index from ALL lines (matching new approach)
+    # Build edge index from ALL lines 
     edge_list = []
     for _, switch_row in switch_manager.collapsed_switches.iterrows():
         line_idx = switch_row['element']
@@ -445,11 +435,11 @@ class Predictor:
         self.model.eval()
         self.loader = sample_loader
 
-        self.initial_states_history = {} # Used for initial state vs GNN prediction
-        self.gnn_predictions_history = {} # GNN's raw binary prediction
-        self.ground_truth_history = {} # New: To store ground truth from edge_y
+        self.initial_states_history = {} 
+        self.gnn_predictions_history = {} 
+        self.ground_truth_history = {} 
 
-        self.pp_networks_for_manager = None # Will be set in run()
+        self.pp_networks_for_manager = None 
 
     def run(self, loader=None, graph_ids=None, pp_networks_for_manager=None):
         loader = loader or self.loader
@@ -465,12 +455,11 @@ class Predictor:
         # Initialize counters for GNN prediction analysis
         total_graphs_processed_successfully = 0
         gnn_predicts_initial_count = 0
-        gnn_correctly_predicts_gt_count = 0 # New: Count graphs where GNN matches ground truth exactly
-
-        total_switches_for_initial_comparison = 0 # Sum of len(initial_switch_states)
+        gnn_correctly_predicts_gt_count = 0 
+        total_switches_for_initial_comparison = 0 
         total_switches_changed_by_gnn_vs_initial = 0
 
-        total_switches_for_gt_comparison = 0 # Sum of len(ground_truth_states)
+        total_switches_for_gt_comparison = 0 
         total_switches_changed_by_gnn_vs_gt = 0
 
 
@@ -514,9 +503,7 @@ class Predictor:
 
                 # GNN's raw binary prediction (rounded at 0.5 threshold)
                 gnn_raw_binary_prediction = [1 if pair[1] >= 0.5 else 0 for pair in probs_list]
-                
-                # --- IMPORTANT: Length Mismatch Checks ---
-                # Check for initial_switch_states vs GNN prediction length
+
                 if len(initial_switch_states) != len(gnn_raw_binary_prediction):
                     print(f"WARNING: Mismatch in length between initial states ({len(initial_switch_states)}) and GNN predictions ({len(gnn_raw_binary_prediction)}) for graph {gid}. Skipping initial state comparison for this graph.")
                     initial_switch_states_valid = False
@@ -534,12 +521,11 @@ class Predictor:
                 if not initial_switch_states_valid and not ground_truth_states_valid:
                     preds[gid] = probs_list
                     self.gnn_times[gid] = gnn_time
-                    continue # Skip to next batch
+                    continue 
                 
                 # If only ground truth is invalid, proceed with initial state comparison
                 if initial_switch_states_valid:
                     self.initial_states_history[gid] = initial_switch_states
-                    # This history will be used for overall averages, so it needs GNN predictions too
                     self.gnn_predictions_history[gid] = gnn_raw_binary_prediction 
                     
                     # Update counters for initial state comparison
@@ -565,8 +551,6 @@ class Predictor:
                 # If ground truth is valid, perform ground truth comparison
                 if ground_truth_states_valid:
                     self.ground_truth_history[gid] = ground_truth_states
-                    # If this is the primary analysis, you might want to adjust how total_graphs_processed_successfully increments
-                    # For now, it increments if initial_switch_states is valid.
                     
                     current_graph_switches_gt = len(ground_truth_states)
                     total_switches_for_gt_comparison += current_graph_switches_gt
@@ -579,8 +563,7 @@ class Predictor:
                     
                     correct_vs_gt_count = sum(1 for gt_state, gnn_pred in zip(ground_truth_states, gnn_raw_binary_prediction) if gt_state == gnn_pred)
                     percent_correct_vs_gt = (correct_vs_gt_count / current_graph_switches_gt) * 100 if current_graph_switches_gt > 0 else 0.0
-                    
-                    # Print GNN accuracy vs GT (only if GT comparison is valid)
+
                     print(f"Graph {gid}: GNN Accuracy (vs GT): {percent_correct_vs_gt:.2f}%")
 
 
@@ -626,23 +609,19 @@ class Predictor:
 
 class WarmstartSOCP(SOCP_class):
     def __init__(self, net, graph_id="", **kwargs):
-        # Extract our custom parameters before calling super().__init__()
         self.fixed_switches = kwargs.pop('fixed_switches', {})
-        self.fixed_lines = kwargs.pop('fixed_lines', {})  # New parameter for line-based fixing
+        self.fixed_lines = kwargs.pop('fixed_lines', {})  
         self.float_warmstart = kwargs.pop('float_warmstart', None)
         
-        # Ensure dictionaries are never None
         if self.fixed_switches is None:
             self.fixed_switches = {}
         if self.fixed_lines is None:
             self.fixed_lines = {}
-        
-        # Now call parent constructor with remaining kwargs
+
         super().__init__(net=net, graph_id=graph_id, **kwargs)
 
     def initialize(self):
         super().initialize()
-        # Apply fixed switches if any (this affects the network state before optimization)
         if self.fixed_switches:
             for idx, val in self.fixed_switches.items():
                 if idx in self.switch_df.index:
@@ -679,7 +658,6 @@ class WarmstartSOCP(SOCP_class):
         else:
             print("No variables fixed (normal optimization without hard warmstart)")
         if self.fixed_lines and fixed_count > 0:
-            # Verify that fixed variables are actually fixed
             unfixed_count = 0
             for line_id, expected_val in self.fixed_lines.items():
                 if line_id in model.lines:
@@ -696,7 +674,7 @@ class WarmstartSOCP(SOCP_class):
         return super().solve(solver=solver, **opts)
 
     def _solve_with_float_warmstart(self, solver, **opts):
-        from pyomo.opt import SolverFactory, SolutionStatus, TerminationCondition # Add SolutionStatus, TerminationCondition
+        from pyomo.opt import SolverFactory, SolutionStatus, TerminationCondition
 
         start_time_of_solve_method = time.time() 
     
@@ -707,9 +685,8 @@ class WarmstartSOCP(SOCP_class):
 
         opt = SolverFactory(solver)
 
-        # Set instance if not already done. This is crucial for persistent solvers before setting hints.
         if hasattr(opt, 'set_instance'):
-            opt.set_instance(m) # Ensure instance is set before hints
+            opt.set_instance(m) 
 
         if solver == "gurobi_persistent" and self.float_warmstart is not None:
             sorted_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
@@ -729,24 +706,18 @@ class WarmstartSOCP(SOCP_class):
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
         
-                        # For Gurobi, use round to nearest integer for binary vars
-                        # This sets the Pyomo variable's current value (warmstart for subsequent solves too)
-                        m.line_status[line_id].set_value(binary_value, skip_validation=True) # binary_value defined below
+                        m.line_status[line_id].set_value(binary_value, skip_validation=True) 
                         warmstart_count += 1
                         
-                        if hasattr(opt, '_solver_model'): # Check if Gurobi model is attached
+                        if hasattr(opt, '_solver_model'): 
                             try:
                                 pyomo_var = m.line_status[line_id]
-                                # Using the internal map is usually more reliable
                                 if hasattr(opt, '_pyomo_var_to_solver_var_map') and pyomo_var in opt._pyomo_var_to_solver_var_map:
                                     gurobi_var = opt._pyomo_var_to_solver_var_map[pyomo_var]
                                     gurobi_var.VarHintVal = warmstart_value
                                     gurobi_hints_set += 1
-                                # Fallback if internal map is not directly accessible (less ideal but keeps compatibility)
                                 else:
-                                    # This loop is less efficient but ensures the hint is set if direct map is elusive
                                     for gvar in opt._solver_model.getVars():
-                                        # Match by variable name - make sure the name format is consistent
                                         if f"line_status[{line_id}]" in str(gvar.VarName):
                                             gvar.VarHintVal = warmstart_value
                                             gurobi_hints_set += 1
@@ -757,13 +728,12 @@ class WarmstartSOCP(SOCP_class):
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
 
-                        if self.debug_level >= 2 and (i < 5 or i % 20 == 0): # Add debug_level check
+                        if self.debug_level >= 2 and (i < 5 or i % 20 == 0)
                              self.logger.debug(f"Set warmstart for line {line_id}: binary={binary_value}, hint={warmstart_value:.3f}")
 
             self.logger.info(f"Float warmstart summary: {warmstart_count} binary values set, {gurobi_hints_set} Gurobi hints set.")
         
         elif self.float_warmstart is not None:
-            # ... (existing non-gurobi float warmstart logic)
             unique_switches = self.switch_df[self.switch_df['et'] == 'l'].sort_values('element').drop_duplicates(subset='element', keep='first')
             
             warmstart_count = 0
@@ -775,7 +745,7 @@ class WarmstartSOCP(SOCP_class):
                         binary_value = 1 if warmstart_value >= 0.5 else 0
                         m.line_status[line_id].set_value(binary_value, skip_validation=True)
                         warmstart_count += 1
-                        if self.debug_level >= 2 and i < 5: # Add debug_level check
+                        if self.debug_level >= 2 and i < 5: 
                             self.logger.debug(f"Set binary warmstart for line {line_id}: {binary_value}")
             
             self.logger.info(f"Binary warmstart summary: {warmstart_count} values set.")
@@ -786,26 +756,18 @@ class WarmstartSOCP(SOCP_class):
         
         self.logger.info(f"Solving with float warmstart using {len(self.float_warmstart) if self.float_warmstart else 0} warmstart values.")
         
-        res = opt.solve(m, tee=self.debug_level > 1, load_solutions=True) # Ensure tee is controlled by debug_level
+        res = opt.solve(m, tee=self.debug_level > 1, load_solutions=True) 
         
-        # --- FIX FOR CAPTURING SOLVE TIME ---
-        # Prioritize solver.time if available and meaningful
         if hasattr(res.solver, 'time') and res.solver.time is not None and res.solver.time > 0:
             self.solve_time = float(res.solver.time)
-        elif hasattr(res.solver, 'wall_time') and res.solver.wall_time is not None and res.solver.wall_time > 0: # Some solvers might use wall_time
+        elif hasattr(res.solver, 'wall_time') and res.solver.wall_time is not None and res.solver.wall_time > 0:
             self.solve_time = float(res.solver.wall_time)
         else:
-            # Fallback: Measure wall time around the solve call
-            # This is less precise for actual solver time but ensures a non-zero value
-            # It's better to log a warning if precise solver time is unavailable.
             self.logger.warning("Precise solver time attribute not found from Pyomo results. Falling back to external timing.")
-            self.solve_time = time.time() - start_time_of_solve_method # Need to get this 'start_time_of_solve_method'
-            # To get start_time_of_solve_method, you'd add start_time_of_solve_method = time.time() at the very beginning of _solve_with_float_warmstart
-        # --- END FIX ---
+            self.solve_time = time.time() - start_time_of_solve_method
 
-        # Add detailed logging of termination condition and possible solution status
         termination_condition = res.solver.termination_condition
-        solution_status = res.solver.status # e.g., SolutionStatus.optimal, SolutionStatus.infeasible
+        solution_status = res.solver.status 
         self.logger.info(f"Solver termination condition: {termination_condition}")
         self.logger.info(f"Solver solution status: {solution_status}")
 
@@ -835,7 +797,7 @@ class ExplicitSaver:
         self.confidence_threshold = confidence_threshold
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Setup folders (same as before)
+        # Setup folders 
         suffix = f"{warmstart_mode}-{confidence_threshold}" if warmstart_mode == "hard" and confidence_threshold is not None else warmstart_mode
         self.predictions_folder = self.root_folder / "predictions"
         self.predictions_folder.mkdir(exist_ok=True)
@@ -869,10 +831,8 @@ class ExplicitSaver:
     def apply_rounding(self, predictions_2class: list, method: str, switch_manager: NetworkSwitchManager) -> list:
         """Apply rounding using NetworkSwitchManager with 2-class probabilities"""
         if method == "round":
-            # Use argmax: choose class with higher probability
             rounded = [1 if pair[1] > pair[0] else 0 for pair in predictions_2class]
         elif method == "PhyR":
-            # Extract closed probabilities for PhyR
             closed_probs = [pair[1] for pair in predictions_2class]
             rounded = apply_physics_informed_rounding(closed_probs, switch_manager, device=self.device)
         else:
@@ -908,7 +868,7 @@ class ExplicitSaver:
                   error_message: str = None):
         """Add CSV entry with separate timing columns"""
         
-        # Calculate total time based on warmstart mode
+
         if self.warmstart_mode == "optimization_without_warmstart":
             total_time = solve_time 
         elif self.warmstart_mode == "only_gnn_predictions":
@@ -949,8 +909,6 @@ class ExplicitSaver:
         print(f"CSV saved to: {csv_path}")
         return csv_path
 
-
-
 class Optimizer:
     def __init__(self, folder_name: str, predictions: dict, saver: ExplicitSaver,
                  warmstart_mode: str = "optimization_without_warmstart",
@@ -988,45 +946,35 @@ class Optimizer:
 
         print(f"retrieving gnn output of {gid} to process optimization of {gid}")
         try:
-            # Create network and manager
             net = self.pp_all["mst"][gid].deepcopy()
             switch_manager = NetworkSwitchManager(net)
 
             print(f"network {gid} has {len(switch_manager.collapsed_switches)} switches and nodes: {len(switch_manager.net.bus)}")
             
-            # Store manager for visualization
             self.saver.graph_managers[gid] = switch_manager
             
-            # 1. Initial state is already captured in manager constructor
             initial_state = switch_manager.get_initial_states()
-            
-            # 3. GNN probabilities
-            raw_preds_2class = self.predictions[gid]  # Now 2-class probabilities
-            # Extract closed probabilities for visualization
+
+            raw_preds_2class = self.predictions[gid]  
             closed_probs = [pair[1] for pair in raw_preds_2class]
             switch_manager.add_state(closed_probs, "gnn_probs")
             
-            # 4. GNN rounded predictions
             rounded = self.saver.apply_rounding(raw_preds_2class, self.saver.rounding_method, switch_manager)
             switch_manager.add_state(rounded, f"gnn_round")
             
-            # Apply rounded predictions to network
             switch_manager.set_switch_states(rounded)
 
             # --- Warmstart setup ---
             if mode == "soft":
-                # Network already has rounded states applied
                 radial, connected = is_radial_and_connected(net, include_switches=True)
                 print(f"Soft warmstart {gid}: {rounded.count(0)} zeros/{rounded.count(1)} ones, radial={radial}, connected={connected}")
                 self.saver.save_network_as_json(net, self.saver.warmstart_networks_folder, gid)
                 solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid)
 
             elif mode == "float":
-                # Extract closed probabilities for float warmstart
                 closed_probs = [pair[1] for pair in raw_preds_2class]
                 solver = WarmstartSOCP(net=net, toggles=self.toggles, graph_id=gid, float_warmstart=closed_probs)
                 
-                # Also record discrete version for saving
                 net2 = net.deepcopy()
                 switch_manager2 = NetworkSwitchManager(net2)
                 switch_manager2.set_switch_states(rounded, "float_warmstart_discrete")
@@ -1040,7 +988,7 @@ class Optimizer:
             
             elif mode == "hard":
                 T = self.confidence_threshold
-                fixed_lines = {}  # Changed: use fixed_lines for line_id mapping
+                fixed_lines = {}  
                 fixed_0_count = 0
                 fixed_1_count = 0
                 sorted_switches = switch_manager.collapsed_switches.sort_values("element")
@@ -1102,15 +1050,13 @@ class Optimizer:
                     v = sol.get(switch_row['element'], 0)
                     final_states.append(int(v))
                 
-                # Apply solution to ALL switches in the network
                 final_switch_manager.set_switch_states(final_states)
 
                 switch_manager.set_switch_states(final_states, "optimization_result")
             else:
-                # GNN-only mode: no optimization
                 solve_time = 0.0
                 objective_value = float("nan")
-                final_net = net  # Already modified with GNN predictions
+                final_net = net  
                 final_states = rounded
                 switch_manager.add_state(final_states, "gnn_only_final")
 
@@ -1144,7 +1090,7 @@ class Optimizer:
                 graph_id=gid,
                 ground_truth=ground_truth,
                 initial_state=initial_state,
-                gnn_probs=closed_probs,  # Use extracted closed probabilities
+                gnn_probs=closed_probs,  
                 gnn_prediction=rounded,
                 warmstart_config=rounded,
                 final_optima=final_states,
@@ -1317,74 +1263,8 @@ if __name__ == "__main__":
             device=device,
             sample_loader=test_loader
         )
-        # Pass pp_networks here, as it's loaded outside the Predictor class.
         predictions, gnn_times = predictor.run(test_loader, graph_ids=graph_ids, pp_networks_for_manager=pp_networks)
 
-        # print(f"Prediction keys: {sorted(predictions.keys())}")
-        # print(f"Graph IDs: {sorted(graph_ids)}")
-        # print(f"Predictions type: {type(list(predictions.keys())[0]) if predictions else 'None'}")
-        # print(f"Graph IDs type: {type(graph_ids[0]) if graph_ids else 'None'}")
-        # # Convert to numpy arrays
-        # class_0_preds = np.array(predictor.class_0_predictions)
-        # class_1_preds = np.array(predictor.class_1_predictions)
-
-        # class_0_high_conf = class_0_preds[class_0_preds > 0.5]
-        # class_1_high_conf = class_1_preds[class_1_preds > 0.5]
-        # # create 50 bins in [0.5, 1.0]
-
-        # bins = np.linspace(0.5, 1.0, 51)
-
-        # # IEEE column width plotting setup
-        # column_width_pt = 246.0  # IEEE single column width in points
-        # inches_per_pt = 1.0/72.27
-        # fig_w = column_width_pt * inches_per_pt
-        # fig_h = fig_w * 0.6  # Slightly taller aspect ratio for better readability
-
-        # fig, ax0 = plt.subplots(figsize=(fig_w, fig_h))
-
-        # # Class 0 (Open) on left
-        # n0, bins0, patches0 = ax0.hist(
-        #     class_0_high_conf, bins=bins,
-        #     alpha=0.5, color='red', edgecolor='red', linewidth=0.5,
-        #     label='Class 0 (Open)'
-        # )
-        # ax0.set_xlabel('Confidence', fontsize=8)
-        # ax0.set_ylabel('Freq Class 0', fontsize=8, color='red')
-        # ax0.tick_params(axis='y', labelcolor='red', labelsize=7, width=0.5, length=3)
-        # ax0.yaxis.set_major_locator(ticker.MultipleLocator(10))
-
-        # # Class 1 (Closed) on right
-        # ax1 = ax0.twinx()
-        # n1, bins1, patches1 = ax1.hist(
-        #     class_1_high_conf, bins=bins,
-        #     alpha=0.5, color='blue', edgecolor='blue', linewidth=0.5,
-        #     label='Class 1 (Closed)'
-        # )
-        # ax1.set_ylabel('Freq Class 1', fontsize=8, color='blue')
-        # ax1.tick_params(axis='y', labelcolor='blue', labelsize=7, width=0.5, length=3)
-        # #ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.1))
-
-        # # X-axis ticks every 0.1
-        # ax0.xaxis.set_major_locator(ticker.MultipleLocator(0.1))
-
-        # # Title
-        # ax0.set_title('High-Confidence Predictions (> 0.5)', fontsize=9, pad=10)
-
-        # # Legend centered top
-        # h0, l0 = ax0.get_legend_handles_labels()
-        # h1, l1 = ax1.get_legend_handles_labels()
-        # ax0.legend(h0 + h1, l0 + l1,
-        #         loc='upper center',
-        #         bbox_to_anchor=(0.5, 1.0),
-        #         fontsize=7,
-        #         ncol=1)
-
-        # plt.tight_layout(pad=0.5)
-        # fig.savefig('confidence_histograms_double_axis_png.png',
-        #             bbox_inches='tight',
-        #             pad_inches=0.05)
-                                                
-        
     if args.optimize and predictions is not None:
         print(f"\n ===================================================\n        RUN OPTIMIZATION \n =================================================== \n ")
         print(f"Starting optimization with '{args.warmstart_mode}' warmstart...")
@@ -1399,12 +1279,6 @@ if __name__ == "__main__":
         )
         final_results, csv_path = optimizer.run(num_workers=args.num_workers)
         
-        # if args.visualize:
-        #     # Save visualizations for all graphs
-        #     print("\nSaving visualizations for all graphs...")
-        #     saver.save_all_visualizations()
-        #     print(f"Visualizations saved to: {saver.visualization_folder}")
-
         print(f"Optimization completed with {len(final_results)} results.")
         print(f"\n ===================================================\n       PROCESS RESULTS\n =================================================== \n ")
         if csv_path:

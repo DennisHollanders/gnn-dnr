@@ -20,19 +20,15 @@ class WeightedBCELoss(nn.Module):
             binary_logits = logits[:, 1] - logits[:, 0]  
             loss_fn = nn.BCEWithLogitsLoss(
                 pos_weight=torch.tensor(self.pos_weight, device=logits.device),
-                reduction='mean'
-            )
+                reduction='mean')
             return loss_fn(binary_logits, targets)
-        
-
         else:
             if logits.dim() == 2 and logits.size(1) == 1:
                 logits = logits.squeeze(1)
                 
             loss_fn = nn.BCEWithLogitsLoss(
                 pos_weight=torch.tensor(self.pos_weight, device=logits.device),
-                reduction='mean'
-            )
+                reduction='mean')
             return loss_fn(logits, targets)
 
 class FocalLoss(nn.Module):

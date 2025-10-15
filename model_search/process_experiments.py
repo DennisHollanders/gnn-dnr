@@ -28,8 +28,7 @@ from data_generation.define_ground_truth import (
 def calculate_topology_error_hamming(y_true, y_pred):    
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
-   
-    # Handle length mismatch
+
     if len(y_true) != len(y_pred):
         min_len = min(len(y_true), len(y_pred))
         y_true = y_true[:min_len]
@@ -47,16 +46,13 @@ def calculate_specificity_sensitivity(y_true, y_pred):
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
    
-    # True Positives, False Positives, True Negatives, False Negatives
     tp = np.sum((y_true == 1) & (y_pred == 1))
     fp = np.sum((y_true == 0) & (y_pred == 1))
     tn = np.sum((y_true == 0) & (y_pred == 0))
     fn = np.sum((y_true == 1) & (y_pred == 0))
    
-    # Sensitivity (True Positive Rate / Recall)
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
    
-    # Specificity (True Negative Rate)
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
    
     return specificity, sensitivity
@@ -68,7 +64,6 @@ def calculate_f1_majority(y_true, y_pred):
 def check_network_radiality(predictions_folder, filename_pattern, experiment_id):
     """Check if a specific network configuration is radial"""
     try:
-        # Look for corresponding prediction folders
         predictions_path = Path(predictions_folder)
         prediction_folders = list(predictions_path.glob(f"prediction-{filename_pattern}*"))
        
@@ -77,7 +72,6 @@ def check_network_radiality(predictions_folder, filename_pattern, experiment_id)
             prediction_networks_folder = prediction_folder / "pandapower_networks"
            
             if prediction_networks_folder.exists():
-                # Look for network file corresponding to experiment_id
                 json_files = list(prediction_networks_folder.glob("*.json"))
                 if experiment_id < len(json_files):
                     json_file = json_files[experiment_id]
@@ -100,7 +94,7 @@ def load_ground_truth_from_no_warmstart(predictions_folder, use_no_warmstart_gt=
     
     predictions_path = Path(predictions_folder)
     
-    # Try to find the no_warmstart CSV file
+
     no_warmstart_csv = None
     for csv_file in predictions_path.glob("results-*optimization_without_warmstart.csv"):
         no_warmstart_csv = csv_file
@@ -135,9 +129,7 @@ def detect_infeasibility_by_no_change(row, initial_state, final_optima, solve_ti
         if pd.isna(solve_time):
             solve_time = float('inf')
         
-        # Check if solve time is suspiciously low
         if solve_time < solve_time_threshold:
-            # Check if final_optima equals initial_state (no changes made)
             if initial_state == final_optima:
                 return True, 'no_change', f"No switches changed with very low solve time ({solve_time:.4f}s)"
     except:
@@ -153,8 +145,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
     # Find all CSV files
     csv_files = list(predictions_path.glob("results-*.csv"))
     print(f"Found {len(csv_files)} CSV files to process")
-   
-    # Debug mode - process only first CSV
+
     if debug_mode:
         csv_files = csv_files[:1]
         print(f"DEBUG MODE: Processing only first CSV file")
@@ -170,7 +161,6 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
         try:
             df = pd.read_csv(csv_file)
            
-            # Parse filename to extract configuration
             filename = csv_file.stem  # results-{model}-{rounding}-{warmstart}
             parts = filename.replace("results-", "").split("-")
            
@@ -194,21 +184,18 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                 gnn_type = "GCN"
             else:
                 gnn_type = model_name
-           
-            # Apply model name mapping if provided
+       
             display_name = model_name
             if model_name_mapping and model_name in model_name_mapping:
                 display_name = model_name_mapping[model_name]
            
             filename_pattern = filename.replace('results-', '')
            
-            # Process each experiment (row) in the CSV
+            # Process each experiment 
             for idx, row in df.iterrows():
                 try:
-                    # Get initial state for comparison
                     initial_state = json.loads(row['initial_state']) if 'initial_state' in row else None
                     
-                    # Parse JSON fields
                     final_optima = json.loads(row['final_optima'])
                     
                     # Determine which ground truth to use
@@ -228,11 +215,8 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                     is_infeasible = False
                     infeasible_type = None
                     error_msg = ""
-                   
-                    # Check error column - if True or any non-empty value, it's infeasible
                     if 'error' in row:
                         error_val = row['error']
-                        # Check for True, 'True', 'true', or any non-empty string
                         if (isinstance(error_val, bool) and error_val) or \
                            (isinstance(error_val, str) and error_val.lower() == 'true') or \
                            (pd.notna(error_val) and str(error_val).strip() and str(error_val).strip().lower() != 'false'):
@@ -240,7 +224,6 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                             infeasible_type = 'error'
                             error_msg = str(error_val)
                    
-                    # Check solve time for timeout (>599 seconds indicates timeout/infeasibility)
                     solve_time = row.get('solve_time', 0.0)
                     if pd.isna(solve_time):
                         solve_time = 0.0
@@ -254,7 +237,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                             infeasible_type = 'time_limit'
                             error_msg = f"Timeout - solve_time: {solve_time}s"
                     
-                    # NEW: Check for infeasibility by no changes and low solve time
+                    #Check for infeasibility by no changes and low solve time
                     if not is_infeasible and initial_state is not None:
                         no_change_infeasible, no_change_type, no_change_msg = detect_infeasibility_by_no_change(
                             row, initial_state, final_optima, solve_time_threshold=20
@@ -284,26 +267,26 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                         balanced_acc = balanced_accuracy_score(ground_truth, final_optima)
                         spec, sens = calculate_specificity_sensitivity(ground_truth, final_optima)
                        
-                        # Add GraPhyR topology error metric
+                        # topology error metric
                         topology_error_hamming = calculate_topology_error_hamming(ground_truth, final_optima)
                        
                     else:
                         mcc = f1_majority = balanced_acc = spec = sens = 0.0
-                        topology_error_hamming = 1.0  # Maximum error for infeasible cases
+                        topology_error_hamming = 1.0  
                    
                     # Get loss information
                     loss_ground_truth = row.get('loss_ground_truth', np.nan)
                     loss_final = row.get('loss_final', np.nan)
                     loss_difference = abs(loss_final - loss_ground_truth) if not np.isnan(loss_final) and not np.isnan(loss_ground_truth) else np.nan
                    
-                    # Check radiality if prediction is wrong AND not infeasible
+                    # Check radiality if prediction is wrong and not infeasible
                     is_radial = is_connected = None
                     if not is_correct and not is_infeasible:
                         is_radial, is_connected = check_network_radiality(
                             predictions_folder, filename_pattern, idx
                         )
                    
-                    # Determine category - each graph goes in exactly one category
+                    # Determine category 
                     if is_correct:
                         category = 'correct'
                     elif is_infeasible:
@@ -314,9 +297,8 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
                         elif infeasible_type == 'no_change':
                             category = 'infeasible_no_change'
                         else:  # both
-                            category = 'infeasible_error'  # Count in error category if both
+                            category = 'infeasible_error'  
                     else:
-                        # Not correct and not infeasible - check radiality
                         if is_radial and is_connected:
                             category = 'radial_wrong'
                         else:
@@ -409,7 +391,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
        
         avg_topology_error = np.mean(all_topology_errors) if all_topology_errors else 1.0
        
-        # Count categories - each graph in exactly one category
+        # Count categories each graph in exactly one category
         correct_count = sum(group['category'] == 'correct')
         radial_wrong = sum(group['category'] == 'radial_wrong')
         non_radial_wrong = sum(group['category'] == 'non_radial_wrong')
@@ -417,7 +399,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
         infeasible_time_count = sum(group['category'] == 'infeasible_time')
         infeasible_no_change_count = sum(group['category'] == 'infeasible_no_change')
        
-        # Total infeasible (for backward compatibility)
+        # Total infeasible 
         infeasible_total = infeasible_error_count + infeasible_time_count + infeasible_no_change_count
        
         # Verify each graph is counted exactly once
@@ -428,7 +410,7 @@ def process_all_experiments_detailed(predictions_folder, model_name_mapping=None
         feasible_times = group[~group['is_infeasible']]['solve_time']
         time_feasible = feasible_times.mean() if len(feasible_times) > 0 else 0.0
        
-        # For infeasible, assume max time
+        # For infeasible assume max time
         max_time = 6000
         all_times = group['solve_time'].fillna(max_time)
         all_times[group['is_infeasible']] = max_time
@@ -577,14 +559,11 @@ def create_latex_table_overleaf_format(results_df):
         # HardWarmStart methods
         first_hard = True
         for _, row in gnn_rows.iterrows():
-            # Skip non-hard warmstart rows
             if 'soft' in row['experiments'] or 'float' in row['experiments'] or 'without_warmstart' in row['experiments']:
                 continue
                 
             method_str = "& \\multirow{8}{*}{HardWarmStart}" if first_hard else "&"
             first_hard = False
-            
-            # Determine variant
             if 'Best' in row['experiments']:
                 if '0.95' in row['experiments']:
                     variant = "PhyR-0.95"
@@ -626,7 +605,7 @@ def create_latex_table_overleaf_format(results_df):
                 latex_lines.append("      \\arrayrulecolor{gray!60}\\cdashline{2-14}")
         
         # Add separator between GNN types
-        if gnn_type != 'GIN':  # Don't add after last one
+        if gnn_type != 'GIN':
             latex_lines.append("      \\arrayrulecolor{black}\\midrule")
    
     # Close table
@@ -639,7 +618,6 @@ def create_latex_table_overleaf_format(results_df):
    
     return "\n".join(latex_lines)
 
-# Example usage
 if __name__ == "__main__":
     import argparse
     
@@ -657,7 +635,6 @@ if __name__ == "__main__":
     print(f"Using predictions folder: {args.predictions_folder}")
     print(f"Ground truth mode: {'no_warmstart' if args.use_no_warmstart_gt else 'original CSV'}")
     
-    # Map your actual model names to the desired display names
     model_mapping = {
         "GAT-stage2-hyperparameter-tuning-Best": "GAT",      
         "GIN-stage2-hyperparameter-tuning-Best": "GIN",    
@@ -678,7 +655,6 @@ if __name__ == "__main__":
         summary = summary_df.groupby('GNN type')[['MCC score', 'F1-majority score', 'Balanced Accuracy']].mean()
         print(summary)
         
-        # Print infeasibility breakdown
         print(f"\nInfeasibility breakdown:")
         for _, row in summary_df.iterrows():
             print(f"{row['Name of model']} - {row['experiments']}:")

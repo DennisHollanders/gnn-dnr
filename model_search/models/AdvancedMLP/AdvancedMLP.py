@@ -47,44 +47,7 @@ class GNNLayer(nn.Module):
     
     def forward(self, x, edge_index):
         return self.conv(x, edge_index)
-# class PhyR(nn.Module):
-#     """Top-k straight-through selector; keeps gradient wrt probabilities."""
-#     def __init__(self, k_ratio: float = 0.2):              # 20 % by default
-#         super().__init__()
-#         self.k_ratio = k_ratio
 
-#     def forward(self, probs):                              # probs shape (E,)
-#         k = max(1, int(self.k_ratio * probs.numel()))
-#         idx = probs.topk(k, dim=0).indices
-#         y_hard = torch.zeros_like(probs).scatter_(0, idx, 1.0)
-#         return (y_hard - probs).detach() + probs  
-
-# class PhysicsTopK(nn.Module):
-#     def __init__(self, k_ratio: float):
-#         super().__init__()
-#         self.k_ratio = k_ratio
-
-#     def forward(self, probs: torch.Tensor, edge_batch: torch.Tensor):
-#         # probs: [E], edge_batch: [E] indicating graph idx for each edge
-#         num_graphs = int(edge_batch.max().item()) + 1
-#         counts = torch.bincount(edge_batch, minlength=num_graphs)  # [G]
-#         # compute k per graph (at least 1)
-#         k_per_graph = torch.clamp(torch.round(self.k_ratio * counts).long(), min=1)
-
-#         # build hard mask
-#         y_hard = torch.zeros_like(probs)
-#         for g in range(num_graphs):
-#             mask = (edge_batch == g).nonzero(as_tuple=True)[0]
-#             if mask.numel() == 0:
-#                 continue
-#             p = probs[mask]
-#             # per-graph topk (tie-breaker by index)
-#             k = min(k_per_graph[g].item(), p.numel())
-#             topk_vals, topk_idx = p.topk(k, largest=True, sorted=False)
-#             y_hard[mask[topk_idx]] = 1.0
-
-#         # straight‐through
-#         return (y_hard - probs).detach() + probs
 class PhysicsInformedRounding(nn.Module):
     """
     Physics-Informed Rounding (PhyR) based on GraPhyR framework.
@@ -134,7 +97,6 @@ class PhysicsInformedRounding(nn.Module):
             
             # Set selected switches to 1
             if selected_edges.numel() > 0:
-                # Find which edges were selected
                 selected_mask = selected_edges > 0.5
                 selected_local_indices = selected_mask.nonzero(as_tuple=True)[0]
                 
@@ -142,8 +104,6 @@ class PhysicsInformedRounding(nn.Module):
                 for local_idx in selected_local_indices:
                     global_idx = graph_edge_indices[local_idx]
                     switch_decisions[global_idx] = 1.0
-        
-        # Straight-through estimator for gradients
         return (switch_decisions - switch_probs).detach() + switch_probs
     
     def _kruskal_switch_selection(self, probs, edge_index, target_switches, num_nodes):
@@ -171,8 +131,6 @@ class PhysicsInformedRounding(nn.Module):
         if actual_num_nodes <= 1:
             return torch.zeros_like(probs)
         
-        # Create mapping from original node indices to contiguous indices [0, 1, 2, ...]
-        # Use tensor operations to avoid Python loops where possible
         node_mapping = torch.zeros(unique_nodes.max().item() + 1, dtype=torch.long, device=device)
         node_mapping[unique_nodes] = torch.arange(actual_num_nodes, dtype=torch.long, device=device)
         
@@ -181,16 +139,14 @@ class PhysicsInformedRounding(nn.Module):
         mapped_edges[0] = node_mapping[edge_index[0]]
         mapped_edges[1] = node_mapping[edge_index[1]]
         
-        # Sort edges by probability (descending - highest probability first)
+        # Sort edges by probability
         sorted_indices = torch.argsort(probs, descending=True)
-        
-        # Initialize Union-Find data structures
         parent = list(range(actual_num_nodes))
         rank = [0] * actual_num_nodes
         
         def find(x):
             if parent[x] != x:
-                parent[x] = find(parent[x])  # Path compression
+                parent[x] = find(parent[x]) 
             return parent[x]
         
         def union(x, y):
@@ -210,32 +166,23 @@ class PhysicsInformedRounding(nn.Module):
         
         # Select edges using Kruskal's algorithm
         selected_indices = []
-        target_edges = min(target_switches, actual_num_nodes - 1)  # For a tree (radial network)
+        target_edges = min(target_switches, actual_num_nodes - 1)  # For a tree
         
         for idx_tensor in sorted_indices:
             if len(selected_indices) >= target_edges:
-                break
-            
-            # Convert tensor index to Python int
+                break     
             idx = int(idx_tensor.item())
-            
-            # Get node indices as Python ints
             u = int(mapped_edges[0, idx].item())
             v = int(mapped_edges[1, idx].item())
-            
-            # Bounds check (should not be needed with proper mapping, but just in case)
             if u >= actual_num_nodes or v >= actual_num_nodes or u < 0 or v < 0:
                 print(f"Warning: Invalid node indices u={u}, v={v}, num_nodes={actual_num_nodes}")
                 continue
-            
-            # Try to add this edge
             if union(u, v):
                 selected_indices.append(idx)
         
         # Create result tensor
         selected_edges = torch.zeros_like(probs)
         if selected_indices:
-            # Convert list of indices to tensor for advanced indexing
             selected_indices_tensor = torch.tensor(selected_indices, dtype=torch.long, device=device)
             selected_edges[selected_indices_tensor] = 1.0
         
@@ -272,8 +219,6 @@ class PhysicsInformedRounding(nn.Module):
             k = min(target_edges, graph_probs.size(0))
             if k > 0:
                 _, top_indices = torch.topk(graph_probs, k)
-                
-                # Map back to original indices
                 original_indices = torch.where(graph_edge_mask)[0][top_indices]
                 selected_edges[original_indices] = 1.0
         
@@ -284,13 +229,10 @@ class PhysicsInformedRounding(nn.Module):
         Main physics rounding method with error handling.
         """
         try:
-            # Use the forward method for proper per-graph processing
             return self.forward(probs, edge_index, edge_batch, num_nodes_per_graph)
         except Exception as e:
             print(f"Kruskal failed with error: {e}")
             print("Falling back to simple physics rounding...")
-            
-            # Fall back to simpler method
             return self._simple_physics_rounding(probs, edge_index, edge_batch, num_nodes_per_graph)
 
 class PhysicsTopK(nn.Module):
@@ -315,10 +257,8 @@ class PhysicsTopK(nn.Module):
             num_nodes_per_graph: [G] Nodes per graph (optional)
         """
         if self.enforce_radiality and edge_index is not None:
-            # Use physics-informed rounding with radiality constraint
             return self.physics_rounding(probs, edge_index, edge_batch, num_nodes_per_graph)
         else:
-            # Fallback to simple per-graph topk
             return self._simple_topk(probs, edge_batch)
     
     def _simple_topk(self, probs: torch.Tensor, edge_batch: torch.Tensor):
@@ -338,36 +278,7 @@ class PhysicsTopK(nn.Module):
             y_hard[mask[topk_idx]] = 1.0
 
         return (y_hard - probs).detach() + probs     
-# class SwitchGatedMP(MessagePassing):
-#     def __init__(self, in_channels, out_channels, edge_attr_dim, aggr="add"):
-#         super().__init__(aggr=aggr)
-#         self.lin = nn.Linear(in_channels, out_channels, bias=False)
-#         self.res_lin = nn.Linear(in_channels, out_channels, bias=False)
-#         self.gate_mlp = nn.Sequential(
-#             nn.Linear(edge_attr_dim, out_channels),
-#             nn.Sigmoid()
-#         )
-#         self.act = nn.ReLU()
 
-#         nn.init.xavier_uniform_(self.lin.weight)
-#         nn.init.xavier_uniform_(self.res_lin.weight)
-#         for m in self.gate_mlp:
-#             if isinstance(m, nn.Linear):
-#                 nn.init.xavier_uniform_(m.weight)
-#                 nn.init.zeros_(m.bias)
-
-#     def forward(self, x, edge_index, edge_attr):
-#         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-
-#     def message(self, x_j, x_i, edge_attr):
-#         # compute gate from edge features
-#         gate = self.gate_mlp(edge_attr)  # [E, out_channels]
-#         msg = self.lin(x_j)              # [E, out_channels]
-#         gated = msg * gate               # elementwise
-#         return self.act(gated + self.res_lin(x_i))
-
-#     def update(self, aggr_out):
-#         return self.act(aggr_out)
 class SwitchGatedMP(MessagePassing):
     """
     Physics-Informed Gated Message Passing based on GraPhyR framework.
@@ -411,7 +322,6 @@ class SwitchGatedMP(MessagePassing):
         
         self.activation = nn.ReLU()
         
-        # Initialize weights
         self._initialize_weights()
         
     def _initialize_weights(self):
@@ -444,7 +354,7 @@ class SwitchGatedMP(MessagePassing):
         """
         batch_size = x_j.size(0)
         
-        # Extract physical parameters (handle potential dimension mismatches)
+        # Extract physical parameters 
         if edge_attr.size(1) >= 3:
             impedance = edge_attr[:, :2]      # Resistance (R) and Reactance (X)
             switch_state = edge_attr[:, 2:3]  # Current switch state [0,1]
@@ -456,29 +366,27 @@ class SwitchGatedMP(MessagePassing):
             other_features = None
         
         # Encode physical properties
-        impedance_emb = self.impedance_encoder(impedance)    # [E, out_channels//2]
-        switch_emb = self.switch_encoder(switch_state)       # [E, out_channels//4]
+        impedance_emb = self.impedance_encoder(impedance)    
+        switch_emb = self.switch_encoder(switch_state)       
         
         # Combine physical embeddings
         embeddings = [impedance_emb, switch_emb]
         
         if other_features is not None and self.line_encoder is not None:
-            line_emb = self.line_encoder(other_features)     # [E, out_channels//4]
+            line_emb = self.line_encoder(other_features)    
             embeddings.append(line_emb)
         
-        edge_embedding = torch.cat(embeddings, dim=1)       # [E, gate_input_dim]
+        edge_embedding = torch.cat(embeddings, dim=1)      
         
         # Compute physics-informed gate
-        # Models how impedance and switch state affect power transmission capability
-        gate = self.gate_mlp(edge_embedding)                # [E, out_channels]
+        gate = self.gate_mlp(edge_embedding)                
         
         # Transform node features
-        message = self.node_transform(x_j)                  # [E, out_channels]
-        residual = self.residual_transform(x_i)             # [E, out_channels]
+        message = self.node_transform(x_j)                  
+        residual = self.residual_transform(x_i)           
         
         # Apply physics-informed gating
-        # High impedance or open switches → low gate values → restricted information flow
-        gated_message = message * gate                      # Element-wise multiplication
+        gated_message = message * gate                    
         
         # Residual connection preserving target node information
         return self.activation(gated_message + residual)
@@ -569,7 +477,7 @@ class AttentionSwitchHead(nn.Module):
         )
         
     def forward(self, x):
-        h = self.input_projection(x).unsqueeze(1)  # [batch, 1, hidden]
+        h = self.input_projection(x).unsqueeze(1)  
         attended, _ = self.attention(h, h, h)
         h = self.layer_norm(h + attended)
         return self.output(h.squeeze(1))
@@ -596,16 +504,13 @@ class GraphAttentionSwitchHead(nn.Module):
         )
         
     def forward(self, source_nodes, target_nodes, edge_features, **kwargs):
-        # Project to common dimension
         source_proj = self.node_proj(source_nodes)
         target_proj = self.node_proj(target_nodes)
         edge_proj = self.edge_proj(edge_features)
         
-        # Stack as sequence: [source, edge, target]
         sequence = torch.stack([source_proj, edge_proj, target_proj], dim=1)
         attended, _ = self.attention(sequence, sequence, sequence)
         
-        # Flatten and predict
         return self.output(attended.reshape(attended.size(0), -1))
 
 class NodeVoltageGCN(nn.Module):
@@ -635,8 +540,8 @@ class EdgeFlowMLP(nn.Module):
     
 class AdvancedMLP(nn.Module):
     """
-    Enhanced MLP with configurable GNN layers and sophisticated switch prediction heads.
-    Now supports both binary and multiclass output modes.
+    Enhanced MLP with configurable GNN layers and switch prediction heads.
+    Supports both binary and multiclass output modes.
     """
     
     def __init__(self, 
@@ -687,7 +592,7 @@ class AdvancedMLP(nn.Module):
         self.activation = get_activation(activation)
         self.dropout = nn.Dropout(dropout_rate)
     
-        # store physics flags / modules
+        # store physics flags
         self.use_gated_mp = use_gated_mp
         self.use_phyr = use_phyr          
         self.enforce_radiality = enforce_radiality  
@@ -720,7 +625,7 @@ class AdvancedMLP(nn.Module):
                 )
                 current_dim = gnn_hidden_dim
 
-            # the remaining (gnn_layers-1) vanilla layers
+            # the remaining (gnn_layers-1) 
             for _ in range(1, gnn_layers):
                 self.gnn_layers.append(
                     GNNLayer(current_dim, gnn_hidden_dim, gnn_type,
@@ -759,7 +664,7 @@ class AdvancedMLP(nn.Module):
             self.edge_output_dim = edge_input_dim
         
         # ====================================================================
-        # Switch Prediction Head - Modified for Output Type
+        # Switch Prediction Head 
         # ====================================================================
         combined_dim = self.node_output_dim * 2 + self.edge_output_dim
         if use_skip_connections:
@@ -785,7 +690,7 @@ class AdvancedMLP(nn.Module):
             self.switch_head = self._create_attention_head(
                 input_dim=combined_dim, 
                 num_heads=switch_attention_heads, 
-                hidden_dim=switch_head_hidden_dim,  # Use the new dimension
+                hidden_dim=switch_head_hidden_dim,  
                 activation=activation, 
                 dropout=dropout_rate, 
                 output_dim=switch_output_dim
@@ -793,7 +698,7 @@ class AdvancedMLP(nn.Module):
             self.voltage_head = self._create_attention_head(
                 input_dim=combined_dim, 
                 num_heads=switch_attention_heads, 
-                hidden_dim=switch_head_hidden_dim,  # Use the new dimension
+                hidden_dim=switch_head_hidden_dim,  
                 activation=activation, 
                 dropout=dropout_rate, 
                 output_dim=1
@@ -811,7 +716,7 @@ class AdvancedMLP(nn.Module):
         else:
             raise ValueError(f"Unknown switch head type: {switch_head_type}")
         
-        self.flow_head = EdgeFlowMLP(combined_dim)  # Use combined dim since we're passing combined_features
+        self.flow_head = EdgeFlowMLP(combined_dim)  
         self.voltage_head2 = NodeVoltageGCN(node_hidden_dims[-1] if use_node_mlp else self.node_features_dim)
 
     def _create_mlp_head(self, input_dim, layers, activation, dropout, use_bn, output_dim):
@@ -932,7 +837,6 @@ class AdvancedMLP(nn.Module):
         source_node_features = node_features[row]
         target_node_features = node_features[col]
         
-        # Always create combined features (needed for flow prediction too)
         combined_features = torch.cat([
             source_node_features, target_node_features, edge_features
         ], dim=1)
@@ -956,7 +860,7 @@ class AdvancedMLP(nn.Module):
             switch_logits = self.switch_head(combined_features)
             voltage_logits = self.voltage_head(combined_features)
 
-        # Squeeze voltage logits (always single output)
+        # Squeeze voltage logits 
         if voltage_logits.dim() > 1 and voltage_logits.size(-1) == 1:
             voltage_logits = voltage_logits.squeeze(-1)
 
@@ -1049,19 +953,3 @@ def count_parameters(model: nn.Module) -> Dict[str, int]:
         "trainable_parameters": trainable,
         "non_trainable_parameters": total - trainable
     }
-
-
-def initialize_weights(model: nn.Module, init_type: str = "xavier"):
-    """Initialize model weights."""
-    for module in model.modules():
-        if isinstance(module, nn.Linear):
-            if init_type == "xavier":
-                nn.init.xavier_uniform_(module.weight)
-            elif init_type == "kaiming":
-                nn.init.kaiming_uniform_(module.weight, nonlinearity='relu')
-            
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
-        elif isinstance(module, nn.BatchNorm1d):
-            nn.init.constant_(module.weight, 1)
-            nn.init.constant_(module.bias, 0)

@@ -35,78 +35,6 @@ def convert_value(val):
     return val
 
 
-# def main():
-#     parser = argparse.ArgumentParser(
-#         description="Generate a YAML config file from a specified trial in a CSV.")
-#     parser.add_argument("--csv", required=True,
-#                         help="Path to the input CSV file containing trial data.")
-#     parser.add_argument("--trial", type=int, required=True,
-#                         help="Trial number to extract configuration for.")
-#     parser.add_argument("--output", default=None,
-#                         help="Path to write the output YAML config. Defaults to ./config_trial_<trial>.yaml")
-#     args = parser.parse_args()
-
-#     # Load CSV
-#     if not os.path.exists(args.csv):
-#         print(f"Error: CSV file '{args.csv}' does not exist.", file=sys.stderr)
-#         sys.exit(1)
-#     df = pd.read_csv(args.csv, dtype=str)
-
-#     # Filter for the requested trial
-#     df_match = df[df["trial_number"].astype(int) == args.trial]
-#     if df_match.empty:
-#         print(f"Error: No entry found for trial number {args.trial}.", file=sys.stderr)
-#         sys.exit(1)
-#     if len(df_match) > 1:
-#         print(f"Warning: Multiple entries found for trial {args.trial}. Using the first.", file=sys.stderr)
-#     row = df_match.iloc[0].to_dict()
-
-#     # Define metric fields to exclude from config
-#     metric_fields = {
-#         "timestamp", "starting_val_loss", "starting_train_loss", "best_mcc",
-#         "best_train_loss", "best_val_loss", "best_f1_minority", "best_balanced_accuracy",
-#         "final_train_loss", "final_val_loss", "final_f1_minority", "final_mcc",
-#         "final_balanced_accuracy", "final_epoch", "converged", "status", "config_valid"
-#     }
-
-#     # Build flat config dict
-#     config = {}
-#     for key, value in row.items():
-#         if key in metric_fields:
-#             continue
-#         config[key] = convert_value(value)
-
-#     # Override description
-#     config['description'] = "GNN Models"
-
-#     # Group model-specific parameters under model_kwargs
-#     root_keys = {
-#         "trial_number", "job_name", "description", "dataset_names", "folder_names",
-#         "dataset_type", "batching_type", "max_nodes", "max_edges", "train_ratio",
-#         "seed", "num_workers", "learning_rate", "weight_decay", "batch_size",
-#         "epochs", "patience", "criterion_name", "wandb", "model_module",
-#         "wandb_project"
-#     }
-#     model_kwargs = {}
-#     for key in list(config.keys()):
-#         if key not in root_keys:
-#             model_kwargs[key] = config.pop(key)
-#     config['model_kwargs'] = model_kwargs
-
-#     # Determine output path
-#     out_path = args.output or f"config_trial_{args.trial}.yaml"
-
-#     # Write YAML
-#     with open(out_path, "w") as f:
-#         yaml.safe_dump(config, f, sort_keys=False)
-
-#     print(f"Configuration for trial {args.trial} written to {out_path}.")
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 def generate_config(csv_path: str, trial_num: int, out_path: str):
     """Core logic to generate a single YAML config from a trial in a CSV."""
     if not os.path.exists(csv_path):
@@ -191,11 +119,4 @@ def generate_batch_configs():
 
 
 if __name__ == "__main__":
-    # --- CHOOSE EXECUTION MODE ---
-
-    # To generate a SINGLE config, use Mode 1 and run with arguments from the command line.
-    # Example: python model_search/trail_to_config.py --csv data/hpos/hpo_GCN.../hpo_results.csv --trial 159 --output data/hpos/my_config.yaml
-    #generate_single_config_from_cli()
-
-    # To generate ALL 15 configs, comment out the line above and uncomment the line below.
     generate_batch_configs()

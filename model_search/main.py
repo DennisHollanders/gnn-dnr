@@ -176,7 +176,6 @@ def main():
         stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location="cpu")
         stage1_config = stage1_checkpoint.get("config", {})
         print(f"Stage 1 configs: {stage1_config} \n \n ==================================="   )
-        # print lambda values from both stages
         print(f"stage 1 lambda: {[stage1_config.get(k) for k in LAMBDAS]}")
         print(f"stage 2 lambda: {[stage2_config.get(k) for k in LAMBDAS]}")
         args = load_and_merge_checkpoints(stage1_config, stage2_config, stage2_seed)  
@@ -186,7 +185,6 @@ def main():
         args.seed =stage1_checkpoint["seed"]
 
     args.folder_names = ["data/split_datasets/train", "data/split_datasets/validation", "data/split_datasets/test"  ]
-    #args.folder_names = ["data/split_datasets-without-synthetic/train", "data/split_datasets-without-synthetic/validation", "data/split_datasets-without-synthetic/test"]
     import random
     seed = args.seed
     os.environ['PYTHONHASHSEED'] = str(seed)

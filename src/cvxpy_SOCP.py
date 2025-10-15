@@ -29,7 +29,7 @@ def build_misocp_problem(net, toggles, logger):
     S_base_MVA = 1.0
     S_base_VA = S_base_MVA * 1e6
     
-       # Manually calculate per-unit impedances to ensure they exist.
+    # calculate per-unit impedances to ensure they exist.
     line_with_pu = net.line.copy()
     bus_vn_kv = net.bus.vn_kv
     v_base_ln = (bus_vn_kv * 1e3) / math.sqrt(3)
@@ -38,15 +38,15 @@ def build_misocp_problem(net, toggles, logger):
     line_with_pu['r_pu'] = (line_with_pu['r_ohm_per_km'] * line_with_pu['length_km']) / line_z_base
     line_with_pu['x_pu'] = (line_with_pu['x_ohm_per_km'] * line_with_pu['length_km']) / line_z_base
     
-    # Map buses and lines to sequential 0-based indices for CVXPY variables
+    # Map buses and lines t
     bus_list = list(net.bus.index)
     bus_map = {b: i for i, b in enumerate(bus_list)}
     line_list = list(net.line.index)
     
-    N = len(bus_list)  # Number of buses
-    E = len(line_list)  # Number of lines
+    N = len(bus_list)  
+    E = len(line_list)  
         
-    # Extract line parameters using the bus_map for correct indexing
+    # Extract line parameters 
     from_bus_indices = np.array([bus_map[net.line.at[l, 'from_bus']] for l in line_list], dtype=int)
     to_bus_indices = np.array([bus_map[net.line.at[l, 'to_bus']] for l in line_list], dtype=int)
     
@@ -54,7 +54,6 @@ def build_misocp_problem(net, toggles, logger):
     r_pu = np.array(line_with_pu.loc[line_list, 'r_pu'])
     x_pu = np.array(line_with_pu.loc[line_list, 'x_pu'])
 
-    # Power injections (p.u.)
     p_inj = np.zeros(N)
     q_inj = np.zeros(N)
     S_base_MVA = 1.0
@@ -177,11 +176,6 @@ def build_misocp_problem(net, toggles, logger):
     if toggles.get("include_cone_constraint", True):
         for e_cvx_idx in range(E):
             u_idx = from_bus_indices[e_cvx_idx]
-            
-            # Rotated SOC constraint: ||[P, Q]||² ≤ V_i * I
-            # In CVXPY: cp.SOC(t, x) means ||x||_2 ≤ t
-            # We need: P² + Q² ≤ V_i * I
-            # Rewrite as: ||[2P, 2Q, V_i - I]||_2 ≤ V_i + I
             M = bigM_flow[e_cvx_idx]
             constraints.append(
                 cp.norm(cp.vstack([
@@ -267,17 +261,15 @@ def build_misocp_problem(net, toggles, logger):
             f_out = cp.sum([f_flow[a] for a in out_arcs]) if out_arcs else 0
             
             if i_cvx_idx == root_idx:
-                # Root sends flow equal to number of energized buses minus 1
                 constraints.append(f_out - f_in == cp.sum(z_bus) - 1)
             else:
-                # Each bus consumes flow if energized
                 constraints.append(f_in - f_out == z_bus[i_cvx_idx])
-        flow_dir = cp.Variable(E, boolean=True, name='flow_dir')  # one per undirected line
+        flow_dir = cp.Variable(E, boolean=True, name='flow_dir')  
 
         for a_idx, (u, v, e_idx) in enumerate(arcs):
-            if a_idx < E:   # these are the “forward” arcs
+            if a_idx < E:   
                 constraints.append(f_flow[a_idx] <= M_scf * flow_dir[e_idx])
-            else:           # these are the “reverse” arcs
+            else:
                 constraints.append(f_flow[a_idx] <= M_scf * (1 - flow_dir[e_idx]))
         
 
@@ -353,8 +345,8 @@ def build_convex_problem(net, toggles, logger):
     bus_map  = {b: i for i, b in enumerate(bus_list)}
     line_list = list(net.line.index)
 
-    N = len(bus_list)  # Number of buses
-    E = len(line_list)  # Number of lines
+    N = len(bus_list) 
+    E = len(line_list)  
 
     # Extract line parameters
     from_bus_indices = np.array([bus_map[net.line.at[l, 'from_bus']] for l in line_list], dtype=int)
@@ -471,9 +463,6 @@ def build_convex_problem(net, toggles, logger):
                 constraints.append(
                     v_sq[i_cvx_idx] >= v_lower**2 * z_bus[i_cvx_idx]
                 )
-
-                # added quadratc perspective:
-                #constraints.append(v_sq[i_cvx_idx] * (1 - z_bus[i_cvx_idx]) <= 1e-6)  
     
     # 4. Power flow bounds (Big-M formulation)
     for e_cvx_idx in range(E):
@@ -485,26 +474,13 @@ def build_convex_problem(net, toggles, logger):
             q_flow[e_cvx_idx] <= M * y_line[e_cvx_idx],
             q_flow[e_cvx_idx] >= -M * y_line[e_cvx_idx],
             I_sq[e_cvx_idx] <= M**2 * y_line[e_cvx_idx], 
-        
-            # added quadratic perspective
-    
-            # p_flow[e_cvx_idx] <= M * (y_line[e_cvx_idx] + epsilon),
-            # p_flow[e_cvx_idx] >= -M * (y_line[e_cvx_idx] + epsilon),
-            # q_flow[e_cvx_idx] <= M * (y_line[e_cvx_idx] + epsilon),
-            # q_flow[e_cvx_idx] >= -M * (y_line[e_cvx_idx] + epsilon),
-        
-            # cp.abs(p_flow[e_cvx_idx]) <= M * (y_line[e_cvx_idx] + 0.001)
         ])
     
     # 5. SOCP cone constraints: P² + Q² ≤ V_i * I
     if toggles.get("include_cone_constraint", True):
         for e_cvx_idx in range(E):
             u_idx = from_bus_indices[e_cvx_idx]
-            
-            # Rotated SOC constraint: ||[P, Q]||² ≤ V_i * I
-            # In CVXPY: cp.SOC(t, x) means ||x||_2 ≤ t
-            # We need: P² + Q² ≤ V_i * I
-            # Rewrite as: ||[2P, 2Q, V_i - I]||_2 ≤ V_i + I
+
             M = bigM_flow[e_cvx_idx]
             constraints.append(
                 cp.norm(cp.vstack([
@@ -513,26 +489,6 @@ def build_convex_problem(net, toggles, logger):
                     v_sq[u_idx] - I_sq[e_cvx_idx]
                 ]), 2) <= v_sq[u_idx] + I_sq[e_cvx_idx] + 2*M**2 * (1 - y_line[e_cvx_idx])
             )
-            # constraints.append(
-            #     cp.norm(cp.vstack([
-            #         2 * p_flow[e_cvx_idx], 
-            #         2 * q_flow[e_cvx_idx], 
-            #         v_sq[u_idx] * y_line[e_cvx_idx] - I_sq[e_cvx_idx]
-            #     ]), 2) <= v_sq[u_idx] * y_line[e_cvx_idx] + I_sq[e_cvx_idx]
-            # )
-
-            ## possibly add v*yprod:
-            # Add auxiliary variable for v*y product if needed
-            # vy_prod = cp.Variable(E, name='vy_product')
-            # for e in range(E):
-            #     u = from_bus_indices[e]
-            #     # McCormick envelope for vy_prod[e] = v_sq[u] * y_line[e]
-            #     constraints.extend([
-            #         vy_prod[e] >= v_lower**2 * y_line[e],
-            #         vy_prod[e] >= v_sq[u] + v_lower**2 * (y_line[e] - 1),
-            #         vy_prod[e] <= v_upper**2 * y_line[e],
-            #         vy_prod[e] <= v_sq[u] + v_upper**2 * (y_line[e] - 1)
-            #     ])
     
     # 6. Voltage drop constraints
     if toggles.get("include_voltage_drop_constraint", True):
@@ -551,14 +507,6 @@ def build_convex_problem(net, toggles, logger):
                 voltage_drop <= bigM_v * (1 - y_line[e_cvx_idx]),
                 voltage_drop >= -bigM_v * (1 - y_line[e_cvx_idx])
             ])
-
-            # # further imrpovement
-            # constraints.extend([
-            #     v_sq[v_idx] - v_sq[u_idx] <= bigM_v * (1 - y_line[e_cvx_idx]) + 
-            #                                 2 * (R_l * cp.abs(p_flow[e_cvx_idx]) + X_l * cp.abs(q_flow[e_cvx_idx])),
-            #     v_sq[v_idx] - v_sq[u_idx] >= -bigM_v * (1 - y_line[e_cvx_idx]) - 
-            #                                 2 * (R_l * cp.abs(p_flow[e_cvx_idx]) + X_l * cp.abs(q_flow[e_cvx_idx]))
-            # ])
     
     # 7. Line-bus linking constraints
     for e_cvx_idx in range(E):
@@ -619,10 +567,6 @@ def build_convex_problem(net, toggles, logger):
         print("Using SCF radiality constraints")
         # SCF capacity constraints
         M_scf = N - 1
-
-        # for a_idx in range(A):
-        #     constraints.append(f_flow[a_idx] <= M_scf * y_line[arc_e[a_idx]])
-        
         # SCF conservation
         root_idx = substation_cvx_indices[0] if substation_cvx_indices else 0
         
@@ -634,68 +578,16 @@ def build_convex_problem(net, toggles, logger):
             f_out = cp.sum([f_flow[a] for a in out_arcs]) if out_arcs else 0
             
             if i_cvx_idx == root_idx:
-                # Root sends flow equal to number of energized buses minus 1
                 constraints.append(f_out - f_in == cp.sum(z_bus) - 1)
             else:
-                # Each bus consumes flow if energized
                 constraints.append(f_in - f_out == z_bus[i_cvx_idx])
-
-        # for a_idx, (u, v, e_idx) in enumerate(arcs):
-        #     if a_idx < E:   # these are the “forward” arcs
-        #         constraints.append(f_flow[a_idx] <= M_scf * flow_dir[e_idx])
-        #     else:           # these are the “reverse” arcs
-        #         constraints.append(f_flow[a_idx] <= M_scf * (1 - flow_dir[e_idx]))
-        # Simple flow direction constraints
         for e_idx in range(E):
             forward_arc = e_idx
             reverse_arc = e_idx + E
             
-            # Only one direction can have flow
             constraints.append(f_flow[forward_arc] + f_flow[reverse_arc] <= M_scf * y_line[e_idx])
-        
-        # Spanning tree approximation
+
         constraints.append(cp.sum(y_line) == cp.sum(z_bus) - 1)
-
-        # # Spanning tree constraint
-        # constraints.append(cp.sum(y_line) == cp.sum(z_bus) - 1)
-
-
-        # 4. Strengthen spanning tree constraint
-        # Instead of just sum(y_line) == sum(z_bus) - 1
-        # constraints.append(cp.sum(y_line) >= 0.9 * (cp.sum(z_bus) - 1))
-        # constraints.append(cp.sum(y_line) <= 1.1 * (cp.sum(z_bus) - 1))
-
-        # 5. Add cycle-breaking constraints
-        # For each potential cycle, at least one line must be "mostly off"
-        #for cycle in find_fundamental_cycles(net):
-        #    constraints.append(cp.sum([1 - y_line[e] for e in cycle]) >= 0.5)
-
-
-    # 1. Minimum energization for connected components
-    # for component in find_connected_components(net):
-    #     component_buses = component['buses']
-    #     component_lines = component['lines']
-    #     constraints.append(
-    #         cp.sum([z_bus[b] for b in component_buses]) <= 
-    #         len(component_buses) * cp.max([y_line[e] for e in component_lines])
-    #     )
-
-    # # 2. Path constraints - if two buses are energized and connected by a path, 
-    # # at least one path must be mostly active
-    # for i, j in important_bus_pairs:
-    #     paths = find_paths(i, j)
-    #     path_active = cp.Variable(len(paths))
-    #     for p_idx, path in enumerate(paths):
-    #         constraints.append(path_active[p_idx] <= cp.min([y_line[e] for e in path]))
-    #     constraints.append(cp.sum(path_active) >= 0.8 * cp.minimum(z_bus[i], z_bus[j]))
-
-    # # 3. Radiality certificate - add auxiliary variables for tree edges
-    # is_tree_edge = cp.Variable(E, name='is_tree_edge')
-    # constraints.extend([
-    #     is_tree_edge <= y_line,
-    #     cp.sum(is_tree_edge) == cp.sum(z_bus) - 1
-    # ])
-
     # ==================================
     # Objective Function
     # ==================================

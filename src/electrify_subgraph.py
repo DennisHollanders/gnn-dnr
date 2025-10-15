@@ -831,13 +831,12 @@ def validate_and_fix_cable_parameters(cable_data: dict) -> dict:
     new_x = fixed_data['x_ohm_per_km']
     rx_ratio = new_r / new_x if new_x > 0 else float('inf')
     
-    # Typical power cables have R/X ratios between 0.1 and 5
-    if rx_ratio > 8:  # X too low relative to R
+    if rx_ratio > 8:  
         logger.warning(f"High R/X ratio: {rx_ratio:.2f}. Adjusting X upward.")
-        fixed_data['x_ohm_per_km'] = new_r / 3.0  # Target R/X = 3
-    elif rx_ratio < 0.1:  # R too low relative to X
+        fixed_data['x_ohm_per_km'] = new_r / 3.0  
+    elif rx_ratio < 0.1:  
         logger.warning(f"Low R/X ratio: {rx_ratio:.2f}. Adjusting R upward.")
-        fixed_data['r_ohm_per_km'] = new_x * 0.3  # Target R/X = 0.3
+        fixed_data['r_ohm_per_km'] = new_x * 0.3  
     
     # Validate current rating
     expected_current_range = (q_mm2 * 0.5, q_mm2 * 3.0)

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# model_search/hpo.slurm — submit GIN/GAT/GCN HPO with empty mst/mst_opt + .pt caches
 
 set -euo pipefail
 
@@ -10,9 +9,9 @@ mkdir -p "$LOGDIR"
 
 # 2) Helper to submit one study
 submit_hpo() {
-  CONFIG="$1"   # e.g. hpo-GIN.yaml
-  STUDY="$2"    # e.g. GIN
-  PART="$3"     # e.g. elec-ees-empso.cpu.q
+  CONFIG="$1"   
+  STUDY="$2"    
+  PART="$3"    
   CHECKPOINT="$4"
 
   echo "→ Submitting HPO ${STUDY} → ${PART}"

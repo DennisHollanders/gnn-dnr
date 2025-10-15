@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def build_cvx_layer(max_n: int, max_e: int):
     """Build DPP-compliant CVX layer using affine constraints only"""
-    # Full-size variables (using padded dimensions)
+    # Full-size variables 
     v_sq         = cp.Variable(max_n, nonneg=True)
     p_flow       = cp.Variable(max_e)
     q_flow       = cp.Variable(max_e)
@@ -28,7 +28,7 @@ def build_cvx_layer(max_n: int, max_e: int):
     f            = cp.Variable(max_e, nonneg=True)
     s            = cp.Variable(nonneg=True)
 
-    # Warm start parameters (padded size)
+    # Warm start parameters
     y_warm       = cp.Parameter(max_e, nonneg=True)
     v_warm       = cp.Parameter(max_n, nonneg=True)
     
@@ -47,11 +47,11 @@ def build_cvx_layer(max_n: int, max_e: int):
     bigM_flow_sq_full = cp.Parameter(max_e, nonneg=True)
     z_line_sq_full = cp.Parameter(max_e, nonneg=True)
     
-    # DPP-compliant masking using selection matrices (diagonal matrices)
+    # DPP-compliant using selection matrices 
     S_nodes      = cp.Parameter((max_n, max_n), nonneg=True)  # Diagonal selection matrix for nodes
     S_edges      = cp.Parameter((max_e, max_e), nonneg=True)  # Diagonal selection matrix for edges
     
-    # Target values for inactive elements (DPP-compliant)
+    # Target values for inactive elements 
     v_target     = cp.Parameter(max_n, nonneg=True)  # Target voltages (1.0 for inactive, 0.0 for active)
     z_target     = cp.Parameter(max_n, nonneg=True)  # Target z_bus (0.0 for all)
     y_target     = cp.Parameter(max_e, nonneg=True)  # Target y_line (0.0 for all)
@@ -160,7 +160,7 @@ def build_cvx_layer(max_n: int, max_e: int):
             bigM_flow_full, bigM_v, A_from_full, A_to_full, sub_mask_full, non_sub_mask_full,
             bigM_flow_sq_full, z_line_sq_full, S_nodes, S_edges,
             v_target, z_target, y_target, flow_target, I_target,
-            lambda_penalty  # <-- Add here
+            lambda_penalty 
         ],
         variables=[y_line, v_sq]
     )

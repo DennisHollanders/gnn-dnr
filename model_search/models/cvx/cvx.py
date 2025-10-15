@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def build_cvx_layer(max_n: int, max_e: int):
     """Build DPP-compliant CVX layer using affine constraints only"""
-    # Full-size variables (using padded dimensions)
+    # Full-size variables
     v_sq         = cp.Variable(max_n, nonneg=True)
     p_flow       = cp.Variable(max_e)
     q_flow       = cp.Variable(max_e)
@@ -28,7 +28,7 @@ def build_cvx_layer(max_n: int, max_e: int):
     f            = cp.Variable(max_e, nonneg=True)
     s            = cp.Variable(nonneg=True)
 
-    # Warm start parameters (padded size)
+    # Warm start parameters 
     y_warm       = cp.Parameter(max_e, nonneg=True)
     v_warm       = cp.Parameter(max_n, nonneg=True)
     
@@ -47,11 +47,11 @@ def build_cvx_layer(max_n: int, max_e: int):
     bigM_flow_sq_full = cp.Parameter(max_e, nonneg=True)
     z_line_sq_full = cp.Parameter(max_e, nonneg=True)
     
-    # DPP-compliant masking using selection matrices (diagonal matrices)
-    S_nodes      = cp.Parameter((max_n, max_n), nonneg=True)  # Diagonal selection matrix for nodes
-    S_edges      = cp.Parameter((max_e, max_e), nonneg=True)  # Diagonal selection matrix for edges
+    # DPP-compliant masking using selection matrices 
+    S_nodes      = cp.Parameter((max_n, max_n), nonneg=True)  
+    S_edges      = cp.Parameter((max_e, max_e), nonneg=True)  
     
-    # Target values for inactive elements (DPP-compliant)
+    # Target values for inactive elements
     v_target     = cp.Parameter(max_n, nonneg=True)  # Target voltages (1.0 for inactive, 0.0 for active)
     z_target     = cp.Parameter(max_n, nonneg=True)  # Target z_bus (0.0 for all)
     y_target     = cp.Parameter(max_e, nonneg=True)  # Target y_line (0.0 for all)
@@ -68,15 +68,13 @@ def build_cvx_layer(max_n: int, max_e: int):
     cons += [z_bus >= 0, z_bus <= 1]
     cons += [v_sq >= v_low_sq*0.8, v_sq <= v_high_sq*1.2]
     
-    # DPP-compliant masking using affine constraints
+    # DPP-compliant using affine constraints
     cons += [v_sq == S_nodes @ v_sq + v_target]
     cons += [z_bus == S_nodes @ z_bus + z_target]
     cons += [y_line == S_edges @ y_line + y_target]
     cons += [p_flow == S_edges @ p_flow + flow_target]
     cons += [q_flow == S_edges @ q_flow + flow_target]
     cons += [I_sq == S_edges @ I_sq + I_target]
-    
-
 
     # Substation constraints
     cons += [cp.multiply(sub_mask_full, v_sq) == sub_mask_full]
@@ -141,7 +139,6 @@ def build_cvx_layer(max_n: int, max_e: int):
 
     penalty = -cp.sum(y_line - cp.square(y_line)) 
     loss += lambda_penalty * penalty
-
     cons += [cp.sum(y_line) == cp.sum(z_bus) - 1]
 
 
@@ -160,7 +157,7 @@ def build_cvx_layer(max_n: int, max_e: int):
             bigM_flow_full, bigM_v, A_from_full, A_to_full, sub_mask_full, non_sub_mask_full,
             bigM_flow_sq_full, z_line_sq_full, S_nodes, S_edges,
             v_target, z_target, y_target, flow_target, I_target,
-            lambda_penalty  # <-- Add here
+            lambda_penalty 
         ],
         variables=[y_line, v_sq],
     )
@@ -244,12 +241,12 @@ class cvx(nn.Module):
             pad_e = n_e_padded - n_e_actual
             pad_n = n_n_padded - n_n_actual
             
-            # Apply sigmoid to get valid probabilities in [0, 1]
+            # Apply sigmoid to get  probabilities in [0, 1]
             sw_probs = torch.sigmoid(sw_i)
             sw_full = torch.cat([sw_probs, torch.zeros(pad_e, device=sw_probs.device)], dim=0)\
                         .clone().requires_grad_()
             
-            # Ensure voltages are in reasonable range
+            # attempt with clamp volt
             vw_clamped = torch.clamp(vw_i, 0.95, 1.05)
             vw_full = torch.cat([vw_clamped, torch.ones(pad_n, device=vw_i.device)],
                                 dim=0).clone().requires_grad_()
@@ -285,7 +282,7 @@ class cvx(nn.Module):
         def _solve(args):
             try:
                 y_opt, v_sq_opt = self.cvx_layer(*args)
-                return y_opt, v_sq_opt, True  # Success flag
+                return y_opt, v_sq_opt, True  
             except Exception as e:
                 y_fallback = args[0]  
                 v_fallback_sq = args[1] ** 2  

@@ -51,7 +51,8 @@
 /models/
 /model_search/models/MLP/config_files/*.yaml
 /model_search/models/cvx/config_files/*.yaml
-
+/model_search/trial_to_config.py
+/model_search/models/cvx_copy.py
 # ignore all PyTorch checkpoints
 *.pt
 /GNN_reconfiguration/
@@ -71,3 +72,5 @@ model.*
 !model_search/config_files/*.yaml
 __pycache__/
 *.pyc
+*.pptx
+*.pptm

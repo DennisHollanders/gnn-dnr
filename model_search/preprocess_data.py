@@ -6,28 +6,22 @@ import numpy  as np
 
 def calculate_conductance_matrix(graph):
     num_nodes = graph.number_of_nodes()
-    
-    # Initialize sparse matrix indices and values
     indices = []
     values = []
     
     # Add entries for each edge
     for u, v, data in graph.edges(data=True):
-        # Get resistance (R) from edge attributes, default to 0.01 if not available
         r_value = data.get('R', 0.01)
         if r_value <= 0:
-            r_value = 1e-6  # Avoid division by zero
-        
-        # Conductance is 1/R
+            r_value = 1e-6 
         conductance = 1.0 / r_value
         
-        # Add entries for both directions (symmetric matrix)
         indices.append([u, v])
         indices.append([v, u])
         values.extend([conductance, conductance])
         
     
-    if not indices:  # If no edges were processed
+    if not indices: 
         return torch.sparse_coo_tensor(
             torch.zeros((2, 0), dtype=torch.long),
             torch.zeros(0, dtype=torch.float),
@@ -77,7 +71,6 @@ def calculate_laplacian_matrix(graph):
     adj_sparse = torch.sparse_coo_tensor(adj_indices, adj_values, (n, n))
     
     # Laplacian = D - A
-    # For sparse tensors, we negate the values of adj_sparse
     neg_adj_values = -adj_values
     neg_adj_sparse = torch.sparse_coo_tensor(adj_indices, neg_adj_values, (n, n))
     
@@ -96,26 +89,23 @@ def calculate_admittance_matrix(graph):
     
     # Add entries for each edge
     for u, v, data in graph.edges(data=True):
-        # Get resistance (R) and reactance (X) from edge attributes
         r_value = data.get('R', 0.01)
         x_value = data.get('X', 0.01)
         
-        # Calculate admittance (inverse of impedance)
+        # Calculate admittance 
         z = complex(r_value, x_value)
         if abs(z) <= 1e-10:
-            z = complex(1e-6, 1e-6)  # Avoid division by zero
+            z = complex(1e-6, 1e-6)  
         
         y = 1.0 / z
         
-        # Add entries for both directions (symmetric matrix)
         # Store real and imaginary parts separately
         indices.append([u, v])
         indices.append([v, u])
-        values.extend([y.real, y.real])  # Only storing real part for now
+        values.extend([y.real, y.real])  
         
-        # We'll handle diagonal entries separately
     
-    if not indices:  # If no edges were processed
+    if not indices: 
         return torch.sparse_coo_tensor(
             torch.zeros((2, 0), dtype=torch.long),
             torch.zeros(0, dtype=torch.float),
@@ -131,7 +121,7 @@ def calculate_admittance_matrix(graph):
         indices_tensor, values_tensor, (num_nodes, num_nodes)
     )
     
-    # Calculate diagonal entries (negative sum of off-diagonal entries in each row)
+    # Calculate diagonal entries
     diagonal_values = []
     diagonal_indices = []
     
@@ -174,12 +164,11 @@ def calculate_switch_matrix(nx_graph):
     for u, v, data in nx_graph.edges(data=True):
         switch_state = data.get('switch_state', 0)
         
-        # Only add edges that are switches (switch_state > 0)
+        # Only add edges that are switches 
         if switch_state > 0:
-            # Add entries for both directions (symmetric matrix)
             indices.append([u, v])
             indices.append([v, u])
-            values.extend([1.0, 1.0])  # 1.0 indicates a switch exists
+            values.extend([1.0, 1.0])  
     
     if not indices:  # If no switches were found
         return torch.sparse_coo_tensor(
@@ -247,12 +236,10 @@ def cxv_features(pp_net, pf_range=(0.85, 0.95), seed=None):
     # line data
     line_df = pp_net.line
     E = len(line_df)
-
-    # ——— fill missing q_mvar in loads and gens ———
+    
     for tbl in ('load', 'gen'):
         df = getattr(pp_net, tbl)
         if 'q_mvar' not in df.columns or df['q_mvar'].isnull().all():
-            # compute q = p_mw * tan(arccos(pf)), pf drawn per-row
             pf = rng.uniform(pf_range[0], pf_range[1], size=len(df))
             df['q_mvar'] = df['p_mw'].to_numpy() * np.tan(np.arccos(pf))
             setattr(pp_net, tbl, df)
@@ -261,7 +248,7 @@ def cxv_features(pp_net, pf_range=(0.85, 0.95), seed=None):
     from_idx = torch.from_numpy(line_df.from_bus.map(id2row).to_numpy(dtype=np.int64))
     to_idx   = torch.from_numpy(line_df.to_bus  .map(id2row).to_numpy(dtype=np.int64))
 
-    # line impedances (pu)
+    # line impedances 
     r_pu = torch.from_numpy((line_df.r_ohm_per_km  * line_df.length_km).to_numpy(dtype=np.float32))
     x_pu = torch.from_numpy((line_df.x_ohm_per_km  * line_df.length_km).to_numpy(dtype=np.float32))
 

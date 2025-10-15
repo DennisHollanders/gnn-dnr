@@ -135,8 +135,6 @@ def get_candidate_networks(bus_range=(25,50), require_switches=True, max_workers
     return candidate_networks
 
 def apply_random_load_variations(net, load_variation_range=(0.5, 1.51)):
-    """Apply random load variations to a network"""
-
     net_case = copy.deepcopy(net)
 
     for idx in net_case.load.index:

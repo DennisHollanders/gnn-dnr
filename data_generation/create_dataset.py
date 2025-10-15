@@ -29,7 +29,6 @@ def load_static_data(data_dir):
     paths = data_paths(data_dir)
     cbs = gpd.read_file(paths['cbs'])
     buurt = pd.read_csv(paths['buurt'])
-    #cons = pd.read_csv(paths['cons'])
     std  = pd.read_csv(paths['std'])
     return cbs, buurt, None, std
 
@@ -48,7 +47,6 @@ def parse_arguments():
     # Subgraph options
     parser.add_argument('--subgraph_folder', type=str, 
     #default='filtered_complete_subgraphs_final.pkl',
-    
     #default = r"/vast.mnt/home/20174047/gnn-dnr/data/cbs_buurts_nodes/",
     default=r"data/cbs_buurts_small/",
                         help='Filename for subgraphs input ')

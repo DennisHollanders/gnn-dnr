@@ -29,9 +29,9 @@ def approximate_connectivity_loss(switch_probs, edge_index, num_nodes, device):
 def enhanced_physics_loss(output, data, device, lambda_phy=0.1, 
                          lambda_connectivity=0.05, lambda_radiality=0.05,
                          normalization_type="paper_based"):
-    """Enhanced physics loss with paper-based normalization."""
+    """Enhanced physics loss """
     # Get base physics loss
-    base_phy_loss = physics_loss(output, data, device, "none")  # Use raw physics loss
+    base_phy_loss = physics_loss(output, data, device, "none")  
     
     # Get switch probabilities
     switch_probs = output.get("switch_predictions")
@@ -67,7 +67,6 @@ def enhanced_physics_loss(output, data, device, lambda_phy=0.1,
         if enhanced_physics_loss.norm_constants['radiality'] is None:
             enhanced_physics_loss.norm_constants['radiality'] = rad_loss.detach().item() + 1e-8
         
-        # Apply paper-based normalization: L_component / L_component^0
         normalized_phy_loss = base_phy_loss / enhanced_physics_loss.norm_constants['physics']
         normalized_conn_loss = conn_loss / enhanced_physics_loss.norm_constants['connectivity'] 
         normalized_rad_loss = rad_loss / enhanced_physics_loss.norm_constants['radiality']
@@ -224,7 +223,6 @@ def apply_loss_scaling(switch_loss, physics_loss, lambda_phy, lambda_conn, lambd
     elif strategy == "adaptive_ratio":
         target_ratio = lambda_phy  
         if switch_loss.item() > 1e-8:  
-            # Use .detach() to prevent gradient flow issues
             adaptive_weight = target_ratio * switch_loss.detach() / (physics_loss.detach() + 1e-8)
             return adaptive_weight * physics_loss
         else:
@@ -232,7 +230,6 @@ def apply_loss_scaling(switch_loss, physics_loss, lambda_phy, lambda_conn, lambd
     
     elif strategy == "adaptive_magnitude":
         if physics_loss.item() > 1e-8 and switch_loss.item() > 1e-8:
-            # Use .detach() to prevent gradient flow issues
             magnitude_ratio = switch_loss.detach() / physics_loss.detach()
             smooth_ratio = torch.clamp(magnitude_ratio, 0.1, 10.0)
             return lambda_phy * smooth_ratio * physics_loss
@@ -269,7 +266,6 @@ def get_loss_statistics(switch_loss, physics_loss):
 
 def _fix_prediction_shape(predicted_scores, target_switches):
     """Fix shape mismatches between predictions and targets."""
-    # Add contiguous() calls to fix stride issues
     if predicted_scores.dim() == 2 and predicted_scores.size(0) == 1:
         predicted_scores = predicted_scores.squeeze(0).contiguous()
         logger.debug(f"Squeezed batch dimension: new shape {predicted_scores.shape}")
@@ -329,10 +325,7 @@ def train(model, train_loader, optimizer, criterion, device, writer=None,global_
                     if param.grad is not None:
                         writer.add_histogram(f"{name}.grad", param.grad.cpu(), global_step)
                 writer.add_scalar("Loss/train", loss.item(), global_step)
-            #logger.info(f"Post‐backward y_opt.grad norm: {y_opt.grad.norm().item():.6f}")
-            #logger.info(f"Post‐backward v_sq_opt.grad norm: {v_sq_opt.grad.norm().item():.6f}")
 
-            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             running_loss += loss.item()
@@ -420,7 +413,6 @@ def calculate_topology_error_hamming(y_true, y_pred):
 def compute_switch_metrics(scores: torch.Tensor, targets: torch.Tensor, 
                           threshold: float = 0.5, eps: float = 1e-8) -> dict:
     """Compute classification metrics for switch predictions."""
-    # Fix shape mismatches
     if scores.ndim == targets.ndim + 1 and scores.size(-1) == 1:
         scores = scores.squeeze(-1)
 
@@ -553,7 +545,6 @@ def physics_loss(output, data, device, normalization_type="adaptive"):
     
     phy_loss = kcl_loss_P + kcl_loss_Q
 
-    # Optional: supervised flow loss if ground truth available
     if hasattr(data, "edge_flow_gt"):
         flow_gt = data.edge_flow_gt.to(device)
         if normalization_type == "injection_scale":

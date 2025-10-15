@@ -72,11 +72,9 @@ def convert_hpo_config_to_model_kwargs(args):
     Convert HPO-style config (all params at top level) to main.py style (model_kwargs).
     This handles configs from HPO that don't have model_kwargs structure.
     """
-    # If model_kwargs already exists, just ensure required fields are there
     if hasattr(args, 'model_kwargs') and args.model_kwargs:
         return args
-    
-    # Parameters that should be in model_kwargs for the model
+
     model_param_keys = [
         'output_type', 'num_classes', 'gnn_type', 'gnn_layers', 'gnn_hidden_dim',
         'gat_heads', 'gat_dropout', 'gin_eps', 'gin_hidden_dim', 'gin_layers',

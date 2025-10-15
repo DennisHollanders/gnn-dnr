@@ -25,7 +25,7 @@ def setup_logging(
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
-    root.handlers.clear()  # Crucial: remove default handlers
+    root.handlers.clear()  
 
     fmt_file = logging.Formatter(
         "%(asctime)s  %(processName)s  %(levelname)-8s  "
@@ -36,21 +36,21 @@ def setup_logging(
         "%(asctime)s  %(levelname)-7s  %(message)s", "%H:%M:%S"
     )
 
-    log_queue = multiprocessing.Queue(-1)  # Create a queue for logging
-    queue_handler = QueueHandler(log_queue)  # Handler for queue
+    log_queue = multiprocessing.Queue(-1) 
+    queue_handler = QueueHandler(log_queue) 
     queue_handler.setLevel(logging.DEBUG)
-    root.addHandler(queue_handler)  # Add to root logger
+    root.addHandler(queue_handler)  
 
-    file_handler = logging.FileHandler(logfile, mode="a", encoding="utf-8") # Handler for file
+    file_handler = logging.FileHandler(logfile, mode="a", encoding="utf-8")
     file_handler.setLevel(level_file)
     file_handler.setFormatter(fmt_file)
 
-    console_handler = logging.StreamHandler() # Handler for console
+    console_handler = logging.StreamHandler() 
     console_handler.setLevel(level_console)
     console_handler.setFormatter(fmt_cons)
 
-    # Listener for queue; file handler is attached here
-    queue_listener = QueueListener(log_queue, file_handler, console_handler)  # file_handler becomes its handler
+    # Listener for queue
+    queue_listener = QueueListener(log_queue, file_handler, console_handler)  
     queue_listener.daemon = True
     queue_listener.start()
     root._onefile_configured = True

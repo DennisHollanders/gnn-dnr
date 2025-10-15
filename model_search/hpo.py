@@ -78,7 +78,7 @@ class HPO:
     
     def __init__(self, config_path: str, study_name: str, startup_trials: int = 25,
                  pruner_startup: int = 15, pruner_warmup: int = 15, n_parallel: int = None,
-                 trial_timeout: int = 3600, stage1_checkpoint: str=None):  # Add trial timeout parameter (default 1 hour)
+                 trial_timeout: int = 3600, stage1_checkpoint: str=None):  
         self.n_startup_trials = startup_trials
         self.pruner_startup = pruner_startup
         self.pruner_warmup = pruner_warmup
@@ -93,7 +93,7 @@ class HPO:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if self.device.type == 'cpu':
             torch.set_num_threads(1)
-        torch.set_num_threads(1)  # Prevent thread oversubscription
+        torch.set_num_threads(1)  
         
         if n_parallel is None:
             n_cpus = mp.cpu_count()
@@ -140,7 +140,6 @@ class HPO:
     
     def _init_csv_tracking(self):
         """Initialize CSV file for tracking all trial results"""
-        # Create CSV with headers for hyperparameters + metrics
         self.csv_file.touch()
         
     def _log_trial_to_csv_callback(self, study: optuna.Study, trial: optuna.trial.FrozenTrial):
@@ -153,10 +152,9 @@ class HPO:
             'datetime_complete': trial.datetime_complete,
         }
 
-        # Explicitly update with all suggested parameters
+ 
         row_data.update(trial.params)
 
-        # Add user-set metrics if they exist
         if "metrics" in trial.user_attrs:
             row_data.update(trial.user_attrs["metrics"])
 
@@ -249,11 +247,8 @@ class HPO:
         mlp_prefixes = ('node_hidden_dim_', 'edge_hidden_dim_')
         
         for param, spec in self.search_space.items():
-            # Skip already handled params and MLP dims (handled separately below)
             if param in handled_params or param.startswith(mlp_prefixes):
                 continue
-            
-            # Skip if already in config (e.g., from fixed_params or stage1)
             if param in config:
                 continue
 
@@ -300,7 +295,6 @@ class HPO:
         if edge_mlp_in_search:
             config['edge_hidden_dims'] = suggest_mlp_layers(trial, 'edge_hidden')
         elif 'edge_hidden_dims' not in config:
-            # If not in search space and not in config, use default
             config['edge_hidden_dims'] = []
 
         # Apply final constraints and return
@@ -309,8 +303,6 @@ class HPO:
 
     def _apply_constraints(self, trial: optuna.Trial, config: dict) -> dict:
         """Apply comprehensive feasibility constraints with standardized null values"""
-        
-
         
         # Constraint 2: hidden_dim % gat_heads == 0 (if hidden_dim exists)
         if config.get('gnn_type') == 'GAT' and 'hidden_dim' in config:
@@ -357,11 +349,11 @@ class HPO:
         
         # Constraint 7: Node MLP dims only if using node MLP
         if not config.get('use_node_mlp', True):
-            config['node_hidden_dims'] = []  # Empty list instead of removing
+            config['node_hidden_dims'] = [] 
             
         # Constraint 8: Edge MLP dims only if using edge MLP  
         if not config.get('use_edge_mlp', True):
-            config['edge_hidden_dims'] = []  # Empty list instead of removing
+            config['edge_hidden_dims'] = []  
         
         # Constraint 9: Ensure at least one MLP is used
         if not config.get('use_node_mlp') and not config.get('use_edge_mlp'):
@@ -376,7 +368,7 @@ class HPO:
         
         # Constraint 11: PhyR parameters only if using PhyR
         if not config.get('use_phyr', False):
-            config['phyr_k_ratio'] = 0.0  # Default value instead of removing
+            config['phyr_k_ratio'] = 0.0 
         
         # Constraint 12: Match criterion to output type
         output_type = config.get('output_type', 'multiclass')
@@ -438,7 +430,6 @@ class HPO:
         # GAT params: only invalid if non‐GAT backbone AND non‐zero GAT settings
         if config.get('gnn_type') != 'GAT':
             gat_params = ['gat_heads', 'gat_dropout', 'gat_v2', 'gat_edge_dim']
-            # if any of these is not the default zero/False, it's truly invalid
             if any(config.get(p) not in (0, 0.0, False, None) for p in gat_params):
                 logger.warning("Invalid config: non‐zero GAT parameters with non‐GAT backbone")
                 logger.warning(f"config with problem: {config}")
@@ -564,11 +555,7 @@ class HPO:
                 'gnn_hidden_dim': model_kwargs.get('gnn_hidden_dim'),
             }
             logger.info(f"Trial {trial.number} - Architecture comparison:")
-            # logger.info(f"  Stage 1 node hidden dims: {checkpoint['config'].get('node_hidden_dims', [])}")
-            # logger.info(f"  Stage 1 gnn layers: {checkpoint['config'].get('gnn_layers', 0)}")
-            # logger.info(f"  Stage 1 edge hidden dims: {checkpoint['config'].get('edge_hidden_dims', [])}")
             logger.info(f"  Current: {current_arch}")
-            # logger.info(f"  Stage 1 config: {checkpoint['config']}")
             if self.stage1_checkpoint:
                 config.update(arch)
         else:
@@ -614,11 +601,6 @@ class HPO:
 
             train_loss, train_dict = train(model, train_loader, optimizer, criterion, device, **lambda_dict)
             val_loss, val_dict = test(model, val_loader, criterion, device, **lambda_dict)
-
-            # logger.info(f"Epoch {epoch+1}/{max_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-            # if epoch % 5 == 0:
-            #     logger.info(f"Epoch {epoch+1}/{max_epochs}, Train dict:{train_dict}, \n \n Val dict: {val_dict}")
-
             current_mcc = val_dict.get('test_mcc', -1.0)
 
             # If the current model is the best one so far in this trial, save its state
@@ -893,9 +875,6 @@ class HPO:
 
 
 def main():
-    # Set proper multiprocessing start method for cluster
-    #mp.set_start_method('fork', force=True)
-    
     parser = argparse.ArgumentParser(description="Simplified HPO")
     parser.add_argument("--config", type=str, required=True, help="Config YAML path")
     parser.add_argument("--study_name", type=str, default="hpo", help="Study name")
@@ -911,7 +890,5 @@ def main():
     hpo = HPO(config_path, args.study_name, n_parallel=args.n_parallel, 
               trial_timeout=args.trial_timeout, stage1_checkpoint=args.stage1_checkpoint)
     hpo.run_async_optimization(args.trials, args.wandb)
-
-
 if __name__ == "__main__":
     main()

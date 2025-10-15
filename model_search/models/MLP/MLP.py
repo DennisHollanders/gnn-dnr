@@ -24,9 +24,6 @@ def get_activation(name):
         raise ValueError(f"Unknown activation function: {name}")
 
 
-# --- Debugged and Improved MLP using node and edge features ---
-# This MLP is designed to predict edge-level outputs (like switch states).
-# It processes node features and edge features separately and then combines them.
 class MLP(nn.Module):
     def __init__(self, **kwargs):
 
@@ -42,19 +39,15 @@ class MLP(nn.Module):
         for out_dim in kwargs["hidden_dims"]:
             self.node_mlp_layers.append(nn.Linear(in_dim_node, out_dim))
             in_dim_node = out_dim
-        self.node_mlp_out_dim = in_dim_node # Store the output dimension of node MLP
+        self.node_mlp_out_dim = in_dim_node 
 
         # MLP for processing edge features
         self.edge_mlp_layers = nn.ModuleList()
         in_dim_edge = kwargs["edge_input_dim"]
-        for out_dim in kwargs["hidden_dims"]: # Can use different hidden_dims for edge_mlp if needed
+        for out_dim in kwargs["hidden_dims"]: 
             self.edge_mlp_layers.append(nn.Linear(in_dim_edge, out_dim))
             in_dim_edge = out_dim
-        self.edge_mlp_out_dim = in_dim_edge # Store the output dimension of edge MLP
-
-        # Final prediction layer combining processed node and edge features
-        # We will concatenate the processed features of the two nodes connected by an edge
-        # with the processed edge features.
+        self.edge_mlp_out_dim = in_dim_edge 
         combined_dim = self.node_mlp_out_dim * 2 + self.edge_mlp_out_dim
         self.prediction_layer = nn.Linear(combined_dim, 1)
         
@@ -67,7 +60,7 @@ class MLP(nn.Module):
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
 
         # Process node features
-        node_features = x.float() # Ensure float type
+        node_features = x.float()
         node_features = x.float() 
         for layer in self.node_mlp_layers:
             node_features = layer(node_features)
