@@ -18,8 +18,8 @@ This repository contains the full pipeline to devevelop graph neural networks to
 ### Purpose
 - Generate a folder with pandapower networks that serve as input to the optimization
 - The data can be generated in two ways:
-- 1. Synthetic generation based on dutch cable locations
-- 2. Sample datasets from pandapower/simbench libraries
+ 1. Synthetic generation based on dutch cable locations
+ 2. Sample datasets from pandapower/simbench libraries
 - After this the generate_ground_truth file can be used to apply an MISOCP optimization on the generated data which serves as ground truth for the supervised GNN methods.
 
 ### Key sections 
@@ -70,12 +70,12 @@ poetry run python data_generation/define_ground_truth --folder_path  <your-root>
 - model_search/hpo.py
 
 - models:
-- model_search/models/AdvcanedMLP (GNNs)
-- model_search/models/cvx
+    1. model_search/models/AdvcanedMLP (GNNs)
+    2. model_search/models/cvx
 
 - config files:
-- model_search/config-mlp-GCN.yaml
-- model_search/config_files/config-cvx.yaml
+    1. model_search/config-mlp-GCN.yaml
+    2. model_search/config_files/config-cvx.yaml
 
 ### Example
 for these examples first adapt the config files, which are stored in model_search/config_files, to reference to the generated dataset paths.
