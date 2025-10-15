@@ -104,6 +104,8 @@ poetry run python model_search/main.py --config config-cvx.yaml
 poetry run python model_search/predict_then_optimize.py --folder_path <insert folder_path> --model_path <insert trained model path> --mode soft
 ```
 --- 
+
 *Note:* 
 For cluster runs there is a simplified pair of main2 / load_data2, which was a quick fix to resolve some dependency issues on the cluster.
+
 --- 
