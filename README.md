@@ -1,5 +1,5 @@
 ## Overview
-This repository contains the full pipeline to devevelop graph neural networks to solve distribution network reconfiguration. This repo can in general be subdivided into two components
+This repository contains the full pipeline to develop graph neural networks to solve distribution network reconfiguration. This repo can in general be subdivided into two components
 
 0. *link to paper*
 1. *Data Generation*
@@ -7,7 +7,7 @@ This repository contains the full pipeline to devevelop graph neural networks to
 
 ---
 
-##  Link to paper
+## 0. Link to paper
 [Graph Neural Networks for Distribution Network Reconfiguration Optimization - Dennis Hollanders](https://research.tue.nl/nl/studentTheses/graph-neural-networks-for-distribution-network-reconfiguration-op) 
 
 ---
@@ -38,7 +38,7 @@ Below a snippet of code is provided to illustrate how to generate a dataset thro
 ```ruby
 git clone https://github.com/DennisHollanders/gnn-dnr/
 cd gnn-dnr
-poetry init 
+poetry install 
 ```
 
 *Step 2. Create Dataset* 
@@ -77,6 +77,7 @@ poetry run python data_generation/define_ground_truth --folder_path  <your-root>
     1. model_search/config-mlp-GCN.yaml
     2. model_search/config_files/config-cvx.yaml
 
+
 ### Example
 for these examples first adapt the config files, which are stored in model_search/config_files, to reference to the generated dataset paths.
 
@@ -102,4 +103,7 @@ poetry run python model_search/main.py --config config-cvx.yaml
 ```
 poetry run python model_search/predict_then_optimize.py --folder_path <insert folder_path> --model_path <insert trained model path> --mode soft
 ```
+
+*Note: 
+For cluster runs there is a simplified pair of main2 / load_data2, which was a quick fix to resolve some dependency issues on the cluster.
 --- 
