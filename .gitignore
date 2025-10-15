@@ -12,7 +12,7 @@
 !/src/loss_functions.py
 
 /data_generation/*
-/data_generation/old/*
+/data_generation/old_copy
 !/data_generation/define_ground_truth.py
 !/data_generation/create_dataset.py
 !/data_generation/*.slurm
